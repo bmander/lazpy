@@ -1,24 +1,29 @@
-from os import system
 import struct
 
 # LAS file specification
 # 1.2: https://www.asprs.org/a/society/committees/standards/asprs_las_format_v12.pdf
 # 1.4: https://www.asprs.org/wp-content/uploads/2010/12/LAS_1_4_r13.pdf
 
+
 def unsigned_int(bytes):
     return int.from_bytes(bytes, byteorder='little', signed=False)
+
 
 def u32_array(bytes):
     return [unsigned_int(bytes[i:i+4]) for i in range(0, len(bytes), 4)]
 
+
 def u64_array(bytes):
     return [unsigned_int(bytes[i:i+8]) for i in range(0, len(bytes), 8)]
+
 
 def double(bytes):
     return struct.unpack('d', bytes)[0]
 
+
 def cstr(bytes):
     return bytes.rstrip(b'\0')
+
 
 def read_header(fp):
     header_format_12 = {
@@ -67,14 +72,18 @@ def read_header(fp):
         'number_of_points_by_return': (8*15, u64_array),
     }
 
-    header = {}
-
-    def read_into_header(format):
+    def read_into_header(header, format):
+        bytes_read = 0
         for key, (size, func) in format.items():
+            bytes_read += size
             header[key] = func(fp.read(size))
+        return bytes_read
+
+    header = {}
+    bytes_read = 0
 
     # Read header
-    read_into_header(header_format_12)
+    bytes_read += read_into_header(header, header_format_12)
 
     # Check that the file is a LAS file
     if header['file_signature'] != b'LASF':
@@ -82,19 +91,21 @@ def read_header(fp):
 
     # Read 1.3 header fields
     if header['version_major'] == 1 and header['version_minor'] >= 3:
-        read_into_header(header_format_13)
+        bytes_read += read_into_header(header, header_format_13)
 
     # Read 1.4 header fields
     if header['version_major'] == 1 and header['version_minor'] >= 4:
-        read_into_header(header_format_14)
+        bytes_read += read_into_header(header, header_format_14)
 
     return header
+
 
 def main(filename):
     print("Opening file: {}".format(filename))
 
     with open(filename, 'rb') as f:
-        print( read_header(f) )
+        print(read_header(f))
+
 
 if __name__ == '__main__':
 
