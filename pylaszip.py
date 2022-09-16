@@ -9,6 +9,10 @@ def unsigned_int(bytes):
     return int.from_bytes(bytes, byteorder='little', signed=False)
 
 
+def signed_int(bytes):
+    return int.from_bytes(bytes, byteorder='little', signed=True)
+
+
 def u32_array(bytes):
     return [unsigned_int(bytes[i:i+4]) for i in range(0, len(bytes), 4)]
 
@@ -36,7 +40,7 @@ def read_variable_length_record(fp):
     return record
 
 
-def read_header(fp):
+def read_las_header(fp):
     header_format_12 = {
         'file_signature': (4, cstr),
         'file_source_id': (2, unsigned_int),
@@ -113,9 +117,44 @@ def read_header(fp):
     header['user_data'] = fp.read(user_data_size)
 
     # Read variable length records
-    header['variable_length_records'] = []
+    header['variable_length_records'] = {}
     for i in range(header['number_of_variable_length_records']):
-        header['variable_length_records'].append(read_variable_length_record(fp))
+        vlr = read_variable_length_record(fp)
+        header['variable_length_records'][vlr['record_id']] = vlr
+
+    return header
+
+
+def parse_laszip_header(data):
+    header_format = {
+        'compressor': (2, unsigned_int),
+        'coder': (2, unsigned_int),
+        'version_major': (1, unsigned_int),
+        'version_minor': (1, unsigned_int),
+        'version_revision': (2, unsigned_int),
+        'options': (4, unsigned_int),
+        'chunk_size': (4, signed_int),
+        'number_of_special_evlrs': (8, signed_int),
+        'offset_to_special_evlrs': (8, signed_int),
+        'number_of_items': (2, unsigned_int),
+    }
+
+    header = {}
+    offset = 0
+    for key, (size, func) in header_format.items():
+        header[key] = func(data[offset:offset+size])
+        offset += size
+
+    header['items'] = []
+    for i in range(header['number_of_items']):
+        item = {}
+        item['type'] = unsigned_int(data[offset:offset+2])
+        item['size'] = unsigned_int(data[offset+2:offset+4])
+        item['version'] = unsigned_int(data[offset+4:offset+6])
+        offset += 6
+        header['items'].append(item)
+
+    header['user_data'] = data[offset:]
 
     return header
 
@@ -124,7 +163,17 @@ def main(filename):
     print("Opening file: {}".format(filename))
 
     with open(filename, 'rb') as f:
-        print(read_header(f))
+        header = read_las_header(f)
+
+        LASZIP_VLR_ID = 22204
+        laszip_vlr = header['variable_length_records'].get(LASZIP_VLR_ID)
+        if laszip_vlr is None:
+            raise Exception("File is not compressed with LASzip")
+
+        laszip_header = parse_laszip_header(laszip_vlr['data'])
+        print("LASzip header: {}".format(laszip_header))
+
+        print(header)
 
 
 if __name__ == '__main__':
