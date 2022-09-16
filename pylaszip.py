@@ -25,6 +25,17 @@ def cstr(bytes):
     return bytes.rstrip(b'\0')
 
 
+def read_variable_length_record(fp):
+    record = {}
+    record['reserved'] = unsigned_int(fp.read(2))
+    record['user_id'] = cstr(fp.read(16))
+    record['record_id'] = unsigned_int(fp.read(2))
+    record['record_length_after_header'] = unsigned_int(fp.read(2))
+    record['description'] = cstr(fp.read(32))
+    record['data'] = fp.read(record['record_length_after_header'])
+    return record
+
+
 def read_header(fp):
     header_format_12 = {
         'file_signature': (4, cstr),
@@ -96,6 +107,15 @@ def read_header(fp):
     # Read 1.4 header fields
     if header['version_major'] == 1 and header['version_minor'] >= 4:
         bytes_read += read_into_header(header, header_format_14)
+
+    # Read user data
+    user_data_size = header['header_size'] - bytes_read
+    header['user_data'] = fp.read(user_data_size)
+
+    # Read variable length records
+    header['variable_length_records'] = []
+    for i in range(header['number_of_variable_length_records']):
+        header['variable_length_records'].append(read_variable_length_record(fp))
 
     return header
 
