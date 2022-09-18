@@ -121,7 +121,7 @@ class ArithmeticModel:
         self.decoder_table = None
         self.symbol_count = None
 
-    def _init(self, table=None):
+    def init(self, table=None):
         if self.distribution is None:
             if self.num_symbols<2 or self.num_symbols>2048:
                 raise Exception("Invalid number of symbols")
@@ -129,12 +129,12 @@ class ArithmeticModel:
             self.last_symbol = self.num_symbols-1
 
             if not self.compress and self.num_symbols>16:
-                self.table_bits = 3
-                while self.num_symbols > (1 << (self.table_bits+2)):
-                    self.table_bits += 1
+                table_bits = 3
+                while self.num_symbols > (1 << (table_bits+2)):
+                    table_bits += 1
 
-                self.table_size = 1 << self.table_bits
-                self.table_shift = self.DM_LENGTH_SHIFT - self.table_bits
+                self.table_size = 1 << table_bits
+                self.table_shift = self.DM_LENGTH_SHIFT - table_bits
 
                 self.decoder_table = [0] * (self.table_size + 2)
             else:
@@ -184,6 +184,7 @@ class ArithmeticModel:
                 s += 1
                 self.decoder_table[s] = self.num_symbols - 1
 
+
         # set frequency of model updates
         self.update_cycle = (5 * self.update_cycle) >> 2
         max_cycle = (self.num_symbols + 6) << 3
@@ -203,7 +204,8 @@ class ArithmeticDecoder:
         self.length = self.AC_MAX_LENGTH
 
         if really_init:
-            self.value = unsigned_int(fp.read(4))
+            data = fp.read(4)
+            self.value = int.from_bytes(data, byteorder='big')
 
     def decode_bit(self, m):
         # m is a ArithmeticBitModel
@@ -222,6 +224,10 @@ class ArithmeticDecoder:
         m.bits_until_update -= 1
         if m.bits_until_update == 0:
             m.update()
+
+    def create_symbol_model(self, num_symbols):
+        return ArithmeticModel(num_symbols, False)
+
 
 def not_implemented_func(*args, **kwargs):
     raise NotImplementedError
@@ -270,6 +276,70 @@ def read_item_raw_gpstime11(fp):
     gps_time = double(fp.read(8))
     return (gps_time,)
 
+class IntegerCompressor:
+    def __init__(self, dec_or_enc, bits=16, contexts=1, bits_high=8, range=0):
+        if type(dec_or_enc) == ArithmeticDecoder:
+            self.dec = dec_or_enc
+            self.enc = None
+        elif type(dec_or_enc) == ArithmeticEncoder:
+            self.dec = None
+            self.enc = dec_or_enc
+
+        self.bits = bits
+        self.contexts = contexts
+        self.bits_high = bits_high
+        self.range = range
+
+        if range != 0:
+            self.corr_bits = 0
+            self.corr_range = range
+            while(range != 0):
+                range >>= 1
+                corr_bits += 1
+            if self.corr_range == (1 << (corr_bits - 1)):
+                corr_bits -= 1
+            self.corr_min = -self.corr_range//2
+            self.corr_max = self.corr_min+self.corr_range-1
+        elif bits > 0 and bits < 32:
+            self.corr_bits = bits
+            self.corr_range = 1 << bits
+            self.corr_min = -self.corr_range//2
+            self.corr_max = self.corr_min+self.corr_range-1
+        else:
+            self.corr_bits = 32
+            self.corr_range = 0
+            self.corr_min = -0x7FFFFFFF
+            self.corr_max = 0x7FFFFFFF
+
+        self.k = 0
+        self.m_bits = None
+        self.m_corrector = 0
+
+    def initDecompressor(self):
+        assert self.dec
+
+        if self.m_bits is None:
+            self.m_bits = []
+            for i in range(self.contexts):
+                model = self.dec.create_symbol_model(self.corr_bits+1)
+                self.m_bits.append(model)
+
+            self.m_corrector = [ArithmeticBitModel()]
+            for i in range(1, self.corr_bits):
+                if i <= self.bits_high:
+                    self.m_corrector.append(self.dec.create_symbol_model(i<<2))
+                else:
+                    self.m_corrector.append(self.dec.create_symbol_model(i<<self.bits_high))
+
+        for i in range(self.contexts):
+            self.m_bits[i].init()
+
+        print(self.corr_bits)
+        for i in range(1, self.corr_bits):
+            print(i)
+            self.m_corrector[i].init()
+
+
 
 class PointReader:
     def __init__(self, reader):
@@ -277,7 +347,7 @@ class PointReader:
 
         # create decoder
         if reader.header['laszip']['coder'] == Coder.ARITHMETIC:
-            self.dec = ArithmeticDecoder
+            self.dec = ArithmeticDecoder()
         else:
             raise Exception("Unknown coder")
 
@@ -341,6 +411,38 @@ class PointReader:
             self.chunk_size = reader.header['laszip']['chunk_size']
         else:
             raise Exception("Pointwise compressor not supported")
+
+    def init(self, fp):
+        self.fp = fp
+
+        self.chunk_count = self.chunk_size
+        self.point_start = 0
+        self.readers = None
+
+    def _read_chunk_table(self):
+        chunk_table_start_position = unsigned_int( self.fp.read(8) )
+        chunks_start = self.fp.tell()
+
+        self.fp.seek(chunk_table_start_position)
+
+        version = unsigned_int( self.fp.read(4) )
+        if version != 0:
+            raise Exception("Unknown chunk table version")
+
+        number_chunks = unsigned_int( self.fp.read(4) )
+        chunk_totals = 0
+        chunk_starts = [chunks_start]
+
+        self.dec.init(self.fp)
+
+        ic = IntegerCompressor(self.dec, 32, 2)
+        ic.initDecompressor()
+
+
+
+    def read(self):
+        # init_decoders
+        self._read_chunk_table()
 
         
 
@@ -505,13 +607,15 @@ class Reader:
         return self.header['number_of_point_records']
 
     def open(self, filename):
-        with open(filename, 'rb') as fp:
-            self.header = self._read_laz_header(fp)
+        fp = open(filename, 'rb')
 
-            self.point_reader = PointReader(self)
+        self.header = self._read_laz_header(fp)
 
-    def read_point(self):
-        pass
+        self.point_reader = PointReader(self)
+        self.point_reader.init(fp)
+
+        self.npoints = self.header['number_of_point_records']
+        self.p_count = 0
 
 
 def main(filename):
@@ -521,7 +625,11 @@ def main(filename):
 
     reader.open(filename)
 
+    print( reader.npoints )
+
     for i in range(reader.num_points):
+        point = reader.point_reader.read()
+        print(point)
         break
 
 
