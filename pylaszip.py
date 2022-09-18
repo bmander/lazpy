@@ -245,78 +245,80 @@ class Reader:
 
     @staticmethod
     def _read_las_header(fp):
-        header_format_12 = {
-            'file_signature': (4, cstr),
-            'file_source_id': (2, unsigned_int),
-            'global_encoding': (2, unsigned_int),
-            'guid_data_1': (4, unsigned_int),
-            'guid_data_2': (2, unsigned_int),
-            'guid_data_3': (2, unsigned_int),
-            'guid_data_4': (8, cstr),
-            'version_major': (1, unsigned_int),
-            'version_minor': (1, unsigned_int),
-            'system_identifier': (32, cstr),
-            'generating_software': (32, cstr),
-            'file_creation_day': (2, unsigned_int),
-            'file_creation_year': (2, unsigned_int),
-            'header_size': (2, unsigned_int),
-            'offset_to_point_data': (4, unsigned_int),
-            'number_of_variable_length_records': (4, unsigned_int),
-            'point_data_format_id': (1, unsigned_int),
-            'point_data_record_length': (2, unsigned_int),
-            'number_of_point_records': (4, unsigned_int),
-            'number_of_points_by_return': (4*5, u32_array),
-            'x_scale_factor': (8, double),
-            'y_scale_factor': (8, double),
-            'z_scale_factor': (8, double),
-            'x_offset': (8, double),
-            'y_offset': (8, double),
-            'z_offset': (8, double),
-            'max_x': (8, double),
-            'min_x': (8, double),
-            'max_y': (8, double),
-            'min_y': (8, double),
-            'max_z': (8, double),
-            'min_z': (8, double),
-        }
+        header_format_12 = (
+            ('file_signature', 4, cstr),
+            ('file_source_id', 2, unsigned_int),
+            ('global_encoding', 2, unsigned_int),
+            ('guid_data_1', 4, unsigned_int),
+            ('guid_data_2', 2, unsigned_int),
+            ('guid_data_3', 2, unsigned_int),
+            ('guid_data_4', 8, cstr),
+            ('version_major', 1, unsigned_int),
+            ('version_minor', 1, unsigned_int),
+            ('system_identifier', 32, cstr),
+            ('generating_software', 32, cstr),
+            ('file_creation_day', 2, unsigned_int),
+            ('file_creation_year', 2, unsigned_int),
+            ('header_size', 2, unsigned_int),
+            ('offset_to_point_data', 4, unsigned_int),
+            ('number_of_variable_length_records', 4, unsigned_int),
+            ('point_data_format_id', 1, unsigned_int),
+            ('point_data_record_length', 2, unsigned_int),
+            ('number_of_point_records', 4, unsigned_int),
+            ('number_of_points_by_return', 4*5, u32_array),
+            ('x_scale_factor', 8, double),
+            ('y_scale_factor', 8, double),
+            ('z_scale_factor', 8, double),
+            ('x_offset', 8, double),
+            ('y_offset', 8, double),
+            ('z_offset', 8, double),
+            ('max_x', 8, double),
+            ('min_x', 8, double),
+            ('max_y', 8, double),
+            ('min_y', 8, double),
+            ('max_z', 8, double),
+            ('min_z', 8, double),
+        )
 
-        header_format_13 = {
-            'start_of_waveform_data_packet_record': (8, unsigned_int),
-        }
+        header_format_13 = (
+            ('start_of_waveform_data_packet_record', 8, unsigned_int),
+        )
 
-        header_format_14 = {
-            'start_of_first_extended_variable_length_record': (8, unsigned_int),
-            'number_of_extended_variable_length_records': (4, unsigned_int),
-            'number_of_point_records': (8, unsigned_int),
-            'number_of_points_by_return': (8*15, u64_array),
-        }
+        header_format_14 = (
+            ('start_of_first_extended_variable_length_record', 8, unsigned_int),
+            ('number_of_extended_variable_length_records', 4, unsigned_int),
+            ('number_of_point_records', 8, unsigned_int),
+            ('number_of_points_by_return', 8*15, u64_array),
+        )
 
-        def read_into_header(header, format):
-            bytes_read = 0
-            for key, (size, func) in format.items():
-                bytes_read += size
-                header[key] = func(fp.read(size))
-            return bytes_read
+        def read_into_header(fp, header, format):
+            for name, size, func in format:
+                header[name] = func(fp.read(size))
+
+        def header_section_size(format):
+            return sum([size for name, size, func in format])
 
         header = {}
-        bytes_read = 0
 
         # Read header
-        bytes_read += read_into_header(header, header_format_12)
+        read_into_header(fp, header, header_format_12)
+        bytes_read = header_section_size(header_format_12)
 
-        # Check that the file is a LAS file
+        # Ensure the file is a LAS file
         if header['file_signature'] != b'LASF':
             raise Exception("Invalid file signature")
 
         # Read 1.3 header fields
         if header['version_major'] == 1 and header['version_minor'] >= 3:
-            bytes_read += read_into_header(header, header_format_13)
+            read_into_header(fp, header, header_format_13)
+            bytes_read += header_section_size(header_format_13)
 
         # Read 1.4 header fields
         if header['version_major'] == 1 and header['version_minor'] >= 4:
-            bytes_read += read_into_header(header, header_format_14)
+            read_into_header(fp, header, header_format_14)
+            bytes_read += header_section_size(header_format_14)
 
-        # Read user data
+        # Read user data, if any
         user_data_size = header['header_size'] - bytes_read
         header['user_data'] = fp.read(user_data_size)
 
@@ -331,23 +333,23 @@ class Reader:
 
     @staticmethod
     def _parse_laszip_record(data):
-        laszip_record_format = {
-            'compressor': (2, unsigned_int),
-            'coder': (2, unsigned_int),
-            'version_major': (1, unsigned_int),
-            'version_minor': (1, unsigned_int),
-            'version_revision': (2, unsigned_int),
-            'options': (4, unsigned_int),
-            'chunk_size': (4, signed_int),
-            'number_of_special_evlrs': (8, signed_int),
-            'offset_to_special_evlrs': (8, signed_int),
-            'number_of_items': (2, unsigned_int),
-        }
+        laszip_record_format = (
+            ('compressor', 2, unsigned_int),
+            ('coder', 2, unsigned_int),
+            ('version_major', 1, unsigned_int),
+            ('version_minor', 1, unsigned_int),
+            ('version_revision', 2, unsigned_int),
+            ('options', 4, unsigned_int),
+            ('chunk_size', 4, signed_int),
+            ('number_of_special_evlrs', 8, signed_int),
+            ('offset_to_special_evlrs', 8, signed_int),
+            ('number_of_items', 2, unsigned_int),
+        )
 
         laszip_record = {}
         offset = 0
-        for key, (size, func) in laszip_record_format.items():
-            laszip_record[key] = func(data[offset:offset+size])
+        for name, size, func in laszip_record_format:
+            laszip_record[name] = func(data[offset:offset+size])
             offset += size
 
         laszip_record['items'] = []
