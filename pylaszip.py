@@ -1,4 +1,3 @@
-from re import A
 import struct
 from enum import IntEnum
 
@@ -27,9 +26,10 @@ class ItemType(IntEnum):
     RGB12 = 8
     WAVEPACKET13 = 9
     POINT14 = 10
-    RGBNIR14 = 11
-    WAVEPACKET14 = 12
-    BYTE14 = 13
+    RGB14 = 11
+    RGBNIR14 = 12
+    WAVEPACKET14 = 13
+    BYTE14 = 14
 
 def unsigned_int(bytes):
     return int.from_bytes(bytes, byteorder='little', signed=False)
@@ -54,13 +54,6 @@ def double(bytes):
 def cstr(bytes):
     return bytes.rstrip(b'\0')
 
-
-
-def get_decoder(laszip_header):
-    if laszip_header['coder'] == Coder.ARITHMETIC:
-        return ArithmeticDecoder()
-    else:
-        raise Exception("Unknown coder")
 
 def get_readers(laszip_header):
     readers = []
@@ -202,7 +195,10 @@ class ArithmeticDecoder:
     AC_MAX_LENGTH = 0xFFFFFFFF
     AC_MIN_LENGTH = 0x01000000
 
-    def __init__(self, fp, really_init=True):
+    def __init__(self):
+        pass
+
+    def init(self, fp, really_init=True):
         self.fp = fp
         self.length = self.AC_MAX_LENGTH
 
@@ -226,6 +222,127 @@ class ArithmeticDecoder:
         m.bits_until_update -= 1
         if m.bits_until_update == 0:
             m.update()
+
+def not_implemented_func(*args, **kwargs):
+    raise NotImplementedError
+
+read_item_compressed_point10_v1 = not_implemented_func
+read_item_compressed_point10_v2 = not_implemented_func
+read_item_compressed_gpstime11_v1 = not_implemented_func
+read_item_compressed_gpstime11_v2 = not_implemented_func
+read_item_compressed_rgb12_v1 = not_implemented_func
+read_item_compressed_rgb12_v2 = not_implemented_func
+read_item_compressed_byte_v1 = not_implemented_func
+read_item_compressed_byte_v2 = not_implemented_func
+read_item_compressed_point14_v3 = not_implemented_func
+read_item_compressed_point14_v4 = not_implemented_func
+read_item_compressed_rgb12_v3 = not_implemented_func
+read_item_compressed_rgb12_v4 = not_implemented_func
+read_item_compressed_rgbnir14_v3 = not_implemented_func
+read_item_compressed_rgbnir14_v4 = not_implemented_func
+read_item_compressed_byte_v3 = not_implemented_func
+read_item_compressed_byte_v4 = not_implemented_func
+read_item_compressed_wavepacket13_v1 = not_implemented_func
+read_item_compressed_wavepacket14_v3 = not_implemented_func
+read_item_compressed_wavepacket14_v4 = not_implemented_func
+
+def read_item_raw_point10(fp):
+    x = unsigned_int(fp.read(4))
+    y = unsigned_int(fp.read(4))
+    z = unsigned_int(fp.read(4))
+    intensity = unsigned_int(fp.read(2))
+
+    bitfield = unsigned_int(fp.read(1))
+    return_num = bitfield & 0b00000111
+    num_returns = (bitfield & 0b00111000) >> 3
+    scan_dir_flag = (bitfield & 0b01000000) >> 6
+    edge_of_flight_line = (bitfield & 0b10000000) >> 7
+
+    classification = unsigned_int(fp.read(1))
+    scan_angle_rank = unsigned_int(fp.read(1))
+    user_data = unsigned_int(fp.read(1))
+    point_source_id = unsigned_int(fp.read(2))
+
+    return (x, y, z, intensity, return_num, num_returns, scan_dir_flag, edge_of_flight_line, classification, scan_angle_rank, user_data, point_source_id)
+
+
+def read_item_raw_gpstime11(fp):
+    gps_time = double(fp.read(8))
+    return (gps_time,)
+
+
+class PointReader:
+    def __init__(self, reader):
+        self.point_size = 0
+
+        # create decoder
+        if reader.header['laszip']['coder'] == Coder.ARITHMETIC:
+            self.dec = ArithmeticDecoder
+        else:
+            raise Exception("Unknown coder")
+
+        # create raw_readers
+        self.readers_raw = []
+        for item in reader.header['laszip']['items']:
+            if item['type'] == ItemType.POINT10:
+                self.readers_raw.append( read_item_raw_point10 )
+            elif item['type'] == ItemType.GPSTIME11:
+                self.readers_raw.append( read_item_raw_gpstime11 )
+            elif item['type'] in {ItemType.RGB12, ItemType.RGB14}:
+                self.readers_raw.append( read_item_raw_rgb12 )
+            elif item['type'] in {ItemType.BYTE, ItemType.BYTE14}:
+                self.readers_raw.append( read_item_raw_byte )
+            elif item['type'] == ItemType.RGBNIR14:
+                self.readers_raw.append( read_item_raw_rgbnir14 )
+            elif item['type'] in {ItemType.WAVEPACKET13, ItemType.WAVEPACKET14}:
+                self.readers_raw.append( read_item_raw_wavepacket13 )
+            else:
+                raise Exception("Unknown item type")
+
+            self.point_size += item['size']
+
+        # create compressed readers
+        type_version_compressed_reader = {
+            (ItemType.POINT10, 1): read_item_compressed_point10_v1,
+            (ItemType.POINT10, 2): read_item_compressed_point10_v2,
+            (ItemType.GPSTIME11, 1): read_item_compressed_gpstime11_v1,
+            (ItemType.GPSTIME11, 2): read_item_compressed_gpstime11_v2,
+            (ItemType.RGB12, 1): read_item_compressed_rgb12_v1,
+            (ItemType.RGB12, 2): read_item_compressed_rgb12_v2,
+            (ItemType.BYTE, 1): read_item_compressed_byte_v1,
+            (ItemType.BYTE, 2): read_item_compressed_byte_v2,
+            (ItemType.POINT14, 3): read_item_compressed_point14_v3,
+            (ItemType.POINT14, 4): read_item_compressed_point14_v4,
+            (ItemType.RGB14, 3): read_item_compressed_rgb12_v3,
+            (ItemType.RGB14, 4): read_item_compressed_rgb12_v4,
+            (ItemType.RGBNIR14, 3): read_item_compressed_rgbnir14_v3,
+            (ItemType.RGBNIR14, 4): read_item_compressed_rgbnir14_v4,
+            (ItemType.BYTE14, 3): read_item_compressed_byte_v3,
+            (ItemType.BYTE14, 4): read_item_compressed_byte_v4,
+            (ItemType.WAVEPACKET13, 1): read_item_compressed_wavepacket13_v1,
+            (ItemType.WAVEPACKET14, 3): read_item_compressed_wavepacket14_v3,
+            (ItemType.WAVEPACKET14, 4): read_item_compressed_wavepacket14_v4,
+        }
+        self.readers_compressed = []
+        for i, item in enumerate(reader.header['laszip']['items']):
+            key = (item['type'], item['version'])
+            if key in type_version_compressed_reader:
+                func = type_version_compressed_reader[key]
+                self.readers_compressed.append(func)
+            else:
+                raise Exception("Unknown item type/version")
+
+        # create seek table
+        self.seek_point = []
+        for item in reader.header['laszip']['items']:
+            self.seek_point.append( [0]*item['size'] )
+
+        if reader.header['laszip']['compressor'] != Compressor.POINTWISE:
+            self.chunk_size = reader.header['laszip']['chunk_size']
+        else:
+            raise Exception("Pointwise compressor not supported")
+
+        
 
 class Reader:
     def __init__(self):
@@ -378,11 +495,20 @@ class Reader:
 
         header['laszip'] = Reader._parse_laszip_record(laszip_vlr['data'])
 
+        # clear the bit that indicates that the file is compressed
+        header['point_data_format_id'] &= 0b01111111
+
         return header
+
+    @property
+    def num_points(self):
+        return self.header['number_of_point_records']
 
     def open(self, filename):
         with open(filename, 'rb') as fp:
             self.header = self._read_laz_header(fp)
+
+            self.point_reader = PointReader(self)
 
     def read_point(self):
         pass
@@ -395,7 +521,8 @@ def main(filename):
 
     reader.open(filename)
 
-    print( reader.header )
+    for i in range(reader.num_points):
+        break
 
 
 if __name__ == '__main__':
