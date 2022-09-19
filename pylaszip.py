@@ -191,6 +191,14 @@ class ArithmeticModel:
         self.update_cycle = min(self.update_cycle, max_cycle)
         self.symbols_until_update = self.update_cycle
 
+    def __str__(self):
+        ret = f"ArithmeticModel(num_symbols={self.num_symbols}, compress={self.compress}, " \
+        f"distribution={self.distribution}, decoder_table={self.decoder_table}, " \
+        f"symbol_count={self.symbol_count}, total_count={self.total_count}, " \
+        f"update_cycle={self.update_cycle}, symbols_until_update={self.symbols_until_update})"
+
+        return ret
+
 
 class ArithmeticDecoder:
     AC_MAX_LENGTH = 0xFFFFFFFF
@@ -462,7 +470,9 @@ class IntegerCompressor:
     def decompress(self, pred, context):
         assert self.dec
 
+        print( "read corrector")
         real = pred + self._read_corrector(self.m_bits[context])
+        print( "post read corrector:", self.m_bits[context] )
 
         if real < 0:
             real += self.corr_range
@@ -574,8 +584,11 @@ class PointReader:
         for i in range(1, number_chunks):
             pred = chunk_starts[i-1] if i>1 else 0
             print(f"decompress chunk i:{i} pred:{pred}")
-            chunk_starts.append( ic.decompress(pred, 1) )
-            print("chunk_starts[%d]"%i, chunk_starts[-1])
+            chunk_start = ic.decompress(pred, 1)
+            print(f"result i:{i} chunk_start:{chunk_start}")
+            print()
+
+            chunk_starts.append( chunk_start )
             tabled_chunks += 1
         exit()
 
