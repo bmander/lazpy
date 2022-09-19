@@ -133,12 +133,12 @@ class ArithmeticModel:
                 while self.num_symbols > (1 << (table_bits+2)):
                     table_bits += 1
 
-                self.table_size = 1 << table_bits
                 self.table_shift = self.DM_LENGTH_SHIFT - table_bits
 
+                self.table_size = 1 << table_bits
                 self.decoder_table = [0] * (self.table_size + 2)
-            else:
-                self.table_size = self.table_shift = 0
+            else: # small alphabet; no table needed
+                self.table_shift = self.table_size = 0
 
             self.distribution = [0] * self.num_symbols
             self.symbol_count = [0] * self.num_symbols
@@ -208,7 +208,7 @@ class ArithmeticDecoder:
             self.value = int.from_bytes(data, byteorder='big')
 
     def decode_bit(self, m):
-        # m is a ArithmeticBitModel
+        # m is an ArithmeticBitModel
         x = m.bit_0_prob * (self.length >> m.BM_LENGTH_SHIFT)
         
         if self.value < x:
@@ -224,6 +224,102 @@ class ArithmeticDecoder:
         m.bits_until_update -= 1
         if m.bits_until_update == 0:
             m.update()
+
+    def _renorm_dec_interval(self):
+        while True:
+            data = unsigned_int(self.fp.read(1))
+            self.value = (self.value << 8) | data
+            self.length <<= 8
+            if self.length >= self.AC_MIN_LENGTH:
+                break
+
+    def decode_symbol(self, m):
+        # m is an ArithmeticModel
+        y = self.length
+
+        if m.decoder_table is not None:
+            self.length >>= m.DM_LENGTH_SHIFT
+            dv = self.value // self.length
+            t = dv >> m.table_shift
+
+            sym = m.decoder_table[t]
+            n = m.decoder_table[t+1] + 1
+
+            while(n > sym+1):
+                k = (sym + n) >> 1
+                if m.distribution[k] > dv:
+                    n = k
+                else:
+                    sym = k
+
+            x = m.distribution[sym] * self.length
+
+            if sym != m.last_symbol:
+                y = m.distribution[sym+1] * self.length
+
+        else:
+            raise NotImplementedError()
+            x = sym = 0
+            self.length >>= m.DM_LENGTH_SHIFT
+            n = m.num_symbols
+            k = n >> 1
+
+            while True:
+                z = self.length * m.distribution[k]
+                if z > self.value:
+                    n = k
+                    y = z
+                else:
+                    sym = k
+                    x = z
+                
+                k = (sym + n) >> 1
+                if k != sym:
+                    break
+        
+        self.value -= x
+        self.length = y - x
+
+        if self.length < self.AC_MIN_LENGTH:
+            self._renorm_dec_interval()
+
+        m.symbol_count[sym] += 1
+
+        m.symbols_until_update -= 1
+        if m.symbols_until_update == 0:
+            m._update()
+
+        assert sym < m.num_symbols
+
+        return sym
+
+    def read_short(self):
+        self.length >>= 16
+        sym = self.value // self.length
+        
+        if self.length < self.AC_MIN_LENGTH:
+            self._renorm_dec_interval()
+
+        return sym 
+
+    def read_bits(self, bits):
+        assert bits>0 and bits<=32
+
+        if bits > 19:
+            tmp = self.read_short()
+            bits = bits - 16
+            tmp1 = self.read_bits(bits) << 16
+            return tmp1 | tmp
+
+        self.length >>= bits 
+        sym = self.value // (self.length)
+        self.value -= sym * self.length
+
+        if self.length < self.AC_MIN_LENGTH:
+            self._renorm_dec_interval()
+
+        return sym
+
 
     def create_symbol_model(self, num_symbols):
         return ArithmeticModel(num_symbols, False)
@@ -311,11 +407,11 @@ class IntegerCompressor:
             self.corr_min = -0x7FFFFFFF
             self.corr_max = 0x7FFFFFFF
 
-        self.k = 0
         self.m_bits = None
-        self.m_corrector = 0
+        self.m_corrector = None
 
-    def initDecompressor(self):
+    def init_decompressor(self):
+        print("init_decompressor")
         assert self.dec
 
         if self.m_bits is None:
@@ -329,15 +425,54 @@ class IntegerCompressor:
                 if i <= self.bits_high:
                     self.m_corrector.append(self.dec.create_symbol_model(i<<2))
                 else:
-                    self.m_corrector.append(self.dec.create_symbol_model(i<<self.bits_high))
+                    self.m_corrector.append(self.dec.create_symbol_model(1<<self.bits_high))
 
         for i in range(self.contexts):
             self.m_bits[i].init()
 
-        print(self.corr_bits)
         for i in range(1, self.corr_bits):
-            print(i)
             self.m_corrector[i].init()
+
+    def _read_corrector(self, model):
+        k = self.dec.decode_symbol(model)
+
+        if k != 0:
+            if k < 32:
+                if k <= self.bits_high:
+                    c = self.dec.decode_symbol(self.m_corrector[k])
+                else:
+                    k1 = k-self.bits_high
+                    c = self.dec.decode_symbol(self.m_corrector[k])
+                    c1 = self.dec.read_bits(k1)
+                    c = (c << k1) | c1
+                
+                # translate c back into its correct interval
+                if c >= (1 << (k-1)):
+                    c += 1
+                else:
+                    c -= (1<<k)-1
+
+            else:
+                c = self.corr_min
+        else:
+            c = self.dec.decode_bit(self.m_corrector[0])
+
+        return c
+
+
+    def decompress(self, pred, context):
+        assert self.dec
+
+        print("pred, context", pred, context)
+
+        real = pred + self._read_corrector(self.m_bits[context])
+
+        if real < 0:
+            real += self.corr_range
+        elif real >= self.corr_range:
+            real -= self.corr_range
+        
+        return real
 
 
 
@@ -432,11 +567,19 @@ class PointReader:
         number_chunks = unsigned_int( self.fp.read(4) )
         chunk_totals = 0
         chunk_starts = [chunks_start]
+        tabled_chunks = 1
 
         self.dec.init(self.fp)
 
         ic = IntegerCompressor(self.dec, 32, 2)
-        ic.initDecompressor()
+        ic.init_decompressor()
+
+        for i in range(1, number_chunks):
+            pred = chunk_starts[i-1] if i>1 else 0
+            chunk_starts.append( ic.decompress(pred, 1) )
+            print("chunk_starts[%d]"%i, chunk_starts[-1])
+            tabled_chunks += 1
+        exit()
 
 
 
