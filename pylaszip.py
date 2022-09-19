@@ -411,7 +411,6 @@ class IntegerCompressor:
         self.m_corrector = None
 
     def init_decompressor(self):
-        print("init_decompressor")
         assert self.dec
 
         if self.m_bits is None:
@@ -462,8 +461,6 @@ class IntegerCompressor:
 
     def decompress(self, pred, context):
         assert self.dec
-
-        print("pred, context", pred, context)
 
         real = pred + self._read_corrector(self.m_bits[context])
 
@@ -576,6 +573,7 @@ class PointReader:
 
         for i in range(1, number_chunks):
             pred = chunk_starts[i-1] if i>1 else 0
+            print(f"decompress chunk i:{i} pred:{pred}")
             chunk_starts.append( ic.decompress(pred, 1) )
             print("chunk_starts[%d]"%i, chunk_starts[-1])
             tabled_chunks += 1
