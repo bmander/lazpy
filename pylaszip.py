@@ -335,14 +335,143 @@ class ArithmeticDecoder:
     def done(self):
         self.fp = None
 
+class StreamingMedian5:
+    def __init__(self):
+        self.values = [0, 0, 0, 0, 0]
+        self.high = True
+
+    def _add_high(self, v):
+        # insert and bubble up
+
+        # if v less than the middle
+        if v < self.values[2]:
+            # shift upper section up one
+            self.values[4] = self.values[3]
+            self.values[3] = self.values[2]
+            
+            # if v is less than the lowest
+            if v < self.values[0]:
+                # shift lower half up one and insert v at bottom
+                self.values[2] = self.values[1]
+                self.values[1] = self.values[0]
+                self.values[0] = v
+            elif v < self.values[1]:
+                # shift lower half up one and insert v in middle
+                self.values[2] = self.values[1]
+                self.values[1] = v
+            else:
+                # insert v in middle
+                self.values[2] = v
+        else:
+            if v < self.values[3]:
+                self.values[4] = self.values[3]
+                self.values[3] = v
+            else:
+                self.values[4] = v
+            self.high = False
+
+    def _add_low(self, v):
+        # insert and bubble down
+
+        if v > self.values[2]:
+            self.values[0] = self.values[1]
+            self.values[1] = self.values[2]
+            if v > self.values[4]:
+                self.values[2] = self.values[3]
+                self.values[3] = self.values[4]
+                self.values[4] = v
+            elif v > self.values[3]:
+                self.values[2] = self.values[3]
+                self.values[3] = v
+            else:
+                self.values[2] = v
+        else:
+            if v > self.values[1]:
+                self.values[0] = self.values[1]
+                self.values[1] = v
+            else:
+                self.values[0] = v
+            self.high = True
+
+    def add(self, v):
+        # TODO figure this out and simplify it
+        if self.high:
+            self._add_high(v)
+        else:
+            self._add_low(v)
+
 
 def not_implemented_func(*args, **kwargs):
     raise NotImplementedError
 
 read_item_compressed_point10_v1 = not_implemented_func
-read_item_compressed_point10_v2 = not_implemented_func
+class read_item_compressed_point10_v2:
+    def __init__(self, dec):
+        self.dec = dec
+
+        # create model and integer compressors
+        self.m_changed_values = dec.create_symbol_model(64)
+        self.ic_intensity = IntegerCompressor(dec, 16, 4)
+        self.m_scan_angle_rank = [dec.create_symbol_model(256),
+                                  dec.create_symbol_model(256)]
+        self.ic_point_source_ID = IntegerCompressor(dec, 16)
+        self.m_bit_byte = [0]*256
+        self.m_classification = [0]*256
+        self.m_user_data = [0]*256
+        self.ic_dx = IntegerCompressor(dec, 32, 2)
+        self.ic_dy = IntegerCompressor(dec, 32, 2)
+        self.ic_z = IntegerCompressor(dec, 32, 2)
+
+        self.last_x_diff_median5 = []
+        self.last_y_diff_median5 = []
+        for i in range(16):
+            self.last_x_diff_median5.append( StreamingMedian5() )
+            self.last_y_diff_median5.append( StreamingMedian5() )
+        
+        self.last_intensity = [0]*16
+        self.last_height = [0]*8
+
+        self.last_item = []
+
+    def init(self, item, context):
+        # init state
+        for i in range(16):
+            self.last_x_diff_median5[i] = StreamingMedian5()
+            self.last_y_diff_median5[i] = StreamingMedian5()
+        self.last_intensity = [0]*16
+        self.last_height = [0]*8
+
+        self.dec.init_symbol_model(self.m_changed_values)
+        self.ic_intensity.init_decompressor()
+        self.dec.init_symbol_model(self.m_scan_angle_rank[0])
+        self.dec.init_symbol_model(self.m_scan_angle_rank[1])
+        self.ic_point_source_ID.init_decompressor()
+
+        for i in range(256):
+            if self.m_bit_byte[i] != 0:
+                self.dec.init_symbol_model(self.m_bit_byte[i])
+            if self.m_classification[i] != 0:
+                self.dec.init_symbol_model(self.m_classification[i])
+            if self.m_user_data[i] != 0:
+                self.dec.init_symbol_model(self.m_user_data[i])
+        
+        self.ic_dx.init_decompressor()
+        self.ic_dy.init_decompressor()
+        self.ic_z.init_decompressor()
+
+        self.last_item = item.copy()
+        self.last_item[12] = 0
+        self.last_item[13] = 0
+
+
 read_item_compressed_gpstime11_v1 = not_implemented_func
-read_item_compressed_gpstime11_v2 = not_implemented_func
+class read_item_compressed_gpstime11_v2:
+    def __init__(self, dec):
+        self.dec = dec
+
+    def init(self, item, context):
+        raise NotImplementedError("gpstime11_v2.imit() not implemented")
+    
 read_item_compressed_rgb12_v1 = not_implemented_func
 read_item_compressed_rgb12_v2 = not_implemented_func
 read_item_compressed_byte_v1 = not_implemented_func
@@ -550,8 +679,10 @@ class PointReader:
         for i, item in enumerate(reader.header['laszip']['items']):
             key = (item['type'], item['version'])
             if key in type_version_compressed_reader:
-                func = type_version_compressed_reader[key]
-                self.readers_compressed.append(func)
+                compressed_reader_class = type_version_compressed_reader[key]
+                compressed_reader = compressed_reader_class(self.dec)
+
+                self.readers_compressed.append(compressed_reader)
             else:
                 raise Exception("Unknown item type/version")
 
@@ -619,9 +750,14 @@ class PointReader:
 
         self.chunk_count += 1
 
+        point = []
         for reader_raw in self.readers_raw:
-            pt = reader_raw(self.fp)
-            print(pt)
+            pt_section = reader_raw(self.fp)
+            point.append(pt_section)
+
+        #for i, reader_compressed in enumerate(self.readers_compressed):
+        #    reader_compressed(point, context)
+
         exit()
 
 
