@@ -266,7 +266,6 @@ class ArithmeticDecoder:
                 y = m.distribution[sym+1] * self.length
 
         else:
-            raise NotImplementedError()
             x = sym = 0
             self.length >>= m.DM_LENGTH_SHIFT
             n = m.num_symbols
@@ -282,7 +281,7 @@ class ArithmeticDecoder:
                     x = z
                 
                 k = (sym + n) >> 1
-                if k != sym:
+                if k == sym:
                     break
         
         self.value -= x
