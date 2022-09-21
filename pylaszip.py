@@ -331,6 +331,9 @@ class ArithmeticDecoder:
     def create_symbol_model(self, num_symbols):
         return ArithmeticModel(num_symbols, False)
 
+    def done(self):
+        self.fp = None
+
 
 def not_implemented_func(*args, **kwargs):
     raise NotImplementedError
@@ -470,9 +473,7 @@ class IntegerCompressor:
     def decompress(self, pred, context):
         assert self.dec
 
-        print( "read corrector")
         real = pred + self._read_corrector(self.m_bits[context])
-        print( "post read corrector:", self.m_bits[context] )
 
         if real < 0:
             real += self.corr_range
@@ -573,7 +574,6 @@ class PointReader:
 
         number_chunks = unsigned_int( self.fp.read(4) )
         chunk_totals = 0
-        chunk_starts = [chunks_start]
         tabled_chunks = 1
 
         self.dec.init(self.fp)
@@ -581,17 +581,22 @@ class PointReader:
         ic = IntegerCompressor(self.dec, 32, 2)
         ic.init_decompressor()
 
-        for i in range(1, number_chunks):
-            pred = chunk_starts[i-1] if i>1 else 0
-            print(f"decompress chunk i:{i} pred:{pred}")
-            chunk_start = ic.decompress(pred, 1)
-            print(f"result i:{i} chunk_start:{chunk_start}")
-            print()
+        # read chunk sizes
+        chunk_sizes = []
+        pred = 0
+        for i in range(number_chunks-1):
+            chunk_size = ic.decompress(pred, 1)
+            chunk_sizes.append( chunk_size )
 
-            chunk_starts.append( chunk_start )
+            pred = chunk_size
             tabled_chunks += 1
-        exit()
 
+        self.dec.done()
+
+        # calculate chunk offsets
+        chunk_starts = [chunks_start]
+        for chunk_size in chunk_sizes:
+            chunk_starts.append( chunk_starts[-1] + chunk_size )
 
 
     def read(self):
