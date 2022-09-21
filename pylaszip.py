@@ -430,7 +430,7 @@ class IntegerCompressor:
             self.m_corrector = [ArithmeticBitModel()]
             for i in range(1, self.corr_bits):
                 if i <= self.bits_high:
-                    self.m_corrector.append(self.dec.create_symbol_model(i<<2))
+                    self.m_corrector.append(self.dec.create_symbol_model(1<<i))
                 else:
                     self.m_corrector.append(self.dec.create_symbol_model(1<<self.bits_high))
 
@@ -439,6 +439,7 @@ class IntegerCompressor:
 
         for i in range(1, self.corr_bits):
             self.m_corrector[i].init()
+
 
     def _read_corrector(self, model):
         k = self.dec.decode_symbol(model)
