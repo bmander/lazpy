@@ -1,5 +1,6 @@
 import struct
 from enum import IntEnum
+import sys
 
 # LAS file specification
 # 1.2: https://www.asprs.org/a/society/committees/standards/asprs_las_format_v12.pdf
@@ -358,7 +359,7 @@ read_item_compressed_wavepacket13_v1 = not_implemented_func
 read_item_compressed_wavepacket14_v3 = not_implemented_func
 read_item_compressed_wavepacket14_v4 = not_implemented_func
 
-def read_item_raw_point10(fp):
+def _read_item_raw_point10(fp):
     x = unsigned_int(fp.read(4))
     y = unsigned_int(fp.read(4))
     z = unsigned_int(fp.read(4))
@@ -377,10 +378,16 @@ def read_item_raw_point10(fp):
 
     return (x, y, z, intensity, return_num, num_returns, scan_dir_flag, edge_of_flight_line, classification, scan_angle_rank, user_data, point_source_id)
 
+def las_read_item_raw_point10_le(fp):
+    return fp.read(20)
 
-def read_item_raw_gpstime11(fp):
+
+def _read_item_raw_gpstime11(fp):
     gps_time = double(fp.read(8))
     return (gps_time,)
+
+def las_read_item_raw_gpstime11_le(fp):
+    return fp.read(8)
 
 class IntegerCompressor:
     def __init__(self, dec_or_enc, bits=16, contexts=1, bits_high=8, range=0):
@@ -483,10 +490,13 @@ class IntegerCompressor:
         return real
 
 
-
 class PointReader:
     def __init__(self, reader):
+        if not sys.byteorder == 'little':
+            raise NotImplementedError("Only little endian is supported")
+
         self.point_size = 0
+        self.chunk_count = 0
 
         # create decoder
         if reader.header['laszip']['coder'] == Coder.ARITHMETIC:
@@ -498,9 +508,9 @@ class PointReader:
         self.readers_raw = []
         for item in reader.header['laszip']['items']:
             if item['type'] == ItemType.POINT10:
-                self.readers_raw.append( read_item_raw_point10 )
+                self.readers_raw.append( las_read_item_raw_point10_le )
             elif item['type'] == ItemType.GPSTIME11:
-                self.readers_raw.append( read_item_raw_gpstime11 )
+                self.readers_raw.append( las_read_item_raw_gpstime11_le )
             elif item['type'] in {ItemType.RGB12, ItemType.RGB14}:
                 self.readers_raw.append( read_item_raw_rgb12 )
             elif item['type'] in {ItemType.BYTE, ItemType.BYTE14}:
@@ -555,12 +565,10 @@ class PointReader:
         else:
             raise Exception("Pointwise compressor not supported")
 
+
     def init(self, fp):
         self.fp = fp
 
-        self.chunk_count = self.chunk_size
-        self.point_start = 0
-        self.readers = None
 
     def _read_chunk_table(self):
         chunk_table_start_position = unsigned_int( self.fp.read(8) )
@@ -598,10 +606,24 @@ class PointReader:
         for chunk_size in chunk_sizes:
             chunk_starts.append( chunk_starts[-1] + chunk_size )
 
+        self.fp.seek(chunks_start)
+
 
     def read(self):
+        context = 0
+
         # init_decoders
         self._read_chunk_table()
+
+        self.point_start = self.fp.tell()
+
+        self.chunk_count += 1
+
+        for reader_raw in self.readers_raw:
+            pt = reader_raw(self.fp)
+            print(pt)
+        exit()
+
 
         
 
