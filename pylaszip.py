@@ -441,19 +441,19 @@ class read_item_compressed_point10_v2:
         self.last_intensity = [0]*16
         self.last_height = [0]*8
 
-        self.dec.init_symbol_model(self.m_changed_values)
+        self.m_changed_values.init()
         self.ic_intensity.init_decompressor()
-        self.dec.init_symbol_model(self.m_scan_angle_rank[0])
-        self.dec.init_symbol_model(self.m_scan_angle_rank[1])
+        self.m_scan_angle_rank[0].init()
+        self.m_scan_angle_rank[1].init()
         self.ic_point_source_ID.init_decompressor()
 
         for i in range(256):
             if self.m_bit_byte[i] != 0:
-                self.dec.init_symbol_model(self.m_bit_byte[i])
+                self.m_bit_byte[i].init()
             if self.m_classification[i] != 0:
-                self.dec.init_symbol_model(self.m_classification[i])
+                self.m_classification[i].init()
             if self.m_user_data[i] != 0:
-                self.dec.init_symbol_model(self.m_user_data[i])
+                self.m_user_data[i].init()
         
         self.ic_dx.init_decompressor()
         self.ic_dy.init_decompressor()
@@ -463,14 +463,30 @@ class read_item_compressed_point10_v2:
         self.last_item[12] = 0
         self.last_item[13] = 0
 
+LASZIP_GPSTIME_MULTI = 500
+LASZIP_GPSTIME_MULTI_MINUS = -10
+LASZIP_GPSTIME_MULTI_TOTAL = LASZIP_GPSTIME_MULTI - LASZIP_GPSTIME_MULTI_MINUS + 6
 
 read_item_compressed_gpstime11_v1 = not_implemented_func
 class read_item_compressed_gpstime11_v2:
     def __init__(self, dec):
         self.dec = dec
 
+        self.m_gpstime_multi = self.dec.create_symbol_model(LASZIP_GPSTIME_MULTI_TOTAL)
+        self.m_gpstime_0diff = self.dec.create_symbol_model(6)
+        self.ic_gpstime = IntegerCompressor(dec, 32, 9)
+
     def init(self, item, context):
-        raise NotImplementedError("gpstime11_v2.imit() not implemented")
+        self.last = 0
+        self.next = 0
+        self.last_gpstime_diff = [0, 0, 0, 0]
+        self.multi_extreme_counter = [0, 0, 0, 0]
+
+        self.m_gpstime_multi.init()
+        self.m_gpstime_0diff.init()
+        self.ic_gpstime.init_decompressor()
+
+        self.last_gpstime = [item, 0, 0, 0]
     
 read_item_compressed_rgb12_v1 = not_implemented_func
 read_item_compressed_rgb12_v2 = not_implemented_func
@@ -755,8 +771,12 @@ class PointReader:
             pt_section = reader_raw(self.fp)
             point.append(pt_section)
 
-        #for i, reader_compressed in enumerate(self.readers_compressed):
-        #    reader_compressed(point, context)
+        for i, reader_compressed in enumerate(self.readers_compressed):
+            reader_compressed.init(list(point[i]), context)
+
+        self.dec.init(self.fp)
+
+        self.readers = self.readers_compressed
 
         exit()
 
