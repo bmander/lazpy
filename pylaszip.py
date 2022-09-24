@@ -1,3 +1,5 @@
+from base64 import decode
+import re
 import struct
 from enum import IntEnum
 import sys
@@ -32,6 +34,28 @@ class ItemType(IntEnum):
     WAVEPACKET14 = 13
     BYTE14 = 14
 
+NUMBER_RETURN_MAP = (
+  ( 15, 14, 13, 12, 11, 10,  9,  8 ),
+  ( 14,  0,  1,  3,  6, 10, 10,  9 ),
+  ( 13,  1,  2,  4,  7, 11, 11, 10 ),
+  ( 12,  3,  4,  5,  8, 12, 12, 11 ),
+  ( 11,  6,  7,  8,  9, 13, 13, 12 ),
+  ( 10, 10, 11, 12, 13, 14, 14, 13 ),
+  (  9, 10, 11, 12, 13, 14, 15, 14 ),
+  (  8,  9, 10, 11, 12, 13, 14, 15 )
+)
+
+NUMBER_RETURN_LEVEL = (
+  (  0,  1,  2,  3,  4,  5,  6,  7 ),
+  (  1,  0,  1,  2,  3,  4,  5,  6 ),
+  (  2,  1,  0,  1,  2,  3,  4,  5 ),
+  (  3,  2,  1,  0,  1,  2,  3,  4 ),
+  (  4,  3,  2,  1,  0,  1,  2,  3 ),
+  (  5,  4,  3,  2,  1,  0,  1,  2 ),
+  (  6,  5,  4,  3,  2,  1,  0,  1 ),
+  (  7,  6,  5,  4,  3,  2,  1,  0 )
+)
+
 def unsigned_int(bytes):
     return int.from_bytes(bytes, byteorder='little', signed=False)
 
@@ -55,27 +79,6 @@ def double(bytes):
 def cstr(bytes):
     return bytes.rstrip(b'\0')
 
-
-def get_readers(laszip_header):
-    readers = []
-    for item in laszip_header['items']:
-        if item['type'] == ItemType.POINT10:
-            readers.append(point10_reader)
-        elif item['type'] == ItemType.GPSTIME11:
-            readers.append(gps_time11_reader)
-        elif item['type'] in {ItemType.RGB12, ItemType.RGBNIR14}:
-            readers.append(rgb_reader)
-        elif item['type'] in {ItemType.BYTE, ItemType.BYTE14}:
-            readers.append(byte_reader)
-        elif item['type'] == ItemType.Point14:
-            readers.append(point14_reader)
-        elif item['type'] == ItemType.RGBNIR14:
-            readers.append(rgbnir14_reader)
-        elif item['type'] in {ItemType.WAVEPACKET13, ItemType.WAVEPACKET14}: 
-            readers.append(wavepacket_reader)
-        else:
-            raise Exception("Unknown item type")
-    return readers
 
 class ArithmeticBitModel:
     BM_LENGTH_SHIFT = 13
@@ -200,6 +203,9 @@ class ArithmeticModel:
 
         return ret
 
+class ArithmeticEncoder:
+    def __init__(self):
+        raise NotImplementedError()
 
 class ArithmeticDecoder:
     AC_MAX_LENGTH = 0xFFFFFFFF
@@ -394,15 +400,87 @@ class StreamingMedian5:
             self.high = True
 
     def add(self, v):
-        # TODO figure this out and simplify it
         if self.high:
             self._add_high(v)
         else:
             self._add_low(v)
 
+    def get(self):
+        return self.values[2]
+
 
 def not_implemented_func(*args, **kwargs):
     raise NotImplementedError
+
+class LasPoint10:
+
+    # the LasPoint10 struct from LasZip has the following structure:
+  #I32 x;  0:4
+  #I32 y;  4:8
+  #I32 z;  8:12
+  #U16 intensity; 12:14
+  #U8 return_number : 3;  14:15
+  #U8 number_of_returns_of_given_pulse : 3; 14:15
+  #U8 scan_direction_flag : 1; 14:15
+  #U8 edge_of_flight_line : 1; 14:15
+  #U8 classification; 15:16
+  #I8 scan_angle_rank; 16:17
+  #U8 user_data; 17:18
+  #U16 point_source_ID; 18:20
+
+    @classmethod
+    def from_bytes(cls, bytes):
+        ret = cls()
+
+        ret.x = unsigned_int(bytes[0:4])
+        ret.y = unsigned_int(bytes[4:8])
+        ret.z = unsigned_int(bytes[8:12])
+        ret.intensity = unsigned_int(bytes[12:14])
+
+        bitfield = unsigned_int(bytes[14:15])
+        ret.set_bitfield(bitfield)
+
+        ret.classification = unsigned_int(bytes[15:16])
+        ret.scan_angle_rank = unsigned_int(bytes[16:17])
+        ret.user_data = unsigned_int(bytes[17:18])
+        ret.point_source_id = unsigned_int(bytes[18:20])
+
+        return ret
+
+    def __init__(self):
+        self.x = 0
+        self.y = 0
+        self.z = 0
+        self.intensity = 0
+
+        self.return_num = 0
+        self.num_returns = 0
+        self.scan_dir_flag = 0
+        self.edge_of_flight_line = 0
+
+        self.classification = 0
+        self.scan_angle_rank = 0
+        self.user_data = 0
+        self.point_source_id = 0
+
+    def bitfield_value(self):
+        return self.return_num | (self.num_returns << 3) | (self.scan_dir_flag << 6) | (self.edge_of_flight_line << 7)
+
+    def set_bitfield(self, byte):
+        self.return_num = byte & 0b00000111
+        self.num_returns = (byte & 0b00111000) >> 3
+        self.scan_dir_flag = (byte & 0b01000000) >> 6
+        self.edge_of_flight_line = (byte & 0b10000000) >> 7
+
+def u8_fold(n):
+    # eg 0 - 1 = 255
+    # eg 255 + 1 = 0
+    return n & 0xFF
+
+def u32_zero_bit_0(n):
+    # set bit 0 to 0
+    return n & 0xFFFFFFFE
+
 
 read_item_compressed_point10_v1 = not_implemented_func
 class read_item_compressed_point10_v2:
@@ -459,9 +537,83 @@ class read_item_compressed_point10_v2:
         self.ic_dy.init_decompressor()
         self.ic_z.init_decompressor()
 
-        self.last_item = item.copy()
-        self.last_item[12] = 0
-        self.last_item[13] = 0
+        self.last_item = item
+        self.last_item.intensity = 0
+
+    def read(self, item, context):
+        ret = LasPoint10()
+
+        changed_values = self.dec.decode_symbol(self.m_changed_values)
+
+        r = self.last_item.return_num
+        n = self.last_item.num_returns
+        m = NUMBER_RETURN_MAP[n][r]
+        l = NUMBER_RETURN_LEVEL[n][r]
+
+        if changed_values != 0:
+            # decompress bit field byte
+            if changed_values & 0b100000:
+                bitfield = self.last_item.bitfield_value()
+                if self.m_bit_byte[bitfield] == 0:
+                    self.m_bit_byte[bitfield] = self.dec.create_symbol_model(256)
+                    self.m_bit_byte[bitfield].init()
+                ret.set_bitfield(self.dec.decode_symbol(self.m_bit_byte[bitfield]))
+
+            # decompress intensity
+            if changed_values & 0b10000:
+                context = max(m, 3)
+                ret.intensity = self.ic_intensity.decompress(self.last_intensity[m], context)
+                self.last_intensity[m] = ret.intensity
+            else:
+                ret.intensity = self.last_intensity[m]
+
+            # decompress classification
+            if changed_values & 0b1000:
+                if self.m_classification[self.last_item.classification] == 0:
+                    self.m_classification[self.last_item.classification] = self.dec.create_symbol_model(256)
+                    self.m_classification[self.last_item.classification].init()
+                ret.classification = self.dec.decode_symbol(self.m_classification[self.last_item.classification])
+
+            # decompress scan angle rank
+            if changed_values & 0b100:
+                f = self.last_item.scan_dir_flag
+                val = self.dec.decode_symbol(self.m_scan_angle_rank[f])
+                ret.scan_angle_rank = u8_fold(val + self.last_item.scan_angle_rank)
+
+
+            # decompress user data
+            if changed_values & 0b10:
+                if self.m_user_data[self.last_item.user_data] == 0:
+                    self.m_user_data[self.last_item.user_data] = self.dec.create_symbol_model(256)
+                    self.m_user_data[self.last_item.user_data].init()
+                ret.user_data = self.dec.decode_symbol(self.m_user_data[self.last_item.user_data])
+
+            # decompress point source ID
+            if changed_values & 0b1:
+                ret.point_source_ID = self.ic_point_source_ID.decompress(self.last_item.point_source_ID)
+
+        # decompress x
+        median = self.last_x_diff_median5[m].get()
+        diff = self.ic_dx.decompress(median, int(n==1))
+        ret.x = self.last_item.x + diff
+        self.last_x_diff_median5[m].add(diff)
+
+        # decompress y
+        median = self.last_y_diff_median5[m].get()
+        k_bits = self.ic_dx.k
+        context = int(n==1) + (u32_zero_bit_0(k_bits) if k_bits<20 else 20)
+        diff = self.ic_dy.decompress(median, context)
+        ret.y = self.last_item.y + diff
+        self.last_y_diff_median5[m].add(diff)
+
+        # decompress z
+        k_bits = (self.ic_dx.k + self.ic_dy.k) // 2
+        context = int(n==1) + (u32_zero_bit_0(k_bits) if k_bits<18 else 18)
+        ret.z = self.ic_z.decompress(self.last_height[l], context)
+        self.last_height[l] = ret.z
+
+        return ret
+                    
 
 LASZIP_GPSTIME_MULTI = 500
 LASZIP_GPSTIME_MULTI_MINUS = -10
@@ -504,24 +656,6 @@ read_item_compressed_wavepacket13_v1 = not_implemented_func
 read_item_compressed_wavepacket14_v3 = not_implemented_func
 read_item_compressed_wavepacket14_v4 = not_implemented_func
 
-def _read_item_raw_point10(fp):
-    x = unsigned_int(fp.read(4))
-    y = unsigned_int(fp.read(4))
-    z = unsigned_int(fp.read(4))
-    intensity = unsigned_int(fp.read(2))
-
-    bitfield = unsigned_int(fp.read(1))
-    return_num = bitfield & 0b00000111
-    num_returns = (bitfield & 0b00111000) >> 3
-    scan_dir_flag = (bitfield & 0b01000000) >> 6
-    edge_of_flight_line = (bitfield & 0b10000000) >> 7
-
-    classification = unsigned_int(fp.read(1))
-    scan_angle_rank = unsigned_int(fp.read(1))
-    user_data = unsigned_int(fp.read(1))
-    point_source_id = unsigned_int(fp.read(2))
-
-    return (x, y, z, intensity, return_num, num_returns, scan_dir_flag, edge_of_flight_line, classification, scan_angle_rank, user_data, point_source_id)
 
 def las_read_item_raw_point10_le(fp):
     return fp.read(20)
@@ -572,6 +706,8 @@ class IntegerCompressor:
         self.m_bits = None
         self.m_corrector = None
 
+        self.k = 0
+
     def init_decompressor(self):
         assert self.dec
 
@@ -596,23 +732,23 @@ class IntegerCompressor:
 
 
     def _read_corrector(self, model):
-        k = self.dec.decode_symbol(model)
+        self.k = self.dec.decode_symbol(model)
 
-        if k != 0:
-            if k < 32:
-                if k <= self.bits_high:
-                    c = self.dec.decode_symbol(self.m_corrector[k])
+        if self.k != 0:
+            if self.k < 32:
+                if self.k <= self.bits_high:
+                    c = self.dec.decode_symbol(self.m_corrector[self.k])
                 else:
-                    k1 = k-self.bits_high
-                    c = self.dec.decode_symbol(self.m_corrector[k])
+                    k1 = self.k-self.bits_high
+                    c = self.dec.decode_symbol(self.m_corrector[self.k])
                     c1 = self.dec.read_bits(k1)
                     c = (c << k1) | c1
                 
                 # translate c back into its correct interval
-                if c >= (1 << (k-1)):
+                if c >= (1 << (self.k-1)):
                     c += 1
                 else:
-                    c -= (1<<k)-1
+                    c -= (1<<self.k)-1
 
             else:
                 c = self.corr_min
@@ -622,7 +758,7 @@ class IntegerCompressor:
         return c
 
 
-    def decompress(self, pred, context):
+    def decompress(self, pred, context=0):
         assert self.dec
 
         real = pred + self._read_corrector(self.m_bits[context])
@@ -650,22 +786,23 @@ class PointReader:
             raise Exception("Unknown coder")
 
         # create raw_readers
+        type_raw_reader = {
+            ItemType.POINT10: las_read_item_raw_point10_le,
+            ItemType.GPSTIME11: las_read_item_raw_gpstime11_le,
+            #ItemType.RGB12: las_read_item_raw_rgb12_le,
+            #ItemType.BYTE: las_read_item_raw_byte_le,
+            #ItemType.RGBNIR14: las_read_item_raw_rgbnir14_le,
+            #ItemType.WAVEPACKET13: las_read_item_raw_wavepacket13_le,
+        }
+
         self.readers_raw = []
         for item in reader.header['laszip']['items']:
-            if item['type'] == ItemType.POINT10:
-                self.readers_raw.append( las_read_item_raw_point10_le )
-            elif item['type'] == ItemType.GPSTIME11:
-                self.readers_raw.append( las_read_item_raw_gpstime11_le )
-            elif item['type'] in {ItemType.RGB12, ItemType.RGB14}:
-                self.readers_raw.append( read_item_raw_rgb12 )
-            elif item['type'] in {ItemType.BYTE, ItemType.BYTE14}:
-                self.readers_raw.append( read_item_raw_byte )
-            elif item['type'] == ItemType.RGBNIR14:
-                self.readers_raw.append( read_item_raw_rgbnir14 )
-            elif item['type'] in {ItemType.WAVEPACKET13, ItemType.WAVEPACKET14}:
-                self.readers_raw.append( read_item_raw_wavepacket13 )
-            else:
+            func = type_raw_reader.get( item['type'] )
+
+            if func is None:
                 raise Exception("Unknown item type")
+
+            self.readers_raw.append(func)
 
             self.point_size += item['size']
 
@@ -972,9 +1109,12 @@ def main(filename):
     print( "num points: ", reader.npoints )
 
     for i in range(reader.num_points):
+        if i>1:
+            break
+
         point = reader.point_reader.read()
-        print([list(x) for x in point])
-        break
+        print(i, ":", [list(x) for x in point])
+
 
 
 if __name__ == '__main__':
