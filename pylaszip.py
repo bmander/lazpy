@@ -712,6 +712,9 @@ class PointReader:
         else:
             raise Exception("Pointwise compressor not supported")
 
+        self.readers = None
+        self.chunk_starts = None
+
 
     def init(self, fp):
         self.fp = fp
@@ -749,38 +752,42 @@ class PointReader:
         self.dec.done()
 
         # calculate chunk offsets
-        chunk_starts = [chunks_start]
+        self.chunk_starts = [chunks_start]
         for chunk_size in chunk_sizes:
-            chunk_starts.append( chunk_starts[-1] + chunk_size )
+            self.chunk_starts.append( self.chunk_starts[-1] + chunk_size )
 
         self.fp.seek(chunks_start)
+        self.point_start = chunks_start
 
 
     def read(self):
         context = 0
 
-        # init_decoders
-        self._read_chunk_table()
-
-        self.point_start = self.fp.tell()
-
-        self.chunk_count += 1
+        # if chunk table hasn't been read, read it
+        if self.chunk_starts is None:
+            self._read_chunk_table()
 
         point = []
-        for reader_raw in self.readers_raw:
-            pt_section = reader_raw(self.fp)
-            point.append(pt_section)
 
-        for i, reader_compressed in enumerate(self.readers_compressed):
-            reader_compressed.init(list(point[i]), context)
+        # if the compressed readers haven't been initialized, 
+        # read the first uncompressed point and then initialize them
+        if self.readers is None:
+            for reader_raw in self.readers_raw:
+                pt_section = reader_raw(self.fp)
+                point.append(pt_section)
 
-        self.dec.init(self.fp)
+            for i, reader_compressed in enumerate(self.readers_compressed):
+                reader_compressed.init(list(point[i]), context)
 
-        self.readers = self.readers_compressed
+            self.dec.init(self.fp)
 
-        exit()
+            self.readers = self.readers_compressed
+        else:
+            for reader in self.readers:
+                pt_section = reader.read(point, context)
+                point.append(pt_section)
 
-
+        return point
         
 
 class Reader:
@@ -962,11 +969,11 @@ def main(filename):
 
     reader.open(filename)
 
-    print( reader.npoints )
+    print( "num points: ", reader.npoints )
 
     for i in range(reader.num_points):
         point = reader.point_reader.read()
-        print(point)
+        print([list(x) for x in point])
         break
 
 
@@ -981,3 +988,4 @@ if __name__ == '__main__':
         sys.exit(1)
 
     main(filename)
+
