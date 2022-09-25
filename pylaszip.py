@@ -497,8 +497,8 @@ class read_item_compressed_point10_v2:
         self.m_classification = [0]*256
         self.m_user_data = [0]*256
         self.ic_dx = IntegerCompressor(dec, 32, 2)
-        self.ic_dy = IntegerCompressor(dec, 32, 2)
-        self.ic_z = IntegerCompressor(dec, 32, 2)
+        self.ic_dy = IntegerCompressor(dec, 32, 22)
+        self.ic_z = IntegerCompressor(dec, 32, 20)
 
         self.last_x_diff_median5 = []
         self.last_y_diff_median5 = []
@@ -537,7 +537,7 @@ class read_item_compressed_point10_v2:
         self.ic_dy.init_decompressor()
         self.ic_z.init_decompressor()
 
-        self.last_item = item
+        self.last_item = LasPoint10.from_bytes( item )
         self.last_item.intensity = 0
 
     def read(self, item, context):
@@ -561,7 +561,7 @@ class read_item_compressed_point10_v2:
 
             # decompress intensity
             if changed_values & 0b10000:
-                context = max(m, 3)
+                context = min(m, 3)
                 ret.intensity = self.ic_intensity.decompress(self.last_intensity[m], context)
                 self.last_intensity[m] = ret.intensity
             else:
