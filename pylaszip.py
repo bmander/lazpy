@@ -345,6 +345,12 @@ class ArithmeticDecoder:
 
         return sym
 
+    def read_int(self):
+        lower = self.read_short()
+        upper = self.read_short()
+
+        return (upper << 16) | lower
+
     def create_symbol_model(self, num_symbols):
         return ArithmeticModel(num_symbols, False)
 
@@ -654,6 +660,7 @@ class read_item_compressed_point10_v2:
         ret.z = self.ic_z.decompress(self.last_height[el], context)
         self.last_height[el] = ret.z
 
+        self.last_item = ret
         return ret
 
 
@@ -661,6 +668,10 @@ LASZIP_GPSTIME_MULTI = 500
 LASZIP_GPSTIME_MULTI_MINUS = -10
 LASZIP_GPSTIME_MULTI_TOTAL = LASZIP_GPSTIME_MULTI - \
                              LASZIP_GPSTIME_MULTI_MINUS + 6
+LASZIP_GPSTIME_MULTI_UNCHANGED = LASZIP_GPSTIME_MULTI - \
+                                 LASZIP_GPSTIME_MULTI_MINUS + 1
+LASZIP_GPSTIME_MULTI_CODE_FULL = LASZIP_GPSTIME_MULTI - \
+                                 LASZIP_GPSTIME_MULTI_MINUS + 2
 
 read_item_compressed_gpstime11_v1 = not_implemented_func
 
@@ -685,6 +696,93 @@ class read_item_compressed_gpstime11_v2:
         self.ic_gpstime.init_decompressor()
 
         self.last_gpstime = [item, 0, 0, 0]
+
+    def _read_lastdiff_zero(self, item, context):
+        multi = self.dec.decode_symbol(self.m_gpstime_0diff)
+
+        if multi == 1:  # the difference fits in 32 bits
+            val = self.ic_gpstime.decompress(0, 0)
+            self.last_gpstime_diff[self.last] = val
+            self.last_gpstime[self.last] += val
+            self.multi_extreme_counter[self.last] = 0
+        elif multi == 2:  # the difference is large
+            self.next = (self.next + 1) & 3
+            val = self.ic_gpstime.decompress(
+                    self.last_gpstime[self.last] >> 32, 8)
+            val <<= 32
+            val = val | self.dec.read_int()
+            self.last_gpstime[self.next] = val
+
+            self.last = self.next
+            self.last_gpstime_diff[self.last] = 0
+            self.multi_extreme_counter[self.last] = 0
+        elif multi > 2:  # switch to another sequence
+            self.last = (self.last+self.multi-2) ^ 3
+            self.read(item, context)
+
+    def _read_lastdiff_nonzero(self, item, context):
+        multi = self.dec.decode_symbol(self.m_gpstime_multi)
+        if multi == 1:
+            pred = self.last_gpstime[self.last]
+            val = self.ic_gpstime.decompress(pred, 1)
+            self.last_gpstime[self.last] += val
+
+            self.multi_extreme_counter[self.last] = 0
+        elif multi < LASZIP_GPSTIME_MULTI_UNCHANGED:
+            if multi == 0:
+                gpstime_diff = self.ic_gpstime.decompress(0, 7)
+                self.multi_extreme_counter[self.last] += 1
+                if self.multi_extreme_counter[self.last] > 3:
+                    self.last_gpstime[self.last] = gpstime_diff
+                    self.multi_extreme_counter[self.last] = 0
+            elif multi > LASZIP_GPSTIME_MULTI:
+                pred = multi*self.last_gpstime[self.last]
+                context = 2 if multi < 10 else 3
+                gpstime_diff = self.ic_gpstime.decompress(pred, context)
+            elif multi == LASZIP_GPSTIME_MULTI:
+                pred = LASZIP_GPSTIME_MULTI*self.last_gpstime[self.last]
+                gpstime_diff = self.ic_gpstime.decompress(pred, 4)
+                self.multi_extreme_counter[self.last] += 1
+                if self.multi_extreme_counter[self.last] > 3:
+                    self.last_gpstime_diff[self.last] = gpstime_diff
+                    self.multi_extreme_counter[self.last] = 0
+            else:
+                multi = LASZIP_GPSTIME_MULTI - multi
+                if multi > LASZIP_GPSTIME_MULTI_MINUS:
+                    pred = multi*self.last_gpstime_diff[self.last]
+                    gpstime_diff = self.ic_gpstime.decompress(pred, 5)
+                else:
+                    pred = LASZIP_GPSTIME_MULTI_MINUS * \
+                            self.last_gpstime_diff[self.last]
+                    gpstime_diff = self.ic_gpstime.decompress(pred, 6)
+                    self.multi_extreme_counter[self.last] += 1
+                    if self.multi_extreme_counter[self.last] > 3:
+                        self.last_gpstime_diff[self.last] = gpstime_diff
+                        self.multi_extreme_counter[self.last] = 0
+
+            self.last_gpstime[self.last] += gpstime_diff
+        elif multi == LASZIP_GPSTIME_MULTI_CODE_FULL:
+            self.next = (self.next+1) & 3
+            pred = self.last_gpstime[self.last] >> 32
+            val = self.ic_gpstime.decompress(pred, 8)
+            val <<= 32
+            val = val | self.dec.read_int()
+            self.last_gpstime[self.next] = val
+
+            self.last = self.next
+            self.last_gpstime_diff[self.last] = 0
+            self.multi_extreme_counter[self.last] = 0
+        elif multi >= LASZIP_GPSTIME_MULTI_CODE_FULL:
+            self.last = (self.last+multi-LASZIP_GPSTIME_MULTI_CODE_FULL) & 3
+            self.read(item, context)
+
+    def read(self, item, context):
+        if self.last_gpstime_diff[self.last] == 0:
+            self._read_lastdiff_zero(item, context)
+        else:
+            self._read_lastdiff_nonzero(item, context)
+
+        return self.last_gpstime[self.last]
 
 
 read_item_compressed_rgb12_v1 = not_implemented_func
@@ -739,12 +837,12 @@ class IntegerCompressor:
                 self.corr_bits += 1
             if self.corr_range == (1 << (self.corr_bits - 1)):
                 self.corr_bits -= 1
-            self.corr_min = -self.corr_range//2
+            self.corr_min = -self.corr_range // 2
             self.corr_max = self.corr_min+self.corr_range-1
         elif bits > 0 and bits < 32:
             self.corr_bits = bits
             self.corr_range = 1 << bits
-            self.corr_min = -self.corr_range//2
+            self.corr_min = -self.corr_range // 2
             self.corr_max = self.corr_min+self.corr_range-1
         else:
             self.corr_bits = 32
