@@ -107,7 +107,7 @@ class ArithmeticBitModel:
                 self.bit_count += 1
 
         # compute scaled bit 0 probability
-        scale = 0x80000000 / self.bit_count
+        scale = 0x80000000 // self.bit_count
         self.bit_0_prob = (self.bit_0_count * scale) >> \
                           (31 - self.BM_LENGTH_SHIFT)
 
