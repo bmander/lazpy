@@ -1,5 +1,3 @@
-from base64 import decode
-import re
 import struct
 from enum import IntEnum
 import sys
@@ -8,14 +6,17 @@ import sys
 # 1.2: https://www.asprs.org/a/society/committees/standards/asprs_las_format_v12.pdf
 # 1.4: https://www.asprs.org/wp-content/uploads/2010/12/LAS_1_4_r13.pdf
 
+
 class Compressor(IntEnum):
     NONE = 0
     POINTWISE = 1
     POINTWISE_CHUNKED = 2
     LAYERED_CHUNKED = 3
 
+
 class Coder(IntEnum):
     ARITHMETIC = 0
+
 
 class ItemType(IntEnum):
     BYTE = 0
@@ -34,27 +35,30 @@ class ItemType(IntEnum):
     WAVEPACKET14 = 13
     BYTE14 = 14
 
+
 NUMBER_RETURN_MAP = (
-  ( 15, 14, 13, 12, 11, 10,  9,  8 ),
-  ( 14,  0,  1,  3,  6, 10, 10,  9 ),
-  ( 13,  1,  2,  4,  7, 11, 11, 10 ),
-  ( 12,  3,  4,  5,  8, 12, 12, 11 ),
-  ( 11,  6,  7,  8,  9, 13, 13, 12 ),
-  ( 10, 10, 11, 12, 13, 14, 14, 13 ),
-  (  9, 10, 11, 12, 13, 14, 15, 14 ),
-  (  8,  9, 10, 11, 12, 13, 14, 15 )
+  (15, 14, 13, 12, 11, 10,  9,  8),
+  (14,  0,  1,  3,  6, 10, 10,  9),
+  (13,  1,  2,  4,  7, 11, 11, 10),
+  (12,  3,  4,  5,  8, 12, 12, 11),
+  (11,  6,  7,  8,  9, 13, 13, 12),
+  (10, 10, 11, 12, 13, 14, 14, 13),
+  (9, 10, 11, 12, 13, 14, 15, 14),
+  (8,  9, 10, 11, 12, 13, 14, 15)
 )
 
+
 NUMBER_RETURN_LEVEL = (
-  (  0,  1,  2,  3,  4,  5,  6,  7 ),
-  (  1,  0,  1,  2,  3,  4,  5,  6 ),
-  (  2,  1,  0,  1,  2,  3,  4,  5 ),
-  (  3,  2,  1,  0,  1,  2,  3,  4 ),
-  (  4,  3,  2,  1,  0,  1,  2,  3 ),
-  (  5,  4,  3,  2,  1,  0,  1,  2 ),
-  (  6,  5,  4,  3,  2,  1,  0,  1 ),
-  (  7,  6,  5,  4,  3,  2,  1,  0 )
+  (0,  1,  2,  3,  4,  5,  6,  7),
+  (1,  0,  1,  2,  3,  4,  5,  6),
+  (2,  1,  0,  1,  2,  3,  4,  5),
+  (3,  2,  1,  0,  1,  2,  3,  4),
+  (4,  3,  2,  1,  0,  1,  2,  3),
+  (5,  4,  3,  2,  1,  0,  1,  2),
+  (6,  5,  4,  3,  2,  1,  0,  1),
+  (7,  6,  5,  4,  3,  2,  1,  0)
 )
+
 
 def unsigned_int(bytes):
     return int.from_bytes(bytes, byteorder='little', signed=False)
@@ -104,7 +108,8 @@ class ArithmeticBitModel:
 
         # compute scaled bit 0 probability
         scale = 0x80000000 / self.bit_count
-        self.bit_0_prob = (self.bit_0_count * scale) >> (31 - self.BM_LENGTH_SHIFT)
+        self.bit_0_prob = (self.bit_0_count * scale) >> \
+                          (31 - self.BM_LENGTH_SHIFT)
 
         # update frequency of model updates
         self.update_cycle = (5 * self.update_cycle) >> 2
@@ -127,12 +132,12 @@ class ArithmeticModel:
 
     def init(self, table=None):
         if self.distribution is None:
-            if self.num_symbols<2 or self.num_symbols>2048:
+            if self.num_symbols < 2 or self.num_symbols > 2048:
                 raise Exception("Invalid number of symbols")
-            
+
             self.last_symbol = self.num_symbols-1
 
-            if not self.compress and self.num_symbols>16:
+            if not self.compress and self.num_symbols > 16:
                 table_bits = 3
                 while self.num_symbols > (1 << (table_bits+2)):
                     table_bits += 1
@@ -141,7 +146,7 @@ class ArithmeticModel:
 
                 self.table_size = 1 << table_bits
                 self.decoder_table = [0] * (self.table_size + 2)
-            else: # small alphabet; no table needed
+            else:  # small alphabet; no table needed
                 self.table_shift = self.table_size = 0
 
             self.distribution = [0] * self.num_symbols
@@ -155,8 +160,8 @@ class ArithmeticModel:
             self.symbol_count = [1] * self.num_symbols
 
         self._update()
-        self.symbols_until_update = self.update_cycle = (self.num_symbols+6) >> 1
-
+        self.symbols_until_update = (self.num_symbols+6) >> 1
+        self.update_cycle = self.symbols_until_update
 
     def _update(self):
         # halve counts when threshold is reached
@@ -171,13 +176,15 @@ class ArithmeticModel:
         sum, s = 0, 0
         scale = 0x80000000 // self.total_count
 
-        if self.compress or self.table_size==0:
+        if self.compress or self.table_size == 0:
             for k in range(self.num_symbols):
-                self.distribution[k] = (scale*sum) >> (31 - self.DM_LENGTH_SHIFT)
+                self.distribution[k] = (scale*sum) >> \
+                                       (31 - self.DM_LENGTH_SHIFT)
                 sum += self.symbol_count[k]
         else:
             for k in range(self.num_symbols):
-                self.distribution[k] = (scale*sum) >> (31 - self.DM_LENGTH_SHIFT)
+                self.distribution[k] = (scale*sum) >> \
+                                       (31 - self.DM_LENGTH_SHIFT)
                 sum += self.symbol_count[k]
                 w = self.distribution[k] >> self.table_shift
                 while s < w:
@@ -188,7 +195,6 @@ class ArithmeticModel:
                 s += 1
                 self.decoder_table[s] = self.num_symbols - 1
 
-
         # set frequency of model updates
         self.update_cycle = (5 * self.update_cycle) >> 2
         max_cycle = (self.num_symbols + 6) << 3
@@ -196,16 +202,21 @@ class ArithmeticModel:
         self.symbols_until_update = self.update_cycle
 
     def __str__(self):
-        ret = f"ArithmeticModel(num_symbols={self.num_symbols}, compress={self.compress}, " \
-        f"distribution={self.distribution}, decoder_table={self.decoder_table}, " \
-        f"symbol_count={self.symbol_count}, total_count={self.total_count}, " \
-        f"update_cycle={self.update_cycle}, symbols_until_update={self.symbols_until_update})"
+        ret = f"ArithmeticModel(num_symbols={self.num_symbols}," \
+          f"compress={self.compress}, distribution={self.distribution}, " \
+          f"decoder_table={self.decoder_table}, " \
+          f"symbol_count={self.symbol_count}, " \
+          f"total_count={self.total_count}, " \
+          f"update_cycle={self.update_cycle}, " \
+          f"symbols_until_update={self.symbols_until_update})"
 
         return ret
+
 
 class ArithmeticEncoder:
     def __init__(self):
         raise NotImplementedError()
+
 
 class ArithmeticDecoder:
     AC_MAX_LENGTH = 0xFFFFFFFF
@@ -225,7 +236,7 @@ class ArithmeticDecoder:
     def decode_bit(self, m):
         # m is an ArithmeticBitModel
         x = m.bit_0_prob * (self.length >> m.BM_LENGTH_SHIFT)
-        
+
         if self.value < x:
             self.length = x
             m.bit_0_count += 1
@@ -235,7 +246,7 @@ class ArithmeticDecoder:
 
         if self.length < self.AC_MIN_LENGTH:
             self._renorm_dec_interval()
-        
+
         m.bits_until_update -= 1
         if m.bits_until_update == 0:
             m.update()
@@ -260,7 +271,7 @@ class ArithmeticDecoder:
             sym = m.decoder_table[t]
             n = m.decoder_table[t+1] + 1
 
-            while(n > sym+1):
+            while n > sym+1:
                 k = (sym + n) >> 1
                 if m.distribution[k] > dv:
                     n = k
@@ -286,11 +297,11 @@ class ArithmeticDecoder:
                 else:
                     sym = k
                     x = z
-                
+
                 k = (sym + n) >> 1
                 if k == sym:
                     break
-        
+
         self.value -= x
         self.length = y - x
 
@@ -310,14 +321,14 @@ class ArithmeticDecoder:
     def read_short(self):
         self.length >>= 16
         sym = self.value // self.length
-        
+
         if self.length < self.AC_MIN_LENGTH:
             self._renorm_dec_interval()
 
-        return sym 
+        return sym
 
     def read_bits(self, bits):
-        assert bits>0 and bits<=32
+        assert bits > 0 and bits <= 32
 
         if bits > 19:
             tmp = self.read_short()
@@ -325,7 +336,7 @@ class ArithmeticDecoder:
             tmp1 = self.read_bits(bits) << 16
             return tmp1 | tmp
 
-        self.length >>= bits 
+        self.length >>= bits
         sym = self.value // (self.length)
         self.value -= sym * self.length
 
@@ -334,12 +345,12 @@ class ArithmeticDecoder:
 
         return sym
 
-
     def create_symbol_model(self, num_symbols):
         return ArithmeticModel(num_symbols, False)
 
     def done(self):
         self.fp = None
+
 
 class StreamingMedian5:
     def __init__(self):
@@ -354,7 +365,7 @@ class StreamingMedian5:
             # shift upper section up one
             self.values[4] = self.values[3]
             self.values[3] = self.values[2]
-            
+
             # if v is less than the lowest
             if v < self.values[0]:
                 # shift lower half up one and insert v at bottom
@@ -412,21 +423,8 @@ class StreamingMedian5:
 def not_implemented_func(*args, **kwargs):
     raise NotImplementedError
 
-class LasPoint10:
 
-    # the LasPoint10 struct from LasZip has the following structure:
-  #I32 x;  0:4
-  #I32 y;  4:8
-  #I32 z;  8:12
-  #U16 intensity; 12:14
-  #U8 return_number : 3;  14:15
-  #U8 number_of_returns_of_given_pulse : 3; 14:15
-  #U8 scan_direction_flag : 1; 14:15
-  #U8 edge_of_flight_line : 1; 14:15
-  #U8 classification; 15:16
-  #I8 scan_angle_rank; 16:17
-  #U8 user_data; 17:18
-  #U16 point_source_ID; 18:20
+class LasPoint10:
 
     @classmethod
     def from_bytes(cls, bytes):
@@ -464,7 +462,8 @@ class LasPoint10:
         self.point_source_id = 0
 
     def bitfield_value(self):
-        return self.return_num | (self.num_returns << 3) | (self.scan_dir_flag << 6) | (self.edge_of_flight_line << 7)
+        return self.return_num | (self.num_returns << 3) | \
+                (self.scan_dir_flag << 6) | (self.edge_of_flight_line << 7)
 
     def set_bitfield(self, byte):
         self.return_num = byte & 0b00000111
@@ -491,17 +490,22 @@ class LasPoint10:
         return ret
 
     def __str__(self):
-        return "LasPoint10(x={}, y={}, z={}, intensity={}, " \
-        "return_num={}, num_returns={}, scan_dir_flag={}, " \
-        "edge_of_flight_line={}, classification={}, scan_angle_rank={}, " \
-        "user_data={}, point_source_id={})".format(self.x, self.y, self.z, self.intensity, 
-        self.return_num, self.num_returns, self.scan_dir_flag, self.edge_of_flight_line, 
-        self.classification, self.scan_angle_rank, self.user_data, self.point_source_id)
+        return f"LasPoint10(x={self.x}, y={self.y}, z={self.z}, " \
+          f"intensity={self.intensity}, return_num={self.return_num}, " \
+          f"num_returns={self.num_returns}, " \
+          f"scan_dir_flag={self.scan_dir_flag}, " \
+          f"edge_of_flight_line={self.edge_of_flight_line}, " \
+          f"classification={self.classification}, " \
+          f"scan_angle_rank={self.scan_angle_rank}, " \
+          f"user_data={self.user_data}, " \
+          f"point_source_id={self.point_source_id})"
+
 
 def u8_fold(n):
     # eg 0 - 1 = 255
     # eg 255 + 1 = 0
     return n & 0xFF
+
 
 def u32_zero_bit_0(n):
     # set bit 0 to 0
@@ -509,6 +513,8 @@ def u32_zero_bit_0(n):
 
 
 read_item_compressed_point10_v1 = not_implemented_func
+
+
 class read_item_compressed_point10_v2:
     def __init__(self, dec):
         self.dec = dec
@@ -519,7 +525,7 @@ class read_item_compressed_point10_v2:
         self.m_scan_angle_rank = [dec.create_symbol_model(256),
                                   dec.create_symbol_model(256)]
         self.ic_point_source_ID = IntegerCompressor(dec, 16)
-        self.m_bit_byte = [0]*256
+        self.m_bit_byte = [0]*256  # TODO use Nones instead of 0s
         self.m_classification = [0]*256
         self.m_user_data = [0]*256
         self.ic_dx = IntegerCompressor(dec, 32, 2)
@@ -529,9 +535,9 @@ class read_item_compressed_point10_v2:
         self.last_x_diff_median5 = []
         self.last_y_diff_median5 = []
         for i in range(16):
-            self.last_x_diff_median5.append( StreamingMedian5() )
-            self.last_y_diff_median5.append( StreamingMedian5() )
-        
+            self.last_x_diff_median5.append(StreamingMedian5())
+            self.last_y_diff_median5.append(StreamingMedian5())
+
         self.last_intensity = [0]*16
         self.last_height = [0]*8
 
@@ -558,12 +564,12 @@ class read_item_compressed_point10_v2:
                 self.m_classification[i].init()
             if self.m_user_data[i] != 0:
                 self.m_user_data[i].init()
-        
+
         self.ic_dx.init_decompressor()
         self.ic_dy.init_decompressor()
         self.ic_z.init_decompressor()
 
-        self.last_item = LasPoint10.from_bytes( item )
+        self.last_item = LasPoint10.from_bytes(item)
         self.last_item.intensity = 0
 
     def read(self, item, context):
@@ -574,21 +580,25 @@ class read_item_compressed_point10_v2:
         r = self.last_item.return_num
         n = self.last_item.num_returns
         m = NUMBER_RETURN_MAP[n][r]
-        l = NUMBER_RETURN_LEVEL[n][r]
+        el = NUMBER_RETURN_LEVEL[n][r]
 
         if changed_values != 0:
             # decompress bit field byte
             if changed_values & 0b100000:
                 bitfield = self.last_item.bitfield_value()
                 if self.m_bit_byte[bitfield] == 0:
-                    self.m_bit_byte[bitfield] = self.dec.create_symbol_model(256)
-                    self.m_bit_byte[bitfield].init()
-                ret.set_bitfield(self.dec.decode_symbol(self.m_bit_byte[bitfield]))
+                    model = self.dec.create_symbol_model(256)
+                    model.init()
+                    self.m_bit_byte[bitfield] = model
+
+                bitfield = self.dec.decode_symbol(self.m_bit_byte[bitfield])
+                ret.set_bitfield(bitfield)
 
             # decompress intensity
             if changed_values & 0b10000:
                 context = min(m, 3)
-                ret.intensity = self.ic_intensity.decompress(self.last_intensity[m], context)
+                ret.intensity = self.ic_intensity.decompress(
+                                    self.last_intensity[m], context)
                 self.last_intensity[m] = ret.intensity
             else:
                 ret.intensity = self.last_intensity[m]
@@ -596,61 +606,71 @@ class read_item_compressed_point10_v2:
             # decompress classification
             if changed_values & 0b1000:
                 if self.m_classification[self.last_item.classification] == 0:
-                    self.m_classification[self.last_item.classification] = self.dec.create_symbol_model(256)
+                    self.m_classification[self.last_item.classification] = \
+                        self.dec.create_symbol_model(256)
                     self.m_classification[self.last_item.classification].init()
-                ret.classification = self.dec.decode_symbol(self.m_classification[self.last_item.classification])
+                ret.classification = self.dec.decode_symbol(
+                    self.m_classification[self.last_item.classification])
 
             # decompress scan angle rank
             if changed_values & 0b100:
                 f = self.last_item.scan_dir_flag
                 val = self.dec.decode_symbol(self.m_scan_angle_rank[f])
-                ret.scan_angle_rank = u8_fold(val + self.last_item.scan_angle_rank)
-
+                ret.scan_angle_rank = u8_fold(val +
+                                              self.last_item.scan_angle_rank)
 
             # decompress user data
             if changed_values & 0b10:
                 if self.m_user_data[self.last_item.user_data] == 0:
-                    self.m_user_data[self.last_item.user_data] = self.dec.create_symbol_model(256)
+                    self.m_user_data[self.last_item.user_data] = \
+                        self.dec.create_symbol_model(256)
                     self.m_user_data[self.last_item.user_data].init()
-                ret.user_data = self.dec.decode_symbol(self.m_user_data[self.last_item.user_data])
+
+                model = self.m_user_data[self.last_item.user_data]
+                ret.user_data = self.dec.decode_symbol(model)
 
             # decompress point source ID
             if changed_values & 0b1:
-                ret.point_source_ID = self.ic_point_source_ID.decompress(self.last_item.point_source_ID)
+                ret.point_source_ID = self.ic_point_source_ID.decompress(
+                    self.last_item.point_source_ID)
 
         # decompress x
         median = self.last_x_diff_median5[m].get()
-        diff = self.ic_dx.decompress(median, int(n==1))
+        diff = self.ic_dx.decompress(median, int(n == 1))
         ret.x = self.last_item.x + diff
         self.last_x_diff_median5[m].add(diff)
 
         # decompress y
         median = self.last_y_diff_median5[m].get()
         k_bits = self.ic_dx.k
-        context = int(n==1) + (u32_zero_bit_0(k_bits) if k_bits<20 else 20)
+        context = int(n == 1) + (u32_zero_bit_0(k_bits) if k_bits < 20 else 20)
         diff = self.ic_dy.decompress(median, context)
         ret.y = self.last_item.y + diff
         self.last_y_diff_median5[m].add(diff)
 
         # decompress z
         k_bits = (self.ic_dx.k + self.ic_dy.k) // 2
-        context = int(n==1) + (u32_zero_bit_0(k_bits) if k_bits<18 else 18)
-        ret.z = self.ic_z.decompress(self.last_height[l], context)
-        self.last_height[l] = ret.z
+        context = int(n == 1) + (u32_zero_bit_0(k_bits) if k_bits < 18 else 18)
+        ret.z = self.ic_z.decompress(self.last_height[el], context)
+        self.last_height[el] = ret.z
 
         return ret
-                    
+
 
 LASZIP_GPSTIME_MULTI = 500
 LASZIP_GPSTIME_MULTI_MINUS = -10
-LASZIP_GPSTIME_MULTI_TOTAL = LASZIP_GPSTIME_MULTI - LASZIP_GPSTIME_MULTI_MINUS + 6
+LASZIP_GPSTIME_MULTI_TOTAL = LASZIP_GPSTIME_MULTI - \
+                             LASZIP_GPSTIME_MULTI_MINUS + 6
 
 read_item_compressed_gpstime11_v1 = not_implemented_func
+
+
 class read_item_compressed_gpstime11_v2:
     def __init__(self, dec):
         self.dec = dec
 
-        self.m_gpstime_multi = self.dec.create_symbol_model(LASZIP_GPSTIME_MULTI_TOTAL)
+        self.m_gpstime_multi = self.dec.create_symbol_model(
+            LASZIP_GPSTIME_MULTI_TOTAL)
         self.m_gpstime_0diff = self.dec.create_symbol_model(6)
         self.ic_gpstime = IntegerCompressor(dec, 32, 9)
 
@@ -665,7 +685,8 @@ class read_item_compressed_gpstime11_v2:
         self.ic_gpstime.init_decompressor()
 
         self.last_gpstime = [item, 0, 0, 0]
-    
+
+
 read_item_compressed_rgb12_v1 = not_implemented_func
 read_item_compressed_rgb12_v2 = not_implemented_func
 read_item_compressed_byte_v1 = not_implemented_func
@@ -691,8 +712,10 @@ def _read_item_raw_gpstime11(fp):
     gps_time = double(fp.read(8))
     return (gps_time,)
 
+
 def las_read_item_raw_gpstime11_le(fp):
     return fp.read(8)
+
 
 class IntegerCompressor:
     def __init__(self, dec_or_enc, bits=16, contexts=1, bits_high=8, range=0):
@@ -711,11 +734,11 @@ class IntegerCompressor:
         if range != 0:
             self.corr_bits = 0
             self.corr_range = range
-            while(range != 0):
+            while range != 0:
                 range >>= 1
-                corr_bits += 1
-            if self.corr_range == (1 << (corr_bits - 1)):
-                corr_bits -= 1
+                self.corr_bits += 1
+            if self.corr_range == (1 << (self.corr_bits - 1)):
+                self.corr_bits -= 1
             self.corr_min = -self.corr_range//2
             self.corr_max = self.corr_min+self.corr_range-1
         elif bits > 0 and bits < 32:
@@ -746,16 +769,17 @@ class IntegerCompressor:
             self.m_corrector = [ArithmeticBitModel()]
             for i in range(1, self.corr_bits):
                 if i <= self.bits_high:
-                    self.m_corrector.append(self.dec.create_symbol_model(1<<i))
+                    self.m_corrector.append(
+                        self.dec.create_symbol_model(1 << i))
                 else:
-                    self.m_corrector.append(self.dec.create_symbol_model(1<<self.bits_high))
+                    self.m_corrector.append(
+                        self.dec.create_symbol_model(1 << self.bits_high))
 
         for i in range(self.contexts):
             self.m_bits[i].init()
 
         for i in range(1, self.corr_bits):
             self.m_corrector[i].init()
-
 
     def _read_corrector(self, model):
         self.k = self.dec.decode_symbol(model)
@@ -769,12 +793,12 @@ class IntegerCompressor:
                     c = self.dec.decode_symbol(self.m_corrector[self.k])
                     c1 = self.dec.read_bits(k1)
                     c = (c << k1) | c1
-                
+
                 # translate c back into its correct interval
                 if c >= (1 << (self.k-1)):
                     c += 1
                 else:
-                    c -= (1<<self.k)-1
+                    c -= (1 << self.k)-1
 
             else:
                 c = self.corr_min
@@ -782,7 +806,6 @@ class IntegerCompressor:
             c = self.dec.decode_bit(self.m_corrector[0])
 
         return c
-
 
     def decompress(self, pred, context=0):
         assert self.dec
@@ -793,7 +816,7 @@ class IntegerCompressor:
             real += self.corr_range
         elif real >= self.corr_range:
             real -= self.corr_range
-        
+
         return real
 
 
@@ -815,15 +838,15 @@ class PointReader:
         type_raw_reader = {
             ItemType.POINT10: las_read_item_raw_point10_le,
             ItemType.GPSTIME11: las_read_item_raw_gpstime11_le,
-            #ItemType.RGB12: las_read_item_raw_rgb12_le,
-            #ItemType.BYTE: las_read_item_raw_byte_le,
-            #ItemType.RGBNIR14: las_read_item_raw_rgbnir14_le,
-            #ItemType.WAVEPACKET13: las_read_item_raw_wavepacket13_le,
+            # ItemType.RGB12: las_read_item_raw_rgb12_le,
+            # ItemType.BYTE: las_read_item_raw_byte_le,
+            # ItemType.RGBNIR14: las_read_item_raw_rgbnir14_le,
+            # ItemType.WAVEPACKET13: las_read_item_raw_wavepacket13_le,
         }
 
         self.readers_raw = []
         for item in reader.header['laszip']['items']:
-            func = type_raw_reader.get( item['type'] )
+            func = type_raw_reader.get(item['type'])
 
             if func is None:
                 raise Exception("Unknown item type")
@@ -868,7 +891,7 @@ class PointReader:
         # create seek table
         self.seek_point = []
         for item in reader.header['laszip']['items']:
-            self.seek_point.append( [0]*item['size'] )
+            self.seek_point.append([0]*item['size'])
 
         if reader.header['laszip']['compressor'] != Compressor.POINTWISE:
             self.chunk_size = reader.header['laszip']['chunk_size']
@@ -878,23 +901,21 @@ class PointReader:
         self.readers = None
         self.chunk_starts = None
 
-
     def init(self, fp):
         self.fp = fp
 
-
     def _read_chunk_table(self):
-        chunk_table_start_position = unsigned_int( self.fp.read(8) )
+        chunk_table_start_position = unsigned_int(self.fp.read(8))
         chunks_start = self.fp.tell()
 
         self.fp.seek(chunk_table_start_position)
 
-        version = unsigned_int( self.fp.read(4) )
+        version = unsigned_int(self.fp.read(4))
         if version != 0:
             raise Exception("Unknown chunk table version")
 
-        number_chunks = unsigned_int( self.fp.read(4) )
-        chunk_totals = 0
+        number_chunks = unsigned_int(self.fp.read(4))
+        # chunk_totals = 0
         tabled_chunks = 1
 
         self.dec.init(self.fp)
@@ -907,7 +928,7 @@ class PointReader:
         pred = 0
         for i in range(number_chunks-1):
             chunk_size = ic.decompress(pred, 1)
-            chunk_sizes.append( chunk_size )
+            chunk_sizes.append(chunk_size)
 
             pred = chunk_size
             tabled_chunks += 1
@@ -917,11 +938,10 @@ class PointReader:
         # calculate chunk offsets
         self.chunk_starts = [chunks_start]
         for chunk_size in chunk_sizes:
-            self.chunk_starts.append( self.chunk_starts[-1] + chunk_size )
+            self.chunk_starts.append(self.chunk_starts[-1] + chunk_size)
 
         self.fp.seek(chunks_start)
         self.point_start = chunks_start
-
 
     def read(self):
         context = 0
@@ -932,7 +952,7 @@ class PointReader:
 
         point = []
 
-        # if the compressed readers haven't been initialized, 
+        # if the compressed readers haven't been initialized,
         # read the first uncompressed point and then initialize them
         if self.readers is None:
             for reader_raw in self.readers_raw:
@@ -951,7 +971,7 @@ class PointReader:
                 point.append(pt_section)
 
         return point
-        
+
 
 class Reader:
     def __init__(self):
@@ -967,7 +987,6 @@ class Reader:
         record['description'] = cstr(fp.read(32))
         record['data'] = fp.read(record['record_length_after_header'])
         return record
-
 
     @staticmethod
     def _read_las_header(fp):
@@ -1011,7 +1030,8 @@ class Reader:
         )
 
         header_format_14 = (
-            ('start_of_first_extended_variable_length_record', 8, unsigned_int),
+            ('start_of_first_extended_variable_length_record', 8,
+             unsigned_int),
             ('number_of_extended_variable_length_records', 4, unsigned_int),
             ('number_of_point_records', 8, unsigned_int),
             ('number_of_points_by_return', 8*15, u64_array),
@@ -1056,7 +1076,6 @@ class Reader:
 
         return header
 
-
     @staticmethod
     def _parse_laszip_record(data):
         laszip_record_format = (
@@ -1096,7 +1115,8 @@ class Reader:
         # Read standard LAS header
         header = Reader._read_las_header(fp)
 
-        # Read LASzip record, stored in the data payload of a variable length record
+        # Read LASzip record, stored in the data payload of a variable length
+        # record
         LASZIP_VLR_ID = 22204
         laszip_vlr = header['variable_length_records'].get(LASZIP_VLR_ID)
         if laszip_vlr is None:
@@ -1132,21 +1152,19 @@ def main(filename):
 
     reader.open(filename)
 
-    print( "num points: ", reader.npoints )
+    print("num points: ", reader.npoints)
 
     for i in range(reader.num_points):
-        if i>1:
+        if i > 1:
             break
 
         point = reader.point_reader.read()
         print(i, ":", [list(x) for x in point])
 
 
-
 if __name__ == '__main__':
 
     # get first command line argument
-    import sys
     if len(sys.argv) > 1:
         filename = sys.argv[1]
     else:
@@ -1154,4 +1172,3 @@ if __name__ == '__main__':
         sys.exit(1)
 
     main(filename)
-
