@@ -472,6 +472,32 @@ class LasPoint10:
         self.scan_dir_flag = (byte & 0b01000000) >> 6
         self.edge_of_flight_line = (byte & 0b10000000) >> 7
 
+    def copy(self):
+        ret = LasPoint10()
+
+        ret.x = self.x
+        ret.y = self.y
+        ret.z = self.z
+        ret.intensity = self.intensity
+        ret.return_num = self.return_num
+        ret.num_returns = self.num_returns
+        ret.scan_dir_flag = self.scan_dir_flag
+        ret.edge_of_flight_line = self.edge_of_flight_line
+        ret.classification = self.classification
+        ret.scan_angle_rank = self.scan_angle_rank
+        ret.user_data = self.user_data
+        ret.point_source_id = self.point_source_id
+
+        return ret
+
+    def __str__(self):
+        return "LasPoint10(x={}, y={}, z={}, intensity={}, " \
+        "return_num={}, num_returns={}, scan_dir_flag={}, " \
+        "edge_of_flight_line={}, classification={}, scan_angle_rank={}, " \
+        "user_data={}, point_source_id={})".format(self.x, self.y, self.z, self.intensity, 
+        self.return_num, self.num_returns, self.scan_dir_flag, self.edge_of_flight_line, 
+        self.classification, self.scan_angle_rank, self.user_data, self.point_source_id)
+
 def u8_fold(n):
     # eg 0 - 1 = 255
     # eg 255 + 1 = 0
@@ -541,7 +567,7 @@ class read_item_compressed_point10_v2:
         self.last_item.intensity = 0
 
     def read(self, item, context):
-        ret = LasPoint10()
+        ret = self.last_item.copy()
 
         changed_values = self.dec.decode_symbol(self.m_changed_values)
 
