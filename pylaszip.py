@@ -531,9 +531,9 @@ class read_item_compressed_point10_v2:
         self.m_scan_angle_rank = [dec.create_symbol_model(256),
                                   dec.create_symbol_model(256)]
         self.ic_point_source_ID = IntegerCompressor(dec, 16)
-        self.m_bit_byte = [0]*256  # TODO use Nones instead of 0s
-        self.m_classification = [0]*256
-        self.m_user_data = [0]*256
+        self.m_bit_byte = [None]*256
+        self.m_classification = [None]*256
+        self.m_user_data = [None]*256
         self.ic_dx = IntegerCompressor(dec, 32, 2)
         self.ic_dy = IntegerCompressor(dec, 32, 22)
         self.ic_z = IntegerCompressor(dec, 32, 20)
@@ -564,11 +564,11 @@ class read_item_compressed_point10_v2:
         self.ic_point_source_ID.init_decompressor()
 
         for i in range(256):
-            if self.m_bit_byte[i] != 0:
+            if self.m_bit_byte[i] is not None:
                 self.m_bit_byte[i].init()
-            if self.m_classification[i] != 0:
+            if self.m_classification[i] is not None:
                 self.m_classification[i].init()
-            if self.m_user_data[i] != 0:
+            if self.m_user_data[i] is not None:
                 self.m_user_data[i].init()
 
         self.ic_dx.init_decompressor()
@@ -592,7 +592,7 @@ class read_item_compressed_point10_v2:
             # decompress bit field byte
             if changed_values & 0b100000:
                 bitfield = self.last_item.bitfield_value()
-                if self.m_bit_byte[bitfield] == 0:
+                if self.m_bit_byte[bitfield] is None: # TODO is this redundant?
                     model = self.dec.create_symbol_model(256)
                     model.init()
                     self.m_bit_byte[bitfield] = model
@@ -611,7 +611,7 @@ class read_item_compressed_point10_v2:
 
             # decompress classification
             if changed_values & 0b1000:
-                if self.m_classification[self.last_item.classification] == 0:
+                if self.m_classification[self.last_item.classification] is None: # TODO is this redundant?
                     self.m_classification[self.last_item.classification] = \
                         self.dec.create_symbol_model(256)
                     self.m_classification[self.last_item.classification].init()
@@ -627,7 +627,7 @@ class read_item_compressed_point10_v2:
 
             # decompress user data
             if changed_values & 0b10:
-                if self.m_user_data[self.last_item.user_data] == 0:
+                if self.m_user_data[self.last_item.user_data] is None: # TODO is this redundant?
                     self.m_user_data[self.last_item.user_data] = \
                         self.dec.create_symbol_model(256)
                     self.m_user_data[self.last_item.user_data].init()
@@ -664,6 +664,7 @@ class read_item_compressed_point10_v2:
         return ret
 
 
+# this is a holdover from laszip; I have no idea what's going on here
 LASZIP_GPSTIME_MULTI = 500
 LASZIP_GPSTIME_MULTI_MINUS = -10
 LASZIP_GPSTIME_MULTI_TOTAL = LASZIP_GPSTIME_MULTI - \
@@ -672,6 +673,7 @@ LASZIP_GPSTIME_MULTI_UNCHANGED = LASZIP_GPSTIME_MULTI - \
                                  LASZIP_GPSTIME_MULTI_MINUS + 1
 LASZIP_GPSTIME_MULTI_CODE_FULL = LASZIP_GPSTIME_MULTI - \
                                  LASZIP_GPSTIME_MULTI_MINUS + 2
+
 
 read_item_compressed_gpstime11_v1 = not_implemented_func
 
@@ -721,7 +723,10 @@ class read_item_compressed_gpstime11_v2:
             self.read(item, context)
 
     def _read_lastdiff_nonzero(self, item, context):
+        # TODO this is a mess
+
         multi = self.dec.decode_symbol(self.m_gpstime_multi)
+
         if multi == 1:
             pred = self.last_gpstime[self.last]
             val = self.ic_gpstime.decompress(pred, 1)
