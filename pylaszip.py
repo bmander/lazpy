@@ -550,6 +550,7 @@ class read_item_compressed_point10_v2:
         self.last_item = []
 
     def init(self, item, context):
+        # TODO combine init functions
         # init state
         for i in range(16):
             self.last_x_diff_median5[i] = StreamingMedian5()
@@ -579,6 +580,7 @@ class read_item_compressed_point10_v2:
         self.last_item.intensity = 0
 
     def read(self, item, context):
+        # TODO eliminate 'item' as a parameter
         ret = self.last_item.copy()
 
         changed_values = self.dec.decode_symbol(self.m_changed_values)
@@ -697,12 +699,14 @@ class read_item_compressed_gpstime11_v2:
         self.m_gpstime_0diff.init()
         self.ic_gpstime.init_decompressor()
 
-        self.last_gpstime = [item, 0, 0, 0]
+        import pdb; pdb.set_trace()
+        self.last_gpstime = [unsigned_int(item), 0, 0, 0]
 
     def _read_lastdiff_zero(self, item, context):
         multi = self.dec.decode_symbol(self.m_gpstime_0diff)
 
         if multi == 1:  # the difference fits in 32 bits
+            import pdb; pdb.set_trace()
             val = self.ic_gpstime.decompress(0, 0)
             self.last_gpstime_diff[self.last] = val
             self.last_gpstime[self.last] += val
@@ -1063,7 +1067,7 @@ class PointReader:
                 point.append(pt_section)
 
             for i, reader_compressed in enumerate(self.readers_compressed):
-                reader_compressed.init(list(point[i]), context)
+                reader_compressed.init(point[i], context)
 
             self.dec.init(self.fp)
 
@@ -1258,11 +1262,11 @@ def main(filename):
     print("num points: ", reader.npoints)
 
     for i in range(reader.num_points):
-        if i > 1:
+        if i > 10:
             break
 
         point = reader.point_reader.read()
-        print(i, ":", [list(x) for x in point])
+        print(i, ":", [str(x) for x in point])
 
 
 if __name__ == '__main__':
