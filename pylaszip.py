@@ -644,6 +644,11 @@ class read_item_compressed_point10_v2:
                 self.last_item.point_source_ID = \
                     self.ic_point_source_ID.decompress( 
                         self.last_item.point_source_ID)
+        else:
+            r = self.last_item.return_num
+            n = self.last_item.num_returns
+            m = NUMBER_RETURN_MAP[n][r]
+            el = NUMBER_RETURN_LEVEL[n][r]
 
         # decompress x
         median = self.last_x_diff_median5[m].get()
@@ -1262,11 +1267,11 @@ def main(filename):
     print("num points: ", reader.npoints)
 
     for i in range(reader.num_points):
-        if i > 10:
-            break
+        if i % 1000 == 0:
+            print("Reading point {}".format(i))
 
         point = reader.point_reader.read()
-        print(i, ":", [str(x) for x in point])
+        #print(i, ":", [str(x) for x in point])
 
 
 if __name__ == '__main__':
