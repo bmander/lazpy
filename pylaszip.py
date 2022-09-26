@@ -95,7 +95,7 @@ class ArithmeticBitModel:
         self.bit_0_prob = 1 << (self.BM_LENGTH_SHIFT - 1)
 
         # start with frequent updates
-        self.update_cycle = self.bits_until_update = 1
+        self.update_cycle = self.bits_until_update = 4
 
     def update(self):
         # halve counts when threshold is reached
@@ -236,8 +236,9 @@ class ArithmeticDecoder:
     def decode_bit(self, m):
         # m is an ArithmeticBitModel
         x = m.bit_0_prob * (self.length >> m.BM_LENGTH_SHIFT)
+        sym = (self.value >= x)
 
-        if self.value < x:
+        if sym == 0:
             self.length = x
             m.bit_0_count += 1
         else:
@@ -250,6 +251,8 @@ class ArithmeticDecoder:
         m.bits_until_update -= 1
         if m.bits_until_update == 0:
             m.update()
+
+        return sym
 
     def _renorm_dec_interval(self):
         while True:
@@ -649,6 +652,7 @@ class read_item_compressed_point10_v2:
         self.last_x_diff_median5[m].add(diff)
 
         # decompress y
+        import pdb; pdb.set_trace()
         median = self.last_y_diff_median5[m].get()
         k_bits = self.ic_dx.k
         context = int(n == 1) + (u32_zero_bit_0(k_bits) if k_bits < 20 else 20)
@@ -699,7 +703,6 @@ class read_item_compressed_gpstime11_v2:
         self.m_gpstime_0diff.init()
         self.ic_gpstime.init_decompressor()
 
-        import pdb; pdb.set_trace()
         self.last_gpstime = [unsigned_int(item), 0, 0, 0]
 
     def _read_lastdiff_zero(self, item, context):
