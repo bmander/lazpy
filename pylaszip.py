@@ -742,7 +742,7 @@ class read_item_compressed_gpstime11_v2:
                 gpstime_diff = self.ic_gpstime.decompress(0, 7)
                 self.multi_extreme_counter[self.last] += 1
                 if self.multi_extreme_counter[self.last] > 3:
-                    self.last_gpstime[self.last] = gpstime_diff
+                    self.last_gpstime_diff[self.last] = gpstime_diff
                     self.multi_extreme_counter[self.last] = 0
             elif multi > LASZIP_GPSTIME_MULTI:
                 pred = multi*self.last_gpstime[self.last]
