@@ -533,7 +533,7 @@ class read_item_compressed_point10_v2:
         self.ic_intensity = IntegerCompressor(dec, 16, 4)
         self.m_scan_angle_rank = [dec.create_symbol_model(256),
                                   dec.create_symbol_model(256)]
-        self.ic_point_source_ID = IntegerCompressor(dec, 16)
+        self.ic_point_source_id = IntegerCompressor(dec, 16)
         self.m_bit_byte = [None]*256
         self.m_classification = [None]*256
         self.m_user_data = [None]*256
@@ -565,7 +565,7 @@ class read_item_compressed_point10_v2:
         self.ic_intensity.init_decompressor()
         self.m_scan_angle_rank[0].init()
         self.m_scan_angle_rank[1].init()
-        self.ic_point_source_ID.init_decompressor()
+        self.ic_point_source_id.init_decompressor()
 
         for i in range(256):
             if self.m_bit_byte[i] is not None:
@@ -641,9 +641,9 @@ class read_item_compressed_point10_v2:
 
             # decompress point source ID
             if changed_values & 0b1:
-                self.last_item.point_source_ID = \
-                    self.ic_point_source_ID.decompress( 
-                        self.last_item.point_source_ID)
+                self.last_item.point_source_id = \
+                    self.ic_point_source_id.decompress( 
+                        self.last_item.point_source_id)
         else:
             r = self.last_item.return_num
             n = self.last_item.num_returns
