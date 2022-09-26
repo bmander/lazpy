@@ -728,7 +728,7 @@ class read_item_compressed_gpstime11_v2:
             self.last_gpstime_diff[self.last] = 0
             self.multi_extreme_counter[self.last] = 0
         elif multi > 2:  # switch to another sequence
-            self.last = (self.last+self.multi-2) ^ 3
+            self.last = (self.last+multi-2) & 3
             self.read(item, context)
 
     def _read_lastdiff_nonzero(self, item, context):
