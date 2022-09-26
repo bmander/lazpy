@@ -579,7 +579,7 @@ class read_item_compressed_point10_v2:
         self.ic_dy.init_decompressor()
         self.ic_z.init_decompressor()
 
-        self.last_item = LasPoint10.from_bytes(item)
+        self.last_item = item.copy()
         self.last_item.intensity = 0
 
     def read(self, item, context):
@@ -665,7 +665,7 @@ class read_item_compressed_point10_v2:
         self.last_item.z = self.ic_z.decompress(self.last_height[el], context)
         self.last_height[el] = self.last_item.z
 
-        return self.last_item
+        return self.last_item.copy()
 
 
 # this is a holdover from laszip; I have no idea what's going on here
@@ -701,7 +701,7 @@ class read_item_compressed_gpstime11_v2:
         self.m_gpstime_0diff.init()
         self.ic_gpstime.init_decompressor()
 
-        self.last_gpstime = [unsigned_int(item), 0, 0, 0]
+        self.last_gpstime = [item, 0, 0, 0]
 
     def _read_lastdiff_zero(self, item, context):
         multi = self.dec.decode_symbol(self.m_gpstime_0diff)
@@ -812,7 +812,7 @@ read_item_compressed_wavepacket14_v4 = not_implemented_func
 
 
 def las_read_item_raw_point10_le(fp):
-    return fp.read(20)
+    return LasPoint10.from_bytes(fp.read(20))
 
 
 def _read_item_raw_gpstime11(fp):
@@ -821,7 +821,7 @@ def _read_item_raw_gpstime11(fp):
 
 
 def las_read_item_raw_gpstime11_le(fp):
-    return fp.read(8)
+    return unsigned_int(fp.read(8))
 
 
 class IntegerCompressor:
