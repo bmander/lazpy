@@ -584,14 +584,8 @@ class read_item_compressed_point10_v2:
 
     def read(self, item, context):
         # TODO eliminate 'item' as a parameter
-        ret = self.last_item.copy()
 
         changed_values = self.dec.decode_symbol(self.m_changed_values)
-
-        r = self.last_item.return_num
-        n = self.last_item.num_returns
-        m = NUMBER_RETURN_MAP[n][r]
-        el = NUMBER_RETURN_LEVEL[n][r]
 
         if changed_values != 0:
             # decompress bit field byte
@@ -603,16 +597,21 @@ class read_item_compressed_point10_v2:
                     self.m_bit_byte[bitfield] = model
 
                 bitfield = self.dec.decode_symbol(self.m_bit_byte[bitfield])
-                ret.set_bitfield(bitfield)
+                self.last_item.set_bitfield(bitfield)
+
+            r = self.last_item.return_num
+            n = self.last_item.num_returns
+            m = NUMBER_RETURN_MAP[n][r]
+            el = NUMBER_RETURN_LEVEL[n][r]
 
             # decompress intensity
             if changed_values & 0b10000:
                 context = min(m, 3)
-                ret.intensity = self.ic_intensity.decompress(
+                self.last_item.intensity = self.ic_intensity.decompress(
                                     self.last_intensity[m], context)
-                self.last_intensity[m] = ret.intensity
+                self.last_intensity[m] = self.last_item.intensity
             else:
-                ret.intensity = self.last_intensity[m]
+                self.last_item.intensity = self.last_intensity[m]
 
             # decompress classification
             if changed_values & 0b1000:
@@ -620,14 +619,14 @@ class read_item_compressed_point10_v2:
                     self.m_classification[self.last_item.classification] = \
                         self.dec.create_symbol_model(256)
                     self.m_classification[self.last_item.classification].init()
-                ret.classification = self.dec.decode_symbol(
+                self.last_item.classification = self.dec.decode_symbol(
                     self.m_classification[self.last_item.classification])
 
             # decompress scan angle rank
             if changed_values & 0b100:
                 f = self.last_item.scan_dir_flag
                 val = self.dec.decode_symbol(self.m_scan_angle_rank[f])
-                ret.scan_angle_rank = u8_fold(val +
+                self.last_item.scan_angle_rank = u8_fold(val +
                                               self.last_item.scan_angle_rank)
 
             # decompress user data
@@ -638,36 +637,35 @@ class read_item_compressed_point10_v2:
                     self.m_user_data[self.last_item.user_data].init()
 
                 model = self.m_user_data[self.last_item.user_data]
-                ret.user_data = self.dec.decode_symbol(model)
+                self.last_item.user_data = self.dec.decode_symbol(model)
 
             # decompress point source ID
             if changed_values & 0b1:
-                ret.point_source_ID = self.ic_point_source_ID.decompress(
-                    self.last_item.point_source_ID)
+                self.last_item.point_source_ID = \
+                    self.ic_point_source_ID.decompress( 
+                        self.last_item.point_source_ID)
 
         # decompress x
         median = self.last_x_diff_median5[m].get()
         diff = self.ic_dx.decompress(median, int(n == 1))
-        ret.x = self.last_item.x + diff
+        self.last_item.x = self.last_item.x + diff
         self.last_x_diff_median5[m].add(diff)
 
         # decompress y
-        import pdb; pdb.set_trace()
         median = self.last_y_diff_median5[m].get()
         k_bits = self.ic_dx.k
         context = int(n == 1) + (u32_zero_bit_0(k_bits) if k_bits < 20 else 20)
         diff = self.ic_dy.decompress(median, context)
-        ret.y = self.last_item.y + diff
+        self.last_item.y = self.last_item.y + diff
         self.last_y_diff_median5[m].add(diff)
 
         # decompress z
         k_bits = (self.ic_dx.k + self.ic_dy.k) // 2
         context = int(n == 1) + (u32_zero_bit_0(k_bits) if k_bits < 18 else 18)
-        ret.z = self.ic_z.decompress(self.last_height[el], context)
-        self.last_height[el] = ret.z
+        self.last_item.z = self.ic_z.decompress(self.last_height[el], context)
+        self.last_height[el] = self.last_item.z
 
-        self.last_item = ret
-        return ret
+        return self.last_item
 
 
 # this is a holdover from laszip; I have no idea what's going on here
@@ -709,7 +707,6 @@ class read_item_compressed_gpstime11_v2:
         multi = self.dec.decode_symbol(self.m_gpstime_0diff)
 
         if multi == 1:  # the difference fits in 32 bits
-            import pdb; pdb.set_trace()
             val = self.ic_gpstime.decompress(0, 0)
             self.last_gpstime_diff[self.last] = val
             self.last_gpstime[self.last] += val
