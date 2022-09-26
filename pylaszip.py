@@ -933,7 +933,7 @@ class IntegerCompressor:
 
 
 class PointReader:
-    def __init__(self, reader):
+    def __init__(self, reader, fp):
         if not sys.byteorder == 'little':
             raise NotImplementedError("Only little endian is supported")
 
@@ -1013,7 +1013,6 @@ class PointReader:
         self.readers = None
         self.chunk_starts = None
 
-    def init(self, fp):
         self.fp = fp
 
     def _read_chunk_table(self):
@@ -1250,8 +1249,7 @@ class Reader:
 
         self.header = self._read_laz_header(fp)
 
-        self.point_reader = PointReader(self)
-        self.point_reader.init(fp)
+        self.point_reader = PointReader(self, fp)
 
         self.npoints = self.header['number_of_point_records']
         self.p_count = 0
