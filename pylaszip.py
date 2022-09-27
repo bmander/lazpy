@@ -737,7 +737,7 @@ class read_item_compressed_gpstime11_v2:
         multi = self.dec.decode_symbol(self.m_gpstime_multi)
 
         if multi == 1:
-            pred = self.last_gpstime[self.last]
+            pred = self.last_gpstime_diff[self.last]
             val = self.ic_gpstime.decompress(pred, 1)
             self.last_gpstime[self.last] += val
 
@@ -750,11 +750,11 @@ class read_item_compressed_gpstime11_v2:
                     self.last_gpstime_diff[self.last] = gpstime_diff
                     self.multi_extreme_counter[self.last] = 0
             elif multi > LASZIP_GPSTIME_MULTI:
-                pred = multi*self.last_gpstime[self.last]
+                pred = multi*self.last_gpstime_diff[self.last]
                 context = 2 if multi < 10 else 3
                 gpstime_diff = self.ic_gpstime.decompress(pred, context)
             elif multi == LASZIP_GPSTIME_MULTI:
-                pred = LASZIP_GPSTIME_MULTI*self.last_gpstime[self.last]
+                pred = LASZIP_GPSTIME_MULTI*self.last_gpstime_diff[self.last]
                 gpstime_diff = self.ic_gpstime.decompress(pred, 4)
                 self.multi_extreme_counter[self.last] += 1
                 if self.multi_extreme_counter[self.last] > 3:
@@ -1290,11 +1290,11 @@ def main(filename):
     print("num points: ", reader.npoints)
 
     for i in range(reader.num_points):
+
         point = reader.point_reader.read()
 
         if i % 1000 == 0:
             print(i, ":", [str(x) for x in point])
-
 
 
 if __name__ == '__main__':
