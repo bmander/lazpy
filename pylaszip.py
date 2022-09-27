@@ -1006,12 +1006,19 @@ class PointReader:
             self.seek_point.append([0]*item['size'])
 
         if reader.header['laszip']['compressor'] != Compressor.POINTWISE:
+            # number of points per chunk
             self.chunk_size = reader.header['laszip']['chunk_size']
         else:
             raise Exception("Pointwise compressor not supported")
 
+        # indicate the reader is at the end of the chunk in order
+        # to force a read of the next chunk
+        self.chunk_count = self.chunk_size
+
         self.readers = None
         self.chunk_starts = None
+        self.point_start = 0  # TODO is None better?
+        self.current_chunk = 0
 
         self.fp = fp
 
@@ -1057,15 +1064,33 @@ class PointReader:
     def read(self):
         context = 0
 
-        # if chunk table hasn't been read, read it
-        if self.chunk_starts is None:
-            self._read_chunk_table()
+        # if this is a new chunk
+        if self.chunk_count == self.chunk_size:
+
+            # if this is not the first chunk
+            if self.point_start != 0:
+                self.dec.done()
+                self.current_chunk += 1
+
+                # check integrity
+                # TODO check integrity
+                # see lasreadpoint.cpp:421
+
+            # if chunk table hasn't been read, read it
+            # TODO move this to an init function
+            if self.chunk_starts is None:
+                self._read_chunk_table()
+            self.point_start = self.fp.tell()
+            self.readers = None
+
+        self.chunk_count += 1
 
         point = []
 
         # if the compressed readers haven't been initialized,
         # read the first uncompressed point and then initialize them
         if self.readers is None:
+            # TODO combine these two loops
             for reader_raw in self.readers_raw:
                 pt_section = reader_raw(self.fp)
                 point.append(pt_section)
@@ -1265,11 +1290,11 @@ def main(filename):
     print("num points: ", reader.npoints)
 
     for i in range(reader.num_points):
-        if i % 1000 == 0:
-            print("Reading point {}".format(i))
-
         point = reader.point_reader.read()
-        #print(i, ":", [str(x) for x in point])
+
+        if i % 1000 == 0:
+            print(i, ":", [str(x) for x in point])
+
 
 
 if __name__ == '__main__':
