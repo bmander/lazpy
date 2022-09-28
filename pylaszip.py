@@ -749,7 +749,7 @@ class read_item_compressed_gpstime11_v2:
                 if self.multi_extreme_counter[self.last] > 3:
                     self.last_gpstime_diff[self.last] = gpstime_diff
                     self.multi_extreme_counter[self.last] = 0
-            elif multi > LASZIP_GPSTIME_MULTI:
+            elif multi < LASZIP_GPSTIME_MULTI:
                 pred = multi*self.last_gpstime_diff[self.last]
                 context = 2 if multi < 10 else 3
                 gpstime_diff = self.ic_gpstime.decompress(pred, context)
@@ -1280,7 +1280,15 @@ class Reader:
         self.p_count = 0
 
 
-def main(filename):
+def read_txtfile_entries(filename):
+    """Read a text file and return a list of lines."""
+    with open(filename, 'r') as f:
+        for line in f:
+            yield [int(x) for x in line.split()]
+
+
+def main(filename, txtpoints_filename):
+
     print("Opening file: {}".format(filename))
 
     reader = Reader()
@@ -1289,21 +1297,36 @@ def main(filename):
 
     print("num points: ", reader.npoints)
 
-    for i in range(reader.num_points):
+    entries = read_txtfile_entries(txtpoints_filename)
+    for i, entry in zip( range(reader.num_points), entries):
+        # first mismatch at 29555
+        # problematic things start happening at 29558
+
+        #if i == 29554:
+        #    import pdb; pdb.set_trace()
 
         point = reader.point_reader.read()
 
-        if i % 1000 == 0:
+        comp = [i, point[0].x, point[0].y, point[0].z, point[0].intensity]
+
+        if comp != entry:
+            print("mismatch at ", i)
+            print(comp)
+            print(entry)
+            exit()
+
+        if i % 1000 == 0 or i > 29628-100:
             print(i, ":", [str(x) for x in point])
 
 
 if __name__ == '__main__':
 
     # get first command line argument
-    if len(sys.argv) > 1:
+    if len(sys.argv) > 2:
         filename = sys.argv[1]
+        pointstxt = sys.argv[2]
     else:
-        print("Usage: pylaszip.py filename.laz")
+        print("Usage: pylaszip.py filename.laz points.txt")
         sys.exit(1)
 
-    main(filename)
+    main(filename, pointstxt)
