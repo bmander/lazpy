@@ -938,7 +938,7 @@ class PointReader:
             raise NotImplementedError("Only little endian is supported")
 
         self.point_size = 0
-        self.chunk_count = 0
+        self.chunk_count = 0 # TODO remove
 
         # create decoder
         if reader.header['laszip']['coder'] == Coder.ARITHMETIC:
@@ -1082,6 +1082,8 @@ class PointReader:
                 self._read_chunk_table()
             self.point_start = self.fp.tell()
             self.readers = None
+
+            self.chunk_count = 0
 
         self.chunk_count += 1
 
@@ -1299,10 +1301,8 @@ def main(filename, txtpoints_filename):
 
     entries = read_txtfile_entries(txtpoints_filename)
     for i, entry in zip( range(reader.num_points), entries):
-        # first mismatch at 29555
-        # problematic things start happening at 29558
 
-        #if i == 29554:
+        #if i == 50000:
         #    import pdb; pdb.set_trace()
 
         point = reader.point_reader.read()
@@ -1311,8 +1311,8 @@ def main(filename, txtpoints_filename):
 
         if comp != entry:
             print("mismatch at ", i)
-            print(comp)
-            print(entry)
+            print("us", comp)
+            print("them", entry)
             exit()
 
         if i % 1000 == 0 or i > 29628-100:
