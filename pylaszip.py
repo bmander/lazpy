@@ -952,9 +952,6 @@ class PointReader:
         if not sys.byteorder == 'little':
             raise NotImplementedError("Only little endian is supported")
 
-        self.point_size = 0
-        self.chunk_count = 0 # TODO remove
-
         # create decoder
         if reader.header['laszip']['coder'] == Coder.ARITHMETIC:
             self.dec = ArithmeticDecoder()
@@ -972,6 +969,7 @@ class PointReader:
         }
 
         self.readers_raw = []
+        self.point_size = 0
         for item in reader.header['laszip']['items']:
             func = type_raw_reader.get(item['type'])
 
