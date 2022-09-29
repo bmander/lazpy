@@ -1,3 +1,4 @@
+from re import A
 import struct
 from enum import IntEnum
 import sys
@@ -1124,6 +1125,10 @@ class PointReader:
 
         return point
 
+    def jump_to_chunk(self, chunk):
+        self.fp.seek(self.chunk_starts[chunk])
+        self.chunk_count = self.chunk_size
+
 
 class Reader:
     def __init__(self):
@@ -1291,6 +1296,7 @@ class Reader:
         self.header = self._read_laz_header(fp)
 
         self.point_reader = PointReader(self, fp)
+        self.point_reader._read_chunk_table() # TODO move chunk table reader to this class
 
         self.npoints = self.header['number_of_point_records']
         self.p_count = 0
@@ -1303,6 +1309,11 @@ def read_txtfile_entries(filename):
             yield [int(x) for x in line.split()]
 
 
+def fast_forward(iterable, n):
+    for i in range(n):
+        next(iterable)
+
+
 def main(filename, txtpoints_filename):
 
     print("Opening file: {}".format(filename))
@@ -1313,8 +1324,18 @@ def main(filename, txtpoints_filename):
 
     print("num points: ", reader.npoints)
 
+    target_point_index = 2832623
+    chunk_index = target_point_index // reader.point_reader.chunk_size
+
+    i_start = chunk_index*reader.point_reader.chunk_size
+
     entries = read_txtfile_entries(txtpoints_filename)
-    for i, entry in zip( range(reader.num_points), entries):
+
+    print(f"fast forwarding to desired point to i:{i_start} chunk:{chunk_index}")
+    fast_forward(entries, i_start)
+    reader.point_reader.jump_to_chunk(chunk_index)
+    
+    for i, entry in zip(range(i_start, reader.num_points), entries):
 
         #if i == 50000:
         #    import pdb; pdb.set_trace()
