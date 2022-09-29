@@ -334,6 +334,7 @@ class ArithmeticDecoder:
     def read_short(self):
         self.length >>= 16
         sym = self.value // self.length
+        self.value -= self.length * sym
 
         if self.length < self.AC_MIN_LENGTH:
             self._renorm_dec_interval()
@@ -1325,19 +1326,22 @@ def main(filename, txtpoints_filename):
     print("num points: ", reader.npoints)
 
     target_point_index = 2832623
+    target_point_index = 2832622
+    target_point_index = 97
     chunk_index = target_point_index // reader.point_reader.chunk_size
 
     i_start = chunk_index*reader.point_reader.chunk_size
 
     entries = read_txtfile_entries(txtpoints_filename)
 
-    print(f"fast forwarding to desired point to i:{i_start} chunk:{chunk_index}")
-    fast_forward(entries, i_start)
-    reader.point_reader.jump_to_chunk(chunk_index)
+    if chunk_index > 0:
+        print(f"fast forwarding to desired point to i:{i_start} chunk:{chunk_index}")
+        fast_forward(entries, i_start)
+        reader.point_reader.jump_to_chunk(chunk_index)
     
     for i, entry in zip(range(i_start, reader.num_points), entries):
 
-        #if i == 50000:
+        #if i == target_point_index:
         #    import pdb; pdb.set_trace()
 
         try:
@@ -1346,7 +1350,8 @@ def main(filename, txtpoints_filename):
             print("error at point: ", i)
             raise e
 
-        comp = [i, point[0].x, point[0].y, point[0].z, point[0].intensity]
+        comp = [i, point[0].x, point[0].y, point[0].z, point[0].intensity, 
+                point[1]]
 
         if comp != entry:
             print("mismatch at ", i)
