@@ -596,8 +596,7 @@ class read_item_compressed_point10_v2:
         self.last_item = item.copy()
         self.last_item.intensity = 0
 
-    def read(self, item, context):
-        # TODO eliminate 'item' as a parameter
+    def read(self, context):
 
         changed_values = self.dec.decode_symbol(self.m_changed_values)
 
@@ -722,7 +721,7 @@ class read_item_compressed_gpstime11_v2:
 
         self.last_gpstime = [item, 0, 0, 0]
 
-    def _read_lastdiff_zero(self, item, context):
+    def _read_lastdiff_zero(self, context):
         multi = self.dec.decode_symbol(self.m_gpstime_0diff)
 
         if multi == 1:  # the difference fits in 32 bits
@@ -743,9 +742,9 @@ class read_item_compressed_gpstime11_v2:
             self.multi_extreme_counter[self.last] = 0
         elif multi > 2:  # switch to another sequence
             self.last = (self.last+multi-2) & 3
-            self.read(item, context)
+            self.read(context)
 
-    def _read_lastdiff_nonzero(self, item, context):
+    def _read_lastdiff_nonzero(self, context):
         # TODO this is a mess
 
         multi = self.dec.decode_symbol(self.m_gpstime_multi)
@@ -802,13 +801,13 @@ class read_item_compressed_gpstime11_v2:
             self.multi_extreme_counter[self.last] = 0
         elif multi >= LASZIP_GPSTIME_MULTI_CODE_FULL:
             self.last = (self.last+multi-LASZIP_GPSTIME_MULTI_CODE_FULL) & 3
-            self.read(item, context)
+            self.read(context)
 
-    def read(self, item, context):
+    def read(self, context):
         if self.last_gpstime_diff[self.last] == 0:
-            self._read_lastdiff_zero(item, context)
+            self._read_lastdiff_zero(context)
         else:
-            self._read_lastdiff_nonzero(item, context)
+            self._read_lastdiff_nonzero(context)
 
         return self.last_gpstime[self.last]
 
@@ -1121,7 +1120,7 @@ class PointReader:
             self.readers = self.readers_compressed
         else:
             for reader in self.readers:
-                pt_section = reader.read(point, context)
+                pt_section = reader.read(context)
                 point.append(pt_section)
 
         return point
