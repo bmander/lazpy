@@ -89,6 +89,9 @@ class ArithmeticBitModel:
     BM_MAX_COUNT = 1 << BM_LENGTH_SHIFT
 
     def __init__(self):
+        self.init()
+
+    def init(self):
         # initialize equiprobable model
         self.bit_0_count = 1
         self.bit_count = 2
@@ -115,6 +118,12 @@ class ArithmeticBitModel:
         self.update_cycle = (5 * self.update_cycle) >> 2
         self.update_cycle = min(self.update_cycle, 64)
         self.bits_until_update = self.update_cycle
+
+    def __repr__(self):
+        return f'ArithmeticBitModel(update_cycle={self.update_cycle}, ' \
+            f'bits_until_update={self.bits_until_update}, ' \
+            f'bit_0_prob={self.bit_0_prob}, ' \
+            f'bit_0Pcount={self.bit_0_count}, bit_count={self.bit_count})'
 
 
 class ArithmeticModel:
@@ -359,6 +368,9 @@ class ArithmeticDecoder:
 
     def done(self):
         self.fp = None
+
+    def __repr__(self):
+        return f"ArithmeticDecoder(value={self.value}, length={self.length})"
 
 
 class StreamingMedian5:
@@ -890,6 +902,8 @@ class IntegerCompressor:
         for i in range(self.contexts):
             self.m_bits[i].init()
 
+        self.m_corrector[0].init()
+
         for i in range(1, self.corr_bits):
             self.m_corrector[i].init()
 
@@ -1305,7 +1319,11 @@ def main(filename, txtpoints_filename):
         #if i == 50000:
         #    import pdb; pdb.set_trace()
 
-        point = reader.point_reader.read()
+        try:
+            point = reader.point_reader.read()
+        except Exception as e:
+            print("error at point: ", i)
+            raise e
 
         comp = [i, point[0].x, point[0].y, point[0].z, point[0].intensity]
 
@@ -1315,7 +1333,7 @@ def main(filename, txtpoints_filename):
             print("them", entry)
             exit()
 
-        if i % 1000 == 0 or i > 29628-100:
+        if i % 1000 == 0:
             print(i, ":", [str(x) for x in point])
 
 
