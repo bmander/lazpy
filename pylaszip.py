@@ -1105,13 +1105,12 @@ class PointReader:
         # if the compressed readers haven't been initialized,
         # read the first uncompressed point and then initialize them
         if self.readers is None:
-            # TODO combine these two loops
-            for reader_raw in self.readers_raw:
+            for reader_raw, reader_compressed in zip(self.readers_raw,
+                                                     self.readers_compressed):
                 pt_section = reader_raw(self.fp)
-                point.append(pt_section)
+                reader_compressed.init(pt_section, context)
 
-            for i, reader_compressed in enumerate(self.readers_compressed):
-                reader_compressed.init(point[i], context)
+                point.append(pt_section)
 
             self.dec.init(self.fp)
 
