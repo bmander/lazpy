@@ -2,72 +2,99 @@ from utils import unsigned_int
 
 
 class LasPoint10:
-    # TODO
-    # internally represent the point as a 20-byte array, and make
-    # all the methods static functions tht operate on the array
+    def __init__(self, bytes: bytes):
+        self.bytes = bytearray(bytes)
 
-    @classmethod
-    def from_bytes(cls, bytes):
-        ret = cls()
+    @property
+    def x(self):
+        return unsigned_int(self.bytes[0:4])
 
-        ret.x = unsigned_int(bytes[0:4])
-        ret.y = unsigned_int(bytes[4:8])
-        ret.z = unsigned_int(bytes[8:12])
-        ret.intensity = unsigned_int(bytes[12:14])
+    @x.setter
+    def x(self, value):
+        self.bytes[0:4] = value.to_bytes(4, byteorder='little')
 
-        bitfield = unsigned_int(bytes[14:15])
-        ret.set_bitfield(bitfield)
+    @property
+    def y(self):
+        return unsigned_int(self.bytes[4:8])
 
-        ret.classification = unsigned_int(bytes[15:16])
-        ret.scan_angle_rank = unsigned_int(bytes[16:17])
-        ret.user_data = unsigned_int(bytes[17:18])
-        ret.point_source_id = unsigned_int(bytes[18:20])
+    @y.setter
+    def y(self, value):
+        self.bytes[4:8] = value.to_bytes(4, byteorder='little')
 
-        return ret
+    @property
+    def z(self):
+        return unsigned_int(self.bytes[8:12])
 
-    def __init__(self):
-        self.x = 0
-        self.y = 0
-        self.z = 0
-        self.intensity = 0
+    @z.setter
+    def z(self, value):
+        self.bytes[8:12] = value.to_bytes(4, byteorder='little')
 
-        self.return_num = 0
-        self.num_returns = 0
-        self.scan_dir_flag = 0
-        self.edge_of_flight_line = 0
+    @property
+    def intensity(self):
+        return unsigned_int(self.bytes[12:14])
 
-        self.classification = 0
-        self.scan_angle_rank = 0
-        self.user_data = 0
-        self.point_source_id = 0
+    @intensity.setter
+    def intensity(self, value):
+        self.bytes[12:14] = value.to_bytes(2, byteorder='little')
 
-    def bitfield_value(self):
-        return self.return_num | (self.num_returns << 3) | \
-                (self.scan_dir_flag << 6) | (self.edge_of_flight_line << 7)
+    @property
+    def bitfield(self):
+        return unsigned_int(self.bytes[14:15])
 
-    def set_bitfield(self, byte):
-        self.return_num = byte & 0b00000111
-        self.num_returns = (byte & 0b00111000) >> 3
-        self.scan_dir_flag = (byte & 0b01000000) >> 6
-        self.edge_of_flight_line = (byte & 0b10000000) >> 7
+    @bitfield.setter
+    def bitfield(self, value):
+        self.bytes[14:15] = value.to_bytes(1, byteorder='little')
+
+    @property
+    def return_num(self):
+        return unsigned_int(self.bytes[14:15]) & 0b00000111
+
+    @property
+    def num_returns(self):
+        return (unsigned_int(self.bytes[14:15]) & 0b00111000) >> 3
+
+    @property
+    def scan_dir_flag(self):
+        return (unsigned_int(self.bytes[14:15]) & 0b01000000) >> 6
+
+    @property
+    def edge_of_flight_line(self):
+        return (unsigned_int(self.bytes[14:15]) & 0b10000000) >> 7
+
+    @property
+    def classification(self):
+        return unsigned_int(self.bytes[15:16])
+
+    @classification.setter
+    def classification(self, value):
+        self.bytes[15:16] = value.to_bytes(1, byteorder='little')
+
+    @property
+    def scan_angle_rank(self):
+        return unsigned_int(self.bytes[16:17])
+
+    @scan_angle_rank.setter
+    def scan_angle_rank(self, value):
+        self.bytes[16:17] = value.to_bytes(1, byteorder='little')
+
+    @property
+    def user_data(self):
+        return unsigned_int(self.bytes[17:18])
+
+    @user_data.setter
+    def user_data(self, value):
+        self.bytes[17:18] = value.to_bytes(1, byteorder='little')
+
+    @property
+    def point_source_id(self):
+        return unsigned_int(self.bytes[18:20])
+
+    @point_source_id.setter
+    def point_source_id(self, value):
+        self.bytes[18:20] = value.to_bytes(2, byteorder='little')
 
     def copy(self):
-        ret = LasPoint10()
-
-        ret.x = self.x
-        ret.y = self.y
-        ret.z = self.z
-        ret.intensity = self.intensity
-        ret.return_num = self.return_num
-        ret.num_returns = self.num_returns
-        ret.scan_dir_flag = self.scan_dir_flag
-        ret.edge_of_flight_line = self.edge_of_flight_line
-        ret.classification = self.classification
-        ret.scan_angle_rank = self.scan_angle_rank
-        ret.user_data = self.user_data
-        ret.point_source_id = self.point_source_id
-
-        return ret
+        return LasPoint10(bytes(self.bytes))
 
     def __str__(self):
         return f"LasPoint10(x={self.x}, y={self.y}, z={self.z}, " \

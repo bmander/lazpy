@@ -99,14 +99,14 @@ class read_item_compressed_point10_v2:
 
         # decompress bit field byte
         if changed_values & 0b100000:
-            bitfield = self.last_item.bitfield_value()
+            bitfield = self.last_item.bitfield
             if bitfield not in self.m_bit_byte:
                 model = self.dec.create_symbol_model(256)
                 model.init()
                 self.m_bit_byte[bitfield] = model
 
             bitfield = self.dec.decode_symbol(self.m_bit_byte[bitfield])
-            self.last_item.set_bitfield(bitfield)
+            self.last_item.bitfield = bitfield
 
         r = self.last_item.return_num
         n = self.last_item.num_returns
@@ -324,7 +324,7 @@ read_item_compressed_wavepacket14_v4 = not_implemented_func
 
 
 def las_read_item_raw_point10_le(fp):
-    return LasPoint10.from_bytes(fp.read(20))
+    return LasPoint10(bytearray(fp.read(20)))
 
 
 def las_read_item_raw_gpstime11_le(fp):

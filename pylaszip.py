@@ -385,7 +385,7 @@ def main(filename, txtpoints_filename):
 
     print("num points: ", reader.num_points)
 
-    target_point_index = 60000
+    target_point_index = 0
     chunk_index = target_point_index // reader.chunk_size
 
     i_start = chunk_index*reader.chunk_size
