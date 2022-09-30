@@ -593,68 +593,62 @@ class read_item_compressed_point10_v2:
 
         changed_values = self.dec.decode_symbol(self.m_changed_values)
 
-        if changed_values != 0:
-            # decompress bit field byte
-            if changed_values & 0b100000:
-                bitfield = self.last_item.bitfield_value()
-                if bitfield not in self.m_bit_byte:
-                    model = self.dec.create_symbol_model(256)
-                    model.init()
-                    self.m_bit_byte[bitfield] = model
+        # decompress bit field byte
+        if changed_values & 0b100000:
+            bitfield = self.last_item.bitfield_value()
+            if bitfield not in self.m_bit_byte:
+                model = self.dec.create_symbol_model(256)
+                model.init()
+                self.m_bit_byte[bitfield] = model
 
-                bitfield = self.dec.decode_symbol(self.m_bit_byte[bitfield])
-                self.last_item.set_bitfield(bitfield)
+            bitfield = self.dec.decode_symbol(self.m_bit_byte[bitfield])
+            self.last_item.set_bitfield(bitfield)
 
-            r = self.last_item.return_num
-            n = self.last_item.num_returns
-            m = NUMBER_RETURN_MAP[n][r]
-            el = NUMBER_RETURN_LEVEL[n][r]
+        r = self.last_item.return_num
+        n = self.last_item.num_returns
+        m = NUMBER_RETURN_MAP[n][r]
+        el = NUMBER_RETURN_LEVEL[n][r]
 
-            # decompress intensity
-            if changed_values & 0b10000:
-                context = min(m, 3)
-                self.last_item.intensity = self.ic_intensity.decompress(
-                                    self.last_intensity[m], context)
-                self.last_intensity[m] = self.last_item.intensity
-            else:
-                self.last_item.intensity = self.last_intensity[m]
-
-            # decompress classification
-            if changed_values & 0b1000:
-                if self.last_item.classification not in self.m_classification:
-                    self.m_classification[self.last_item.classification] = \
-                        self.dec.create_symbol_model(256)
-                    self.m_classification[self.last_item.classification].init()
-                self.last_item.classification = self.dec.decode_symbol(
-                    self.m_classification[self.last_item.classification])
-
-            # decompress scan angle rank
-            if changed_values & 0b100:
-                f = self.last_item.scan_dir_flag
-                val = self.dec.decode_symbol(self.m_scan_angle_rank[f])
-                self.last_item.scan_angle_rank = \
-                    u8_fold(val + self.last_item.scan_angle_rank)
-
-            # decompress user data
-            if changed_values & 0b10:
-                if self.last_item.user_data not in self.m_user_data:
-                    self.m_user_data[self.last_item.user_data] = \
-                        self.dec.create_symbol_model(256)
-                    self.m_user_data[self.last_item.user_data].init()
-
-                model = self.m_user_data[self.last_item.user_data]
-                self.last_item.user_data = self.dec.decode_symbol(model)
-
-            # decompress point source ID
-            if changed_values & 0b1:
-                self.last_item.point_source_id = \
-                    self.ic_point_source_id.decompress(
-                        self.last_item.point_source_id)
+        # decompress intensity
+        if changed_values & 0b10000:
+            context = min(m, 3)
+            self.last_item.intensity = self.ic_intensity.decompress(
+                                self.last_intensity[m], context)
+            self.last_intensity[m] = self.last_item.intensity
         else:
-            r = self.last_item.return_num
-            n = self.last_item.num_returns
-            m = NUMBER_RETURN_MAP[n][r]
-            el = NUMBER_RETURN_LEVEL[n][r]
+            self.last_item.intensity = self.last_intensity[m]
+
+        # decompress classification
+        if changed_values & 0b1000:
+            if self.last_item.classification not in self.m_classification:
+                self.m_classification[self.last_item.classification] = \
+                    self.dec.create_symbol_model(256)
+                self.m_classification[self.last_item.classification].init()
+            self.last_item.classification = self.dec.decode_symbol(
+                self.m_classification[self.last_item.classification])
+
+        # decompress scan angle rank
+        if changed_values & 0b100:
+            f = self.last_item.scan_dir_flag
+            val = self.dec.decode_symbol(self.m_scan_angle_rank[f])
+            self.last_item.scan_angle_rank = \
+                u8_fold(val + self.last_item.scan_angle_rank)
+
+        # decompress user data
+        if changed_values & 0b10:
+            if self.last_item.user_data not in self.m_user_data:
+                self.m_user_data[self.last_item.user_data] = \
+                    self.dec.create_symbol_model(256)
+                self.m_user_data[self.last_item.user_data].init()
+
+            model = self.m_user_data[self.last_item.user_data]
+            self.last_item.user_data = self.dec.decode_symbol(model)
+
+        # decompress point source ID
+        if changed_values & 0b1:
+            self.last_item.point_source_id = \
+                self.ic_point_source_id.decompress(
+                    self.last_item.point_source_id)
 
         # decompress x
         median = self.last_x_diff_median5[m].get()
