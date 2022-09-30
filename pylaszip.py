@@ -1019,7 +1019,6 @@ class PointReader:
         # to force a read of the next chunk
         self.chunk_count = self.chunk_size
 
-        self.readers = None
         self.chunk_starts = None
         self.current_chunk = 0
 
@@ -1028,18 +1027,11 @@ class PointReader:
     def read(self):
         context = 0
 
-        # if this is a new chunk
-        if self.chunk_count == self.chunk_size:
-            self.readers = None
-            self.chunk_count = 0
-
-        self.chunk_count += 1
-
         point = []
 
-        # if the compressed readers haven't been initialized,
+        # if this is a new chunk
         # read the first uncompressed point and then initialize them
-        if self.readers is None:
+        if self.chunk_count == self.chunk_size:
             for reader_raw, reader_compressed in zip(self.readers_raw,
                                                      self.readers_compressed):
                 pt_section = reader_raw(self.fp)
@@ -1049,12 +1041,13 @@ class PointReader:
 
             self.dec.start()
 
-            self.readers = self.readers_compressed
+            self.chunk_count = 0
         else:
-            for reader in self.readers:
+            for reader in self.readers_compressed:
                 pt_section = reader.read(context)
                 point.append(pt_section)
 
+        self.chunk_count += 1
         return point
 
     def jump_to_chunk(self, chunk):
