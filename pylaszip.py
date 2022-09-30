@@ -1030,45 +1030,6 @@ class PointReader:
 
         self.fp = fp
 
-    @staticmethod
-    def _read_chunk_table(fp, dec):
-        chunk_table_start_position = unsigned_int(fp.read(8))
-        chunks_start = fp.tell()
-
-        fp.seek(chunk_table_start_position)
-
-        version = unsigned_int(fp.read(4))
-        if version != 0:
-            raise Exception("Unknown chunk table version")
-
-        number_chunks = unsigned_int(fp.read(4))
-        # chunk_totals = 0
-        tabled_chunks = 1
-
-        dec.start()
-
-        ic = IntegerCompressor(dec, 32, 2)
-        ic.init_decompressor()
-
-        # read chunk sizes
-        chunk_sizes = []
-        pred = 0
-        for i in range(number_chunks-1):
-            chunk_size = ic.decompress(pred, 1)
-            chunk_sizes.append(chunk_size)
-
-            pred = chunk_size
-            tabled_chunks += 1
-
-        # calculate chunk offsets
-        chunk_starts = [chunks_start]
-        for chunk_size in chunk_sizes:
-            chunk_starts.append(chunk_starts[-1] + chunk_size)
-
-        fp.seek(chunks_start)
-
-        return chunk_starts
-
     def read(self):
         context = 0
 
@@ -1083,11 +1044,7 @@ class PointReader:
                 # TODO check integrity
                 # see lasreadpoint.cpp:421
 
-            # if chunk table hasn't been read, read it
-            # TODO move this to an init function
-            if self.chunk_starts is None:
-                self.chunk_starts = PointReader._read_chunk_table(self.fp, self.dec)
-            self.point_start = self.fp.tell()
+            self.point_start = self.fp.tell()  # TODO remove
             self.readers = None
 
             self.chunk_count = 0
@@ -1281,13 +1238,53 @@ class Reader:
     def num_points(self):
         return self.header['number_of_point_records']
 
+    @staticmethod
+    def _read_chunk_table(fp, dec):
+        chunk_table_start_position = unsigned_int(fp.read(8))
+        chunks_start = fp.tell()
+
+        fp.seek(chunk_table_start_position)
+
+        version = unsigned_int(fp.read(4))
+        if version != 0:
+            raise Exception("Unknown chunk table version")
+
+        number_chunks = unsigned_int(fp.read(4))
+        # chunk_totals = 0
+        tabled_chunks = 1
+
+        dec.start()
+
+        ic = IntegerCompressor(dec, 32, 2)
+        ic.init_decompressor()
+
+        # read chunk sizes
+        chunk_sizes = []
+        pred = 0
+        for i in range(number_chunks-1):
+            chunk_size = ic.decompress(pred, 1)
+            chunk_sizes.append(chunk_size)
+
+            pred = chunk_size
+            tabled_chunks += 1
+
+        # calculate chunk offsets
+        chunk_starts = [chunks_start]
+        for chunk_size in chunk_sizes:
+            chunk_starts.append(chunk_starts[-1] + chunk_size)
+
+        fp.seek(chunks_start)
+
+        return chunk_starts
+
+
     def open(self, filename):
         fp = open(filename, 'rb')
 
         self.header = self._read_laz_header(fp)
 
         self.point_reader = PointReader(self, fp)
-        self.point_reader.chunk_starts = self.point_reader._read_chunk_table(self.point_reader.fp, self.point_reader.dec) # TODO move chunk table reader to this class
+        self.point_reader.chunk_starts = self._read_chunk_table(fp, self.point_reader.dec) # TODO move chunk table reader to this class
 
         self.npoints = self.header['number_of_point_records']
         self.p_count = 0
