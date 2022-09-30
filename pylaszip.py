@@ -245,6 +245,13 @@ class ArithmeticDecoder:
         data = self.fp.read(4)
         self.value = int.from_bytes(data, byteorder='big')
 
+    def _renorm_dec_interval(self):
+        """Renormalize the decoder interval."""
+        while self.length < self.AC_MIN_LENGTH:
+            data = unsigned_int(self.fp.read(1))
+            self.value = (self.value << 8) | data
+            self.length <<= 8
+
     def decode_bit(self, m):
         # m is an ArithmeticBitModel
         x = m.bit_0_prob * (self.length >> m.BM_LENGTH_SHIFT)
@@ -265,12 +272,6 @@ class ArithmeticDecoder:
             m.update()
 
         return sym
-
-    def _renorm_dec_interval(self):
-        while self.length < self.AC_MIN_LENGTH:
-            data = unsigned_int(self.fp.read(1))
-            self.value = (self.value << 8) | data
-            self.length <<= 8
 
     def decode_symbol(self, m):
         # m is an ArithmeticModel
@@ -340,7 +341,7 @@ class ArithmeticDecoder:
     def read_short(self):
         self.length >>= 16
         sym = self.value // self.length
-        self.value -= self.length * sym
+        self.value = self.value % self.length
 
         if self.length < self.AC_MIN_LENGTH:
             self._renorm_dec_interval()
@@ -351,14 +352,14 @@ class ArithmeticDecoder:
         assert bits > 0 and bits <= 32
 
         if bits > 19:
-            tmp = self.read_short()
+            lower = self.read_short()
             bits = bits - 16
-            tmp1 = self.read_bits(bits) << 16
-            return tmp1 | tmp
+            upper = self.read_bits(bits)
+            return (upper << 16) | lower
 
         self.length >>= bits
         sym = self.value // (self.length)
-        self.value -= sym * self.length
+        self.value = self.value % self.length
 
         if self.length < self.AC_MIN_LENGTH:
             self._renorm_dec_interval()
