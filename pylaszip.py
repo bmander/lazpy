@@ -961,7 +961,7 @@ class PointReader:
 
         self.readers_raw = []
         self.point_size = 0
-        for item in reader.header['laszip']['items']:
+        for item in reader.laz_header['items']:
             func = type_raw_reader.get(item['type'])
 
             if func is None:
@@ -994,7 +994,7 @@ class PointReader:
             (ItemType.WAVEPACKET14, 4): read_item_compressed_wavepacket14_v4,
         }
         self.readers_compressed = []
-        for i, item in enumerate(reader.header['laszip']['items']):
+        for i, item in enumerate(reader.laz_header['items']):
             key = (item['type'], item['version'])
             if key in type_version_compressed_reader:
                 compressed_reader_class = type_version_compressed_reader[key]
@@ -1006,11 +1006,11 @@ class PointReader:
 
         # create seek table
         self.seek_point = []
-        for item in reader.header['laszip']['items']:
+        for item in reader.laz_header['items']:
             self.seek_point.append([0]*item['size'])
 
         # number of points per chunk
-        self.chunk_size = reader.header['laszip']['chunk_size']
+        self.chunk_size = reader.laz_header['chunk_size']
 
         # indicate the reader is at the end of the chunk in order
         # to force a read of the next chunk
@@ -1187,9 +1187,7 @@ class Reader:
         return laszip_record
 
     @staticmethod
-    def _read_laz_header(fp):
-        # Read standard LAS header
-        header = Reader._read_las_header(fp)
+    def _read_laz_header(header):
 
         # Read LASzip record, stored in the data payload of a variable length
         # record
@@ -1198,12 +1196,7 @@ class Reader:
         if laszip_vlr is None:
             raise Exception("File is not compressed with LASzip")
 
-        header['laszip'] = Reader._parse_laszip_record(laszip_vlr['data'])
-
-        # clear the bit that indicates that the file is compressed
-        header['point_data_format_id'] &= 0b01111111
-
-        return header
+        return Reader._parse_laszip_record(laszip_vlr['data'])
 
     @property
     def num_points(self):
@@ -1251,13 +1244,18 @@ class Reader:
     def open(self, filename):
         fp = open(filename, 'rb')
 
-        self.header = self._read_laz_header(fp)
+        # Read standard LAS header
+        self.header = Reader._read_las_header(fp)
+        self.laz_header = Reader._read_laz_header(self.header)
 
-        if self.header['laszip']['compressor'] == Compressor.POINTWISE:
+        # clear the bit that indicates that the file is compressed
+        self.header['point_data_format_id'] &= 0b01111111
+
+        if self.laz_header['compressor'] == Compressor.POINTWISE:
             raise Exception("Pointwise compressor not supported")
 
         # create decoder
-        if self.header['laszip']['coder'] == Coder.ARITHMETIC:
+        if self.laz_header['coder'] == Coder.ARITHMETIC:
             dec = ArithmeticDecoder(fp)
         else:
             raise Exception("Unknown coder")
