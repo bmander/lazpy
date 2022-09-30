@@ -338,23 +338,12 @@ class ArithmeticDecoder:
 
         return sym
 
-    def read_short(self):
-        self.length >>= 16
-        sym = self.value // self.length
-        self.value = self.value % self.length
-
-        if self.length < self.AC_MIN_LENGTH:
-            self._renorm_dec_interval()
-
-        return sym
-
     def read_bits(self, bits):
         assert bits > 0 and bits <= 32
 
         if bits > 19:
-            lower = self.read_short()
-            bits = bits - 16
-            upper = self.read_bits(bits)
+            lower = self.read_bits(16)
+            upper = self.read_bits(bits-16)
             return (upper << 16) | lower
 
         self.length >>= bits
@@ -367,10 +356,7 @@ class ArithmeticDecoder:
         return sym
 
     def read_int(self):
-        lower = self.read_short()
-        upper = self.read_short()
-
-        return (upper << 16) | lower
+        return self.read_bits(32)
 
     def create_symbol_model(self, num_symbols):
         return ArithmeticModel(num_symbols, False)
