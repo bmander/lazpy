@@ -376,6 +376,7 @@ class StreamingMedian5:
         self.high = True
 
     def _add_high(self, v):
+        # TODO simplify this
         # insert and bubble up
 
         # if v less than the middle
@@ -543,9 +544,12 @@ class read_item_compressed_point10_v2:
         self.m_scan_angle_rank = [dec.create_symbol_model(256),
                                   dec.create_symbol_model(256)]
         self.ic_point_source_id = IntegerCompressor(dec, 16)
-        self.m_bit_byte = [None]*256
-        self.m_classification = [None]*256
-        self.m_user_data = [None]*256
+        # an alternative approach is to use an array of 256 models
+        # this is more pythonic but inappropriate for C; when this gets
+        # ported to C, the array of 256 models should be used
+        self.m_bit_byte = {}
+        self.m_classification = {}
+        self.m_user_data = {}
         self.ic_dx = IntegerCompressor(dec, 32, 2)
         self.ic_dy = IntegerCompressor(dec, 32, 22)
         self.ic_z = IntegerCompressor(dec, 32, 20)
@@ -576,13 +580,12 @@ class read_item_compressed_point10_v2:
         self.m_scan_angle_rank[1].init()
         self.ic_point_source_id.init_decompressor()
 
-        for i in range(256):
-            if self.m_bit_byte[i] is not None:
-                self.m_bit_byte[i].init()
-            if self.m_classification[i] is not None:
-                self.m_classification[i].init()
-            if self.m_user_data[i] is not None:
-                self.m_user_data[i].init()
+        for m in self.m_bit_byte.values():
+            m.init()
+        for m in self.m_classification.values():
+            m.init()
+        for m in self.m_user_data.values():
+            m.init()
 
         self.ic_dx.init_decompressor()
         self.ic_dy.init_decompressor()
@@ -599,7 +602,7 @@ class read_item_compressed_point10_v2:
             # decompress bit field byte
             if changed_values & 0b100000:
                 bitfield = self.last_item.bitfield_value()
-                if self.m_bit_byte[bitfield] is None: # TODO is this redundant?
+                if bitfield not in self.m_bit_byte:
                     model = self.dec.create_symbol_model(256)
                     model.init()
                     self.m_bit_byte[bitfield] = model
@@ -623,7 +626,7 @@ class read_item_compressed_point10_v2:
 
             # decompress classification
             if changed_values & 0b1000:
-                if self.m_classification[self.last_item.classification] is None: # TODO is this redundant?
+                if self.last_item.classification not in self.m_classification:
                     self.m_classification[self.last_item.classification] = \
                         self.dec.create_symbol_model(256)
                     self.m_classification[self.last_item.classification].init()
@@ -634,12 +637,12 @@ class read_item_compressed_point10_v2:
             if changed_values & 0b100:
                 f = self.last_item.scan_dir_flag
                 val = self.dec.decode_symbol(self.m_scan_angle_rank[f])
-                self.last_item.scan_angle_rank = u8_fold(val +
-                                              self.last_item.scan_angle_rank)
+                self.last_item.scan_angle_rank = \
+                    u8_fold(val + self.last_item.scan_angle_rank)
 
             # decompress user data
             if changed_values & 0b10:
-                if self.m_user_data[self.last_item.user_data] is None: # TODO is this redundant?
+                if self.last_item.user_data not in self.m_user_data:
                     self.m_user_data[self.last_item.user_data] = \
                         self.dec.create_symbol_model(256)
                     self.m_user_data[self.last_item.user_data].init()
