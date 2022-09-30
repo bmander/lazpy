@@ -1,11 +1,12 @@
-from re import A
 import struct
 from enum import IntEnum
 import sys
 
 # LAS file specification
-# 1.2: https://www.asprs.org/a/society/committees/standards/asprs_las_format_v12.pdf
-# 1.4: https://www.asprs.org/wp-content/uploads/2010/12/LAS_1_4_r13.pdf
+# 1.2:
+# https://www.asprs.org/a/society/committees/standards/asprs_las_format_v12.pdf
+# 1.4:
+# https://www.asprs.org/wp-content/uploads/2010/12/LAS_1_4_r13.pdf
 
 
 class Compressor(IntEnum):
@@ -270,6 +271,9 @@ class ArithmeticDecoder:
 
     def decode_symbol(self, m):
         # m is an ArithmeticModel
+
+        # TODO comment this
+
         y = self.length
 
         if m.decoder_table is not None:
@@ -649,7 +653,7 @@ class read_item_compressed_point10_v2:
             # decompress point source ID
             if changed_values & 0b1:
                 self.last_item.point_source_id = \
-                    self.ic_point_source_id.decompress( 
+                    self.ic_point_source_id.decompress(
                         self.last_item.point_source_id)
         else:
             r = self.last_item.return_num
@@ -1299,14 +1303,12 @@ def main(filename, txtpoints_filename):
     entries = read_txtfile_entries(txtpoints_filename)
 
     if chunk_index > 0:
-        print(f"fast forwarding to desired point to i:{i_start} chunk:{chunk_index}")
+        print(f"fast forwarding to desired point to i:{i_start} "
+              f"chunk:{chunk_index}")
         fast_forward(entries, i_start)
         reader.point_reader.jump_to_chunk(chunk_index)
-    
-    for i, entry in zip(range(i_start, reader.num_points), entries):
 
-        #if i == target_point_index:
-        #    import pdb; pdb.set_trace()
+    for i, entry in zip(range(i_start, reader.num_points), entries):
 
         try:
             point = reader.point_reader.read()
@@ -1314,7 +1316,7 @@ def main(filename, txtpoints_filename):
             print("error at point: ", i)
             raise e
 
-        comp = [i, point[0].x, point[0].y, point[0].z, point[0].intensity, 
+        comp = [i, point[0].x, point[0].y, point[0].z, point[0].intensity,
                 point[1]]
 
         if comp != entry:
