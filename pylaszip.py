@@ -263,12 +263,10 @@ class ArithmeticDecoder:
         return sym
 
     def _renorm_dec_interval(self):
-        while True:
+        while self.length < self.AC_MIN_LENGTH:
             data = unsigned_int(self.fp.read(1))
             self.value = (self.value << 8) | data
             self.length <<= 8
-            if self.length >= self.AC_MIN_LENGTH:
-                break
 
     def decode_symbol(self, m):
         # m is an ArithmeticModel
