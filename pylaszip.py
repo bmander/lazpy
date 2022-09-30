@@ -38,30 +38,6 @@ class ItemType(IntEnum):
     BYTE14 = 14
 
 
-NUMBER_RETURN_MAP = (
-  (15, 14, 13, 12, 11, 10,  9,  8),
-  (14,  0,  1,  3,  6, 10, 10,  9),
-  (13,  1,  2,  4,  7, 11, 11, 10),
-  (12,  3,  4,  5,  8, 12, 12, 11),
-  (11,  6,  7,  8,  9, 13, 13, 12),
-  (10, 10, 11, 12, 13, 14, 14, 13),
-  (9, 10, 11, 12, 13, 14, 15, 14),
-  (8,  9, 10, 11, 12, 13, 14, 15)
-)
-
-
-NUMBER_RETURN_LEVEL = (
-  (0,  1,  2,  3,  4,  5,  6,  7),
-  (1,  0,  1,  2,  3,  4,  5,  6),
-  (2,  1,  0,  1,  2,  3,  4,  5),
-  (3,  2,  1,  0,  1,  2,  3,  4),
-  (4,  3,  2,  1,  0,  1,  2,  3),
-  (5,  4,  3,  2,  1,  0,  1,  2),
-  (6,  5,  4,  3,  2,  1,  0,  1),
-  (7,  6,  5,  4,  3,  2,  1,  0)
-)
-
-
 def unsigned_int(bytes):
     return int.from_bytes(bytes, byteorder='little', signed=False)
 
@@ -530,6 +506,29 @@ read_item_compressed_point10_v1 = not_implemented_func
 
 
 class read_item_compressed_point10_v2:
+
+    NUMBER_RETURN_MAP = (
+        (15, 14, 13, 12, 11, 10,  9,  8),
+        (14,  0,  1,  3,  6, 10, 10,  9),
+        (13,  1,  2,  4,  7, 11, 11, 10),
+        (12,  3,  4,  5,  8, 12, 12, 11),
+        (11,  6,  7,  8,  9, 13, 13, 12),
+        (10, 10, 11, 12, 13, 14, 14, 13),
+        (9, 10, 11, 12, 13, 14, 15, 14),
+        (8,  9, 10, 11, 12, 13, 14, 15)
+    )
+
+    NUMBER_RETURN_LEVEL = (
+        (0,  1,  2,  3,  4,  5,  6,  7),
+        (1,  0,  1,  2,  3,  4,  5,  6),
+        (2,  1,  0,  1,  2,  3,  4,  5),
+        (3,  2,  1,  0,  1,  2,  3,  4),
+        (4,  3,  2,  1,  0,  1,  2,  3),
+        (5,  4,  3,  2,  1,  0,  1,  2),
+        (6,  5,  4,  3,  2,  1,  0,  1),
+        (7,  6,  5,  4,  3,  2,  1,  0)
+    )
+
     def __init__(self, dec):
         self.dec = dec
 
@@ -606,8 +605,8 @@ class read_item_compressed_point10_v2:
 
         r = self.last_item.return_num
         n = self.last_item.num_returns
-        m = NUMBER_RETURN_MAP[n][r]
-        el = NUMBER_RETURN_LEVEL[n][r]
+        m = self.NUMBER_RETURN_MAP[n][r]
+        el = self.NUMBER_RETURN_LEVEL[n][r]
 
         # decompress intensity
         if changed_values & 0b10000:
@@ -673,26 +672,25 @@ class read_item_compressed_point10_v2:
         return self.last_item.copy()
 
 
-# this is a holdover from laszip; I have no idea what's going on here
-LASZIP_GPSTIME_MULTI = 500
-LASZIP_GPSTIME_MULTI_MINUS = -10
-LASZIP_GPSTIME_MULTI_TOTAL = LASZIP_GPSTIME_MULTI - \
-                             LASZIP_GPSTIME_MULTI_MINUS + 6
-LASZIP_GPSTIME_MULTI_UNCHANGED = LASZIP_GPSTIME_MULTI - \
-                                 LASZIP_GPSTIME_MULTI_MINUS + 1
-LASZIP_GPSTIME_MULTI_CODE_FULL = LASZIP_GPSTIME_MULTI - \
-                                 LASZIP_GPSTIME_MULTI_MINUS + 2
-
-
 read_item_compressed_gpstime11_v1 = not_implemented_func
 
 
 class read_item_compressed_gpstime11_v2:
+
+    LASZIP_GPSTIME_MULTI = 500
+    LASZIP_GPSTIME_MULTI_MINUS = -10
+    LASZIP_GPSTIME_MULTI_TOTAL = LASZIP_GPSTIME_MULTI - \
+        LASZIP_GPSTIME_MULTI_MINUS + 6
+    LASZIP_GPSTIME_MULTI_UNCHANGED = LASZIP_GPSTIME_MULTI - \
+        LASZIP_GPSTIME_MULTI_MINUS + 1
+    LASZIP_GPSTIME_MULTI_CODE_FULL = LASZIP_GPSTIME_MULTI - \
+        LASZIP_GPSTIME_MULTI_MINUS + 2
+
     def __init__(self, dec):
         self.dec = dec
 
         self.m_gpstime_multi = self.dec.create_symbol_model(
-            LASZIP_GPSTIME_MULTI_TOTAL)
+            self.LASZIP_GPSTIME_MULTI_TOTAL)
         self.m_gpstime_0diff = self.dec.create_symbol_model(6)
         self.ic_gpstime = IntegerCompressor(dec, 32, 9)
 
@@ -742,31 +740,32 @@ class read_item_compressed_gpstime11_v2:
             self.last_gpstime[self.last] += val
 
             self.multi_extreme_counter[self.last] = 0
-        elif multi < LASZIP_GPSTIME_MULTI_UNCHANGED:
+        elif multi < self.LASZIP_GPSTIME_MULTI_UNCHANGED:
             if multi == 0:
                 gpstime_diff = self.ic_gpstime.decompress(0, 7)
                 self.multi_extreme_counter[self.last] += 1
                 if self.multi_extreme_counter[self.last] > 3:
                     self.last_gpstime_diff[self.last] = gpstime_diff
                     self.multi_extreme_counter[self.last] = 0
-            elif multi < LASZIP_GPSTIME_MULTI:
+            elif multi < self.LASZIP_GPSTIME_MULTI:
                 pred = multi*self.last_gpstime_diff[self.last]
                 context = 2 if multi < 10 else 3
                 gpstime_diff = self.ic_gpstime.decompress(pred, context)
-            elif multi == LASZIP_GPSTIME_MULTI:
-                pred = LASZIP_GPSTIME_MULTI*self.last_gpstime_diff[self.last]
+            elif multi == self.LASZIP_GPSTIME_MULTI:
+                pred = self.LASZIP_GPSTIME_MULTI * \
+                    self.last_gpstime_diff[self.last]
                 gpstime_diff = self.ic_gpstime.decompress(pred, 4)
                 self.multi_extreme_counter[self.last] += 1
                 if self.multi_extreme_counter[self.last] > 3:
                     self.last_gpstime_diff[self.last] = gpstime_diff
                     self.multi_extreme_counter[self.last] = 0
             else:
-                multi = LASZIP_GPSTIME_MULTI - multi
-                if multi > LASZIP_GPSTIME_MULTI_MINUS:
+                multi = self.LASZIP_GPSTIME_MULTI - multi
+                if multi > self.LASZIP_GPSTIME_MULTI_MINUS:
                     pred = multi*self.last_gpstime_diff[self.last]
                     gpstime_diff = self.ic_gpstime.decompress(pred, 5)
                 else:
-                    pred = LASZIP_GPSTIME_MULTI_MINUS * \
+                    pred = self.LASZIP_GPSTIME_MULTI_MINUS * \
                             self.last_gpstime_diff[self.last]
                     gpstime_diff = self.ic_gpstime.decompress(pred, 6)
                     self.multi_extreme_counter[self.last] += 1
@@ -775,7 +774,7 @@ class read_item_compressed_gpstime11_v2:
                         self.multi_extreme_counter[self.last] = 0
 
             self.last_gpstime[self.last] += gpstime_diff
-        elif multi == LASZIP_GPSTIME_MULTI_CODE_FULL:
+        elif multi == self.LASZIP_GPSTIME_MULTI_CODE_FULL:
             self.next = (self.next+1) & 3
             pred = self.last_gpstime[self.last] >> 32
             val = self.ic_gpstime.decompress(pred, 8)
@@ -786,8 +785,9 @@ class read_item_compressed_gpstime11_v2:
             self.last = self.next
             self.last_gpstime_diff[self.last] = 0
             self.multi_extreme_counter[self.last] = 0
-        elif multi >= LASZIP_GPSTIME_MULTI_CODE_FULL:
-            self.last = (self.last+multi-LASZIP_GPSTIME_MULTI_CODE_FULL) & 3
+        elif multi >= self.LASZIP_GPSTIME_MULTI_CODE_FULL:
+            self.last = (self.last+multi-self.LASZIP_GPSTIME_MULTI_CODE_FULL) \
+                & 3
             self.read(context)
 
     def read(self, context):
