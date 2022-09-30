@@ -1021,7 +1021,6 @@ class PointReader:
 
         self.readers = None
         self.chunk_starts = None
-        self.point_start = 0  # TODO is None better?
         self.current_chunk = 0
 
         self.fp = fp
@@ -1031,18 +1030,7 @@ class PointReader:
 
         # if this is a new chunk
         if self.chunk_count == self.chunk_size:
-
-            # if this is not the first chunk
-            if self.point_start != 0:
-                self.current_chunk += 1
-
-                # check integrity
-                # TODO check integrity
-                # see lasreadpoint.cpp:421
-
-            self.point_start = self.fp.tell()  # TODO remove
             self.readers = None
-
             self.chunk_count = 0
 
         self.chunk_count += 1
