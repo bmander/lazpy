@@ -232,16 +232,14 @@ class ArithmeticDecoder:
     AC_MAX_LENGTH = 0xFFFFFFFF
     AC_MIN_LENGTH = 0x01000000
 
-    def __init__(self):
-        pass
-
-    def init(self, fp, really_init=True):
+    def __init__(self, fp):
         self.fp = fp
+
+    def start(self):
         self.length = self.AC_MAX_LENGTH
 
-        if really_init:
-            data = fp.read(4)
-            self.value = int.from_bytes(data, byteorder='big')
+        data = self.fp.read(4)
+        self.value = int.from_bytes(data, byteorder='big')
 
     def decode_bit(self, m):
         # m is an ArithmeticBitModel
@@ -367,9 +365,6 @@ class ArithmeticDecoder:
 
     def create_symbol_model(self, num_symbols):
         return ArithmeticModel(num_symbols, False)
-
-    def done(self):
-        self.fp = None
 
     def __repr__(self):
         return f"ArithmeticDecoder(value={self.value}, length={self.length})"
@@ -954,7 +949,7 @@ class PointReader:
 
         # create decoder
         if reader.header['laszip']['coder'] == Coder.ARITHMETIC:
-            self.dec = ArithmeticDecoder()
+            self.dec = ArithmeticDecoder(fp)
         else:
             raise Exception("Unknown coder")
 
@@ -1049,7 +1044,7 @@ class PointReader:
         # chunk_totals = 0
         tabled_chunks = 1
 
-        self.dec.init(self.fp)
+        self.dec.start()
 
         ic = IntegerCompressor(self.dec, 32, 2)
         ic.init_decompressor()
@@ -1063,8 +1058,6 @@ class PointReader:
 
             pred = chunk_size
             tabled_chunks += 1
-
-        self.dec.done()
 
         # calculate chunk offsets
         self.chunk_starts = [chunks_start]
@@ -1082,7 +1075,6 @@ class PointReader:
 
             # if this is not the first chunk
             if self.point_start != 0:
-                self.dec.done()
                 self.current_chunk += 1
 
                 # check integrity
@@ -1112,7 +1104,7 @@ class PointReader:
 
                 point.append(pt_section)
 
-            self.dec.init(self.fp)
+            self.dec.start()
 
             self.readers = self.readers_compressed
         else:
