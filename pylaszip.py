@@ -342,62 +342,33 @@ class ArithmeticDecoder:
 
 
 class StreamingMedian5:
+    # the C++ implementation may save a few operations at the cost of clarity
     def __init__(self):
         self.values = [0, 0, 0, 0, 0]
         self.high = True
 
     def _add_high(self, v):
-        # TODO simplify this
-        # insert and bubble up
+        for i in range(5):
+            if v < self.values[i]:
+                break
 
-        # if v less than the middle
-        if v < self.values[2]:
-            # shift upper section up one
-            self.values[4] = self.values[3]
-            self.values[3] = self.values[2]
+        self.values[i+1:] = self.values[i:4]  # shift right
+        self.values[i] = v
 
-            # if v is less than the lowest
-            if v < self.values[0]:
-                # shift lower half up one and insert v at bottom
-                self.values[2] = self.values[1]
-                self.values[1] = self.values[0]
-                self.values[0] = v
-            elif v < self.values[1]:
-                # shift lower half up one and insert v in middle
-                self.values[2] = self.values[1]
-                self.values[1] = v
-            else:
-                # insert v in middle
-                self.values[2] = v
-        else:
-            if v < self.values[3]:
-                self.values[4] = self.values[3]
-                self.values[3] = v
-            else:
-                self.values[4] = v
+        # if inserted above the middle value, swap it
+        if i > 2:
             self.high = False
 
     def _add_low(self, v):
-        # insert and bubble down
+        for i in range(4, -1, -1):
+            if v > self.values[i]:
+                break
 
-        if v > self.values[2]:
-            self.values[0] = self.values[1]
-            self.values[1] = self.values[2]
-            if v > self.values[4]:
-                self.values[2] = self.values[3]
-                self.values[3] = self.values[4]
-                self.values[4] = v
-            elif v > self.values[3]:
-                self.values[2] = self.values[3]
-                self.values[3] = v
-            else:
-                self.values[2] = v
-        else:
-            if v > self.values[1]:
-                self.values[0] = self.values[1]
-                self.values[1] = v
-            else:
-                self.values[0] = v
+        self.values[:i] = self.values[1:i+1]  # shift left
+        self.values[i] = v
+
+        # if inserted below the middle value, swap it
+        if i < 2:
             self.high = True
 
     def add(self, v):
