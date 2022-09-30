@@ -940,12 +940,11 @@ class IntegerCompressor:
         return real
 
 
-class PointReader:
-    def __init__(self, reader, fp, dec):
-        if not sys.byteorder == 'little':
-            raise NotImplementedError("Only little endian is supported")
+class Reader:
+    def __init__(self):
+        pass
 
-        self.dec = dec
+    def _init_point_reader_functions(self):
 
         # create raw_readers
         type_raw_reader = {
@@ -958,8 +957,8 @@ class PointReader:
         }
 
         self.readers_raw = []
-        self.point_size = 0
-        for item in reader.laz_header['items']:
+        self.point_size = 0  # TODO eliminate?
+        for item in self.laz_header['items']:
             func = type_raw_reader.get(item['type'])
 
             if func is None:
@@ -992,7 +991,7 @@ class PointReader:
             (ItemType.WAVEPACKET14, 4): read_item_compressed_wavepacket14_v4,
         }
         self.readers_compressed = []
-        for i, item in enumerate(reader.laz_header['items']):
+        for i, item in enumerate(self.laz_header['items']):
             key = (item['type'], item['version'])
             if key in type_version_compressed_reader:
                 compressed_reader_class = type_version_compressed_reader[key]
@@ -1003,53 +1002,16 @@ class PointReader:
                 raise Exception("Unknown item type/version")
 
         # create seek table
-        self.seek_point = []
-        for item in reader.laz_header['items']:
+        self.seek_point = []  # TODO eliminate?
+        for item in self.laz_header['items']:
             self.seek_point.append([0]*item['size'])
 
         # number of points per chunk
-        self.chunk_size = reader.laz_header['chunk_size']
+        self.chunk_size = self.laz_header['chunk_size']  # TODO eliminate?
 
         # indicate the reader is at the end of the chunk in order
         # to force a read of the next chunk
         self.chunk_count = self.chunk_size
-
-        self.fp = fp
-
-    def read(self):
-        context = 0
-
-        point = []
-
-        # if this is a new chunk
-        # read the first uncompressed point and then initialize them
-        if self.chunk_count == self.chunk_size:
-            for reader_raw, reader_compressed in zip(self.readers_raw,
-                                                     self.readers_compressed):
-                pt_section = reader_raw(self.fp)
-                reader_compressed.init(pt_section, context)
-
-                point.append(pt_section)
-
-            self.dec.start()
-
-            self.chunk_count = 0
-        else:
-            for reader in self.readers_compressed:
-                pt_section = reader.read(context)
-                point.append(pt_section)
-
-        self.chunk_count += 1
-        return point
-
-    def jump_to_chunk(self, chunk):
-        self.fp.seek(self.chunk_starts[chunk])
-        self.chunk_count = self.chunk_size
-
-
-class Reader:
-    def __init__(self):
-        pass
 
     @staticmethod
     def _read_variable_length_record(fp):
@@ -1240,10 +1202,13 @@ class Reader:
         return chunk_starts
 
     def open(self, filename):
-        fp = open(filename, 'rb')
+        if not sys.byteorder == 'little':
+            raise NotImplementedError("Only little endian is supported")
+
+        self.fp = open(filename, 'rb')
 
         # Read standard LAS header
-        self.header = Reader._read_las_header(fp)
+        self.header = Reader._read_las_header(self.fp)
         self.laz_header = Reader._read_laz_header(self.header)
 
         # clear the bit that indicates that the file is compressed
@@ -1254,16 +1219,43 @@ class Reader:
 
         # create decoder
         if self.laz_header['coder'] == Coder.ARITHMETIC:
-            dec = ArithmeticDecoder(fp)
+            self.dec = ArithmeticDecoder(self.fp)
         else:
             raise Exception("Unknown coder")
 
-        self.chunk_starts = self._read_chunk_table(fp, dec)
+        self.chunk_starts = self._read_chunk_table(self.fp, self.dec)
 
-        self.point_reader = PointReader(self, fp, dec)
+        self._init_point_reader_functions()
 
-        self.npoints = self.header['number_of_point_records']
-        self.p_count = 0
+    def read(self):
+        context = 0
+
+        point = []
+
+        # if this is a new chunk
+        # read the first uncompressed point and then initialize them
+        if self.chunk_count == self.chunk_size:
+            for reader_raw, reader_compressed in zip(self.readers_raw,
+                                                     self.readers_compressed):
+                pt_section = reader_raw(self.fp)
+                reader_compressed.init(pt_section, context)
+
+                point.append(pt_section)
+
+            self.dec.start()
+
+            self.chunk_count = 0
+        else:
+            for reader in self.readers_compressed:
+                pt_section = reader.read(context)
+                point.append(pt_section)
+
+        self.chunk_count += 1
+        return point
+
+    def jump_to_chunk(self, chunk):
+        self.fp.seek(self.chunk_starts[chunk])
+        self.chunk_count = self.chunk_size
 
 
 def read_txtfile_entries(filename):
@@ -1286,14 +1278,12 @@ def main(filename, txtpoints_filename):
 
     reader.open(filename)
 
-    print("num points: ", reader.npoints)
+    print("num points: ", reader.num_points)
 
-    target_point_index = 2832623
-    target_point_index = 2832622
-    target_point_index = 97
-    chunk_index = target_point_index // reader.point_reader.chunk_size
+    target_point_index = 60000
+    chunk_index = target_point_index // reader.chunk_size
 
-    i_start = chunk_index*reader.point_reader.chunk_size
+    i_start = chunk_index*reader.chunk_size
 
     entries = read_txtfile_entries(txtpoints_filename)
 
@@ -1301,12 +1291,12 @@ def main(filename, txtpoints_filename):
         print(f"fast forwarding to desired point to i:{i_start} "
               f"chunk:{chunk_index}")
         fast_forward(entries, i_start)
-        reader.point_reader.jump_to_chunk(chunk_index)
+        reader.jump_to_chunk(chunk_index)
 
     for i, entry in zip(range(i_start, reader.num_points), entries):
 
         try:
-            point = reader.point_reader.read()
+            point = reader.read()
         except Exception as e:
             print("error at point: ", i)
             raise e
