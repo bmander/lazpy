@@ -298,7 +298,7 @@ class ArithmeticDecoder:
             n = m.num_symbols
             k = n >> 1
 
-            while True:
+            while k != sym:
                 z = self.length * m.distribution[k]
                 if z > self.value:
                     n = k
@@ -308,8 +308,6 @@ class ArithmeticDecoder:
                     x = z
 
                 k = (sym + n) >> 1
-                if k == sym:
-                    break
 
         self.value -= x
         self.length = y - x
