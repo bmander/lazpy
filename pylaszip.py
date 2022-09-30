@@ -1009,18 +1009,12 @@ class PointReader:
         for item in reader.header['laszip']['items']:
             self.seek_point.append([0]*item['size'])
 
-        if reader.header['laszip']['compressor'] != Compressor.POINTWISE:
-            # number of points per chunk
-            self.chunk_size = reader.header['laszip']['chunk_size']
-        else:
-            raise Exception("Pointwise compressor not supported")
+        # number of points per chunk
+        self.chunk_size = reader.header['laszip']['chunk_size']
 
         # indicate the reader is at the end of the chunk in order
         # to force a read of the next chunk
         self.chunk_count = self.chunk_size
-
-        self.chunk_starts = None
-        self.current_chunk = 0
 
         self.fp = fp
 
@@ -1258,6 +1252,9 @@ class Reader:
         fp = open(filename, 'rb')
 
         self.header = self._read_laz_header(fp)
+
+        if self.header['laszip']['compressor'] == Compressor.POINTWISE:
+            raise Exception("Pointwise compressor not supported")
 
         # create decoder
         if self.header['laszip']['coder'] == Coder.ARITHMETIC:
