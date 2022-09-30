@@ -129,6 +129,7 @@ class ArithmeticBitModel:
 
 
 class ArithmeticModel:
+    """An ArithmeticModel is a table of probabilities for a set of symbols."""
     DM_LENGTH_SHIFT = 15
     DM_MAX_COUNT = 1 << DM_LENGTH_SHIFT
 
@@ -230,6 +231,8 @@ class ArithmeticEncoder:
 
 
 class ArithmeticDecoder:
+    """An ArithmeticDecoder decodes a stream of symbols using an arithmetic
+    model."""
     AC_MAX_LENGTH = 0xFFFFFFFF
     AC_MIN_LENGTH = 0x01000000
 
@@ -257,7 +260,7 @@ class ArithmeticDecoder:
         if self.length < self.AC_MIN_LENGTH:
             self._renorm_dec_interval()
 
-        m.bits_until_update -= 1
+        m.bits_until_update -= 1  # TODO get the model to handle this
         if m.bits_until_update == 0:
             m.update()
 
@@ -272,18 +275,19 @@ class ArithmeticDecoder:
     def decode_symbol(self, m):
         # m is an ArithmeticModel
 
-        # TODO comment this
-
         y = self.length
 
+        # use table lookup for faster decoding
         if m.decoder_table is not None:
             self.length >>= m.DM_LENGTH_SHIFT
             dv = self.value // self.length
             t = dv >> m.table_shift
 
+            # use table to get first symbol
             sym = m.decoder_table[t]
             n = m.decoder_table[t+1] + 1
 
+            # finish with bisection search
             while n > sym+1:
                 k = (sym + n) >> 1
                 if m.distribution[k] > dv:
@@ -291,28 +295,32 @@ class ArithmeticDecoder:
                 else:
                     sym = k
 
+            # compute products
             x = m.distribution[sym] * self.length
 
             if sym != m.last_symbol:
                 y = m.distribution[sym+1] * self.length
 
+        # decode using only multiplications
         else:
             x = sym = 0
             self.length >>= m.DM_LENGTH_SHIFT
             n = m.num_symbols
             k = n >> 1
 
+            # decode via bisection search
             while k != sym:
                 z = self.length * m.distribution[k]
                 if z > self.value:
                     n = k
-                    y = z
+                    y = z  # value is smaller
                 else:
                     sym = k
-                    x = z
+                    x = z  # value is larger or equal
 
                 k = (sym + n) >> 1
 
+        # update interval
         self.value -= x
         self.length = y - x
 
@@ -321,8 +329,8 @@ class ArithmeticDecoder:
 
         m.symbol_count[sym] += 1
 
-        m.symbols_until_update -= 1
-        if m.symbols_until_update == 0:
+        m.symbols_until_update -= 1  # TODO get the model to handle this
+        if m.symbols_until_update == 0:  # periodic model update
             m._update()
 
         assert sym < m.num_symbols
