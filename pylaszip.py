@@ -2,7 +2,7 @@ from enum import IntEnum
 import sys
 import models
 from utils import unsigned_int, u32_array, u64_array, double, cstr, \
-    signed_int
+    signed_int, StreamingMedian5, u8_fold, u32_zero_bit_0
 from encoder import ArithmeticEncoder, ArithmeticDecoder
 
 # LAS file specification
@@ -41,51 +41,14 @@ class ItemType(IntEnum):
     BYTE14 = 14
 
 
-class StreamingMedian5:
-    # the C++ implementation may save a few operations at the cost of clarity
-    def __init__(self):
-        self.values = [0, 0, 0, 0, 0]
-        self.high = True
-
-    def _add_high(self, v):
-        for i in range(5):
-            if v < self.values[i]:
-                break
-
-        self.values[i+1:] = self.values[i:4]  # shift right
-        self.values[i] = v
-
-        # if inserted above the middle value, swap it
-        if i > 2:
-            self.high = False
-
-    def _add_low(self, v):
-        for i in range(4, -1, -1):
-            if v > self.values[i]:
-                break
-
-        self.values[:i] = self.values[1:i+1]  # shift left
-        self.values[i] = v
-
-        # if inserted below the middle value, swap it
-        if i < 2:
-            self.high = True
-
-    def add(self, v):
-        if self.high:
-            self._add_high(v)
-        else:
-            self._add_low(v)
-
-    def get(self):
-        return self.values[2]
-
-
 def not_implemented_func(*args, **kwargs):
     raise NotImplementedError
 
 
 class LasPoint10:
+    # TODO
+    # internally represent the point as a 20-byte array, and make
+    # all the methods static functions tht operate on the array
 
     @classmethod
     def from_bytes(cls, bytes):
@@ -160,17 +123,6 @@ class LasPoint10:
           f"scan_angle_rank={self.scan_angle_rank}, " \
           f"user_data={self.user_data}, " \
           f"point_source_id={self.point_source_id})"
-
-
-def u8_fold(n):
-    # eg 0 - 1 = 255
-    # eg 255 + 1 = 0
-    return n & 0xFF
-
-
-def u32_zero_bit_0(n):
-    # set bit 0 to 0
-    return n & 0xFFFFFFFE
 
 
 read_item_compressed_point10_v1 = not_implemented_func
