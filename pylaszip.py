@@ -943,15 +943,11 @@ class IntegerCompressor:
 
 
 class PointReader:
-    def __init__(self, reader, fp):
+    def __init__(self, reader, fp, dec):
         if not sys.byteorder == 'little':
             raise NotImplementedError("Only little endian is supported")
 
-        # create decoder
-        if reader.header['laszip']['coder'] == Coder.ARITHMETIC:
-            self.dec = ArithmeticDecoder(fp)
-        else:
-            raise Exception("Unknown coder")
+        self.dec = dec
 
         # create raw_readers
         type_raw_reader = {
@@ -1277,14 +1273,20 @@ class Reader:
 
         return chunk_starts
 
-
     def open(self, filename):
         fp = open(filename, 'rb')
 
         self.header = self._read_laz_header(fp)
 
-        self.point_reader = PointReader(self, fp)
-        self.point_reader.chunk_starts = self._read_chunk_table(fp, self.point_reader.dec) # TODO move chunk table reader to this class
+        # create decoder
+        if self.header['laszip']['coder'] == Coder.ARITHMETIC:
+            dec = ArithmeticDecoder(fp)
+        else:
+            raise Exception("Unknown coder")
+
+        self.chunk_starts = self._read_chunk_table(fp, dec)
+
+        self.point_reader = PointReader(self, fp, dec)
 
         self.npoints = self.header['number_of_point_records']
         self.p_count = 0
