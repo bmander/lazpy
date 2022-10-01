@@ -42,26 +42,52 @@ class ItemType(IntEnum):
     BYTE14 = 14
 
 
+TYPE_RAW_READER = {
+    ItemType.POINT10: rd.las_read_item_raw_point10_le,
+    ItemType.GPSTIME11: rd.las_read_item_raw_gpstime11_le,
+    # ItemType.RGB12: las_read_item_raw_rgb12_le,
+    # ItemType.BYTE: las_read_item_raw_byte_le,
+    # ItemType.RGBNIR14: las_read_item_raw_rgbnir14_le,
+    # ItemType.WAVEPACKET13: las_read_item_raw_wavepacket13_le,
+}
+
+
+TYPE_VERSION_COMPRESSED_READER = {
+    (ItemType.POINT10, 1): rd.read_item_compressed_point10_v1,
+    (ItemType.POINT10, 2): rd.read_item_compressed_point10_v2,
+    (ItemType.GPSTIME11, 1): rd.read_item_compressed_gpstime11_v1,
+    (ItemType.GPSTIME11, 2): rd.read_item_compressed_gpstime11_v2,
+    (ItemType.RGB12, 1): rd.read_item_compressed_rgb12_v1,
+    (ItemType.RGB12, 2): rd.read_item_compressed_rgb12_v2,
+    (ItemType.BYTE, 1): rd.read_item_compressed_byte_v1,
+    (ItemType.BYTE, 2): rd.read_item_compressed_byte_v2,
+    (ItemType.POINT14, 3): rd.read_item_compressed_point14_v3,
+    (ItemType.POINT14, 4): rd.read_item_compressed_point14_v4,
+    (ItemType.RGB14, 3): rd.read_item_compressed_rgb12_v3,
+    (ItemType.RGB14, 4): rd.read_item_compressed_rgb12_v4,
+    (ItemType.RGBNIR14, 3): rd.read_item_compressed_rgbnir14_v3,
+    (ItemType.RGBNIR14, 4): rd.read_item_compressed_rgbnir14_v4,
+    (ItemType.BYTE14, 3): rd.read_item_compressed_byte_v3,
+    (ItemType.BYTE14, 4): rd.read_item_compressed_byte_v4,
+    (ItemType.WAVEPACKET13, 1):
+        rd.read_item_compressed_wavepacket13_v1,
+    (ItemType.WAVEPACKET14, 3):
+        rd.read_item_compressed_wavepacket14_v3,
+    (ItemType.WAVEPACKET14, 4):
+        rd.read_item_compressed_wavepacket14_v4
+}
+
+
 class Reader:
     def __init__(self):
         pass
 
     def _init_point_reader_functions(self):
 
-        # create raw_readers
-        type_raw_reader = {
-            ItemType.POINT10: rd.las_read_item_raw_point10_le,
-            ItemType.GPSTIME11: rd.las_read_item_raw_gpstime11_le,
-            # ItemType.RGB12: las_read_item_raw_rgb12_le,
-            # ItemType.BYTE: las_read_item_raw_byte_le,
-            # ItemType.RGBNIR14: las_read_item_raw_rgbnir14_le,
-            # ItemType.WAVEPACKET13: las_read_item_raw_wavepacket13_le,
-        }
-
         self.readers_raw = []
         self.point_size = 0  # TODO eliminate?
         for item in self.laz_header['items']:
-            func = type_raw_reader.get(item['type'])
+            func = TYPE_RAW_READER.get(item['type'])
 
             if func is None:
                 raise Exception("Unknown item type")
@@ -70,36 +96,11 @@ class Reader:
 
             self.point_size += item['size']
 
-        # create compressed readers
-        type_version_compressed_reader = {
-            (ItemType.POINT10, 1): rd.read_item_compressed_point10_v1,
-            (ItemType.POINT10, 2): rd.read_item_compressed_point10_v2,
-            (ItemType.GPSTIME11, 1): rd.read_item_compressed_gpstime11_v1,
-            (ItemType.GPSTIME11, 2): rd.read_item_compressed_gpstime11_v2,
-            (ItemType.RGB12, 1): rd.read_item_compressed_rgb12_v1,
-            (ItemType.RGB12, 2): rd.read_item_compressed_rgb12_v2,
-            (ItemType.BYTE, 1): rd.read_item_compressed_byte_v1,
-            (ItemType.BYTE, 2): rd.read_item_compressed_byte_v2,
-            (ItemType.POINT14, 3): rd.read_item_compressed_point14_v3,
-            (ItemType.POINT14, 4): rd.read_item_compressed_point14_v4,
-            (ItemType.RGB14, 3): rd.read_item_compressed_rgb12_v3,
-            (ItemType.RGB14, 4): rd.read_item_compressed_rgb12_v4,
-            (ItemType.RGBNIR14, 3): rd.read_item_compressed_rgbnir14_v3,
-            (ItemType.RGBNIR14, 4): rd.read_item_compressed_rgbnir14_v4,
-            (ItemType.BYTE14, 3): rd.read_item_compressed_byte_v3,
-            (ItemType.BYTE14, 4): rd.read_item_compressed_byte_v4,
-            (ItemType.WAVEPACKET13, 1):
-                rd.read_item_compressed_wavepacket13_v1,
-            (ItemType.WAVEPACKET14, 3):
-                rd.read_item_compressed_wavepacket14_v3,
-            (ItemType.WAVEPACKET14, 4):
-                rd.read_item_compressed_wavepacket14_v4
-        }
         self.readers_compressed = []
         for i, item in enumerate(self.laz_header['items']):
             key = (item['type'], item['version'])
-            if key in type_version_compressed_reader:
-                compressed_reader_class = type_version_compressed_reader[key]
+            if key in TYPE_VERSION_COMPRESSED_READER:
+                compressed_reader_class = TYPE_VERSION_COMPRESSED_READER[key]
                 compressed_reader = compressed_reader_class(self.dec)
 
                 self.readers_compressed.append(compressed_reader)
