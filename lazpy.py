@@ -120,7 +120,7 @@ class Reader:
 
     @staticmethod
     def _read_las_header(fp):
-        header_format_12 = (
+        HEADER_FORMAT_12 = (
             ('file_signature', 4, cstr),
             ('file_source_id', 2, unsigned_int),
             ('global_encoding', 2, unsigned_int),
@@ -155,7 +155,7 @@ class Reader:
             ('min_z', 8, double),
         )
 
-        header_format_13 = (
+        HEADER_FORMAT_13 = (
             ('start_of_waveform_data_packet_record', 8, unsigned_int),
         )
 
@@ -177,8 +177,8 @@ class Reader:
         header = {}
 
         # Read header
-        read_into_header(fp, header, header_format_12)
-        bytes_read = header_section_size(header_format_12)
+        read_into_header(fp, header, HEADER_FORMAT_12)
+        bytes_read = header_section_size(HEADER_FORMAT_12)
 
         # Ensure the file is a LAS file
         if header['file_signature'] != b'LASF':
@@ -186,8 +186,8 @@ class Reader:
 
         # Read 1.3 header fields
         if header['version_major'] == 1 and header['version_minor'] >= 3:
-            read_into_header(fp, header, header_format_13)
-            bytes_read += header_section_size(header_format_13)
+            read_into_header(fp, header, HEADER_FORMAT_13)
+            bytes_read += header_section_size(HEADER_FORMAT_13)
 
         # Read 1.4 header fields
         if header['version_major'] == 1 and header['version_minor'] >= 4:
