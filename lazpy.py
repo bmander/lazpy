@@ -111,9 +111,6 @@ class Reader:
         for item in self.laz_header['items']:
             self.seek_point.append([0]*item['size'])
 
-        # number of points per chunk
-        self.chunk_size = self.laz_header['chunk_size']  # TODO eliminate?
-
         # indicate the reader is at the end of the chunk in order
         # to force a read of the next chunk
         self.chunk_count = self.chunk_size
@@ -266,6 +263,10 @@ class Reader:
     @property
     def num_points(self):
         return self.header['number_of_point_records']
+
+    @property
+    def chunk_size(self):
+        return self.laz_header['chunk_size']
 
     @staticmethod
     def _read_chunk_table(fp, dec):
