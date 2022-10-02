@@ -1,6 +1,7 @@
 from utils import unsigned_int
 import models
 
+BM_LENGTH_SHIFT = 13
 
 class ArithmeticEncoder:
     def __init__(self):
@@ -31,7 +32,7 @@ class ArithmeticDecoder:
 
     def decode_bit(self, m):
         # m is an ArithmeticBitModel
-        x = m.bit_0_prob * (self.length >> m.BM_LENGTH_SHIFT)
+        x = m.bit_0_prob * (self.length >> BM_LENGTH_SHIFT)
         sym = (self.value >= x)
 
         if sym == 0:

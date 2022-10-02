@@ -124,6 +124,23 @@ ArithmeticBitModel_set_bit_0_count(ArithmeticBitModelObject *self, PyObject *val
     return 0;
 }
 
+static PyObject *
+ArithmeticBitModel_get_bits_until_update(ArithmeticBitModelObject *self, void *closure)
+{
+    return PyLong_FromUnsignedLong(self->bits_until_update);
+}
+
+static PyObject *
+ArithmeticBitModel_set_bits_until_update(ArithmeticBitModelObject *self, PyObject *value, void *closure)
+{
+    if (!PyLong_Check(value)) {
+        PyErr_SetString(PyExc_TypeError, "The bits_until_update attribute value must be an integer");
+        return NULL;
+    }
+    self->bits_until_update = PyLong_AsUnsignedLong(value);
+    return 0;
+}
+
 
 static PyMethodDef ArithmeticBitModel_methods[] = {
     {"init",            (PyCFunction)ArithmeticBitModel_init,  METH_NOARGS,
@@ -142,6 +159,11 @@ PyGetSetDef ArithmeticBitModel_getset[] = {
     {"bit_0_count",
      (getter) ArithmeticBitModel_get_bit_0_count,
      (setter) ArithmeticBitModel_set_bit_0_count,
+     NULL,
+     NULL},
+    {"bits_until_update",
+     (getter) ArithmeticBitModel_get_bits_until_update,
+     (setter) ArithmeticBitModel_set_bits_until_update,
      NULL,
      NULL},
     {NULL}

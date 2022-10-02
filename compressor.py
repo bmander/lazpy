@@ -1,5 +1,6 @@
 import encoder
 import models
+import cmodels
 
 
 class IntegerCompressor:
@@ -51,7 +52,7 @@ class IntegerCompressor:
                 model = self.dec.create_symbol_model(self.corr_bits+1)
                 self.m_bits.append(model)
 
-            self.m_corrector = [models.ArithmeticBitModel()]
+            self.m_corrector = [cmodels.ArithmeticBitModel()]
             for i in range(1, self.corr_bits):
                 if i <= self.bits_high:
                     self.m_corrector.append(
