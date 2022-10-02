@@ -16,6 +16,10 @@
 
 #include "Python.h"
 
+
+#define BM_LENGTH_SHIFT 13
+#define BM_MAX_COUNT (1 << BM_LENGTH_SHIFT)
+
 static PyObject *ErrorObject;
 
 typedef struct {
@@ -53,6 +57,38 @@ ArithmeticBitModel_dealloc(ArithmeticBitModelObject *self)
 }
 
 static PyObject *
+ArithmeticBitModel_init(ArithmeticBitModelObject *self, PyObject *args)
+{
+    // initialize equiprobable model
+    self->bit_0_count = 1;
+    self->bit_count = 2;
+    self->bit_0_prob = 1 << (BM_LENGTH_SHIFT - 1);
+
+    // start with frequent updates
+    self->update_cycle = self->bits_until_update = 4;
+
+    Py_INCREF(Py_None);
+    return Py_None;
+}
+
+static PyObject *
+ArithmeticBitModel_get_bit_0_count(ArithmeticBitModelObject *self, void *closure)
+{
+    return PyLong_FromLong(self->bit_0_count);
+}
+
+static PyObject *
+ArithmeticBitModel_set_bit_0_count(ArithmeticBitModelObject *self, PyObject *value, void *closure)
+{
+    if (!PyLong_Check(value)) {
+        PyErr_SetString(PyExc_TypeError, "The bit_0_count attribute value must be an integer");
+        return NULL;
+    }
+    self->bit_0_count = PyLong_AsLong(value);
+    return 0;
+}
+
+static PyObject *
 ArithmeticBitModel_demo(ArithmeticBitModelObject *self, PyObject *args)
 {
     if (!PyArg_ParseTuple(args, ":demo"))
@@ -64,7 +100,18 @@ ArithmeticBitModel_demo(ArithmeticBitModelObject *self, PyObject *args)
 static PyMethodDef ArithmeticBitModel_methods[] = {
     {"demo",            (PyCFunction)ArithmeticBitModel_demo,  METH_VARARGS,
         PyDoc_STR("demo() -> None")},
+    {"init",            (PyCFunction)ArithmeticBitModel_init,  METH_VARARGS,
+        PyDoc_STR("init() -> None")},
     {NULL,              NULL}           /* sentinel */
+};
+
+PyGetSetDef ArithmeticBitModel_getset[] = {
+    {"bit_0_count",  /* name */
+     (getter) ArithmeticBitModel_get_bit_0_count,  /* getter */
+     (setter) ArithmeticBitModel_set_bit_0_count,  /* setter */
+     NULL,  /* doc */
+     NULL /* closure */},
+    {NULL}
 };
 
 static PyObject *
@@ -135,7 +182,7 @@ static PyTypeObject ArithmeticBitModel_Type = {
     0,                          /*tp_iternext*/
     ArithmeticBitModel_methods,                /*tp_methods*/
     0,                          /*tp_members*/
-    0,                          /*tp_getset*/
+    ArithmeticBitModel_getset,                          /*tp_getset*/
     0,                          /*tp_base*/
     0,                          /*tp_dict*/
     0,                          /*tp_descr_get*/
@@ -143,7 +190,7 @@ static PyTypeObject ArithmeticBitModel_Type = {
     0,                          /*tp_dictoffset*/
     0,                          /*tp_init*/
     0,                          /*tp_alloc*/
-    0,                          /*tp_new*/
+    PyType_GenericNew,                          /*tp_new*/
     0,                          /*tp_free*/
     0,                          /*tp_is_gc*/
 };
@@ -358,6 +405,7 @@ cmodels_exec(PyObject *m)
        Both compilers are strictly standard conforming in this particular
        behavior.
     */
+    ArithmeticBitModel_Type.tp_base = &PyBaseObject_Type;
     Null_Type.tp_base = &PyBaseObject_Type;
     Str_Type.tp_base = &PyUnicode_Type;
 
@@ -365,6 +413,7 @@ cmodels_exec(PyObject *m)
      * object; doing it here is required for portability, too. */
     if (PyType_Ready(&ArithmeticBitModel_Type) < 0)
         goto fail;
+    PyModule_AddObject(m, "ArithmeticBitModel", (PyObject *)&ArithmeticBitModel_Type);
 
     /* Add some symbolic constants to the module */
     if (ErrorObject == NULL) {
