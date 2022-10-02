@@ -159,7 +159,7 @@ class Reader:
             ('start_of_waveform_data_packet_record', 8, unsigned_int),
         )
 
-        header_format_14 = (
+        HEADER_FORMAT_14 = (
             ('start_of_first_extended_variable_length_record', 8,
              unsigned_int),
             ('number_of_extended_variable_length_records', 4, unsigned_int),
@@ -191,8 +191,8 @@ class Reader:
 
         # Read 1.4 header fields
         if header['version_major'] == 1 and header['version_minor'] >= 4:
-            read_into_header(fp, header, header_format_14)
-            bytes_read += header_section_size(header_format_14)
+            read_into_header(fp, header, HEADER_FORMAT_14)
+            bytes_read += header_section_size(HEADER_FORMAT_14)
 
         # Read user data, if any
         user_data_size = header['header_size'] - bytes_read
@@ -272,23 +272,18 @@ class Reader:
             raise Exception("Unknown chunk table version")
 
         number_chunks = unsigned_int(fp.read(4))
-        # chunk_totals = 0
-        tabled_chunks = 1
 
         dec.start()
 
+        # read chunk sizes
         ic = IntegerCompressor(dec, 32, 2)
         ic.init_decompressor()
 
-        # read chunk sizes
         chunk_sizes = []
-        pred = 0
-        for i in range(number_chunks-1):
-            chunk_size = ic.decompress(pred, 1)
+        chunk_size = 0
+        for _ in range(number_chunks-1):
+            chunk_size = ic.decompress(chunk_size, 1)
             chunk_sizes.append(chunk_size)
-
-            pred = chunk_size
-            tabled_chunks += 1
 
         # calculate chunk offsets
         chunk_starts = [chunks_start]
@@ -307,6 +302,7 @@ class Reader:
 
         # read standard las header
         self.header = Reader._read_las_header(self.fp)
+        
         # read laz header
         self.laz_header = Reader._read_laz_header(self.header)
 
