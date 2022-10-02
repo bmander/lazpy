@@ -21,6 +21,9 @@
 #define BM_MAX_COUNT (1 << BM_LENGTH_SHIFT)
 #define MIN(a,b) ((a) < (b) ? (a) : (b))
 
+#define DM_LENGTH_SHIFT 15
+#define DM_MAX_COUNT (1 << DM_LENGTH_SHIFT)
+
 typedef struct {
     PyObject_HEAD
     uint32_t bit_0_prob;
@@ -221,11 +224,21 @@ typedef struct {
     uint32_t num_symbols;
     uint32_t compress;
 
+    uint32_t last_symbol;
+    uint32_t table_shift;
+    uint32_t table_size;
+    uint32_t total_count;
+    uint32_t update_cycle;
+    uint32_t symbols_until_update;
+
     // tables
     uint32_t *distribution;
     uint32_t *symbol_count;
     uint32_t *decoder_table;
 } ArithmeticModelObject;
+
+void
+ArithmeticModel__update(ArithmeticModelObject *self);
 
 static int
 ArithmeticModel__init__(ArithmeticModelObject *self, PyObject *args, PyObject *kwargs)
@@ -240,6 +253,122 @@ ArithmeticModel__init__(ArithmeticModelObject *self, PyObject *args, PyObject *k
     self->decoder_table = NULL;
 
     return 0;
+}
+
+static PyObject *
+ArithmeticModel_init(ArithmeticModelObject *self, PyObject *args, PyObject *kwargs)
+{
+    PyObject * table;
+    if (!PyArg_ParseTuple(args, "O", &table)) {
+        return NULL;
+    }
+
+    if (self->distribution == NULL){
+        if (self->num_symbols < 2 || self->num_symbols > 2048) {
+            PyErr_SetString(PyExc_ValueError, "The number of symbols must be between 2 and 2048");
+            return NULL;
+        }
+
+        self->last_symbol = self->num_symbols-1;
+
+        if(self->compress==0 && self->num_symbols > 16) {
+            uint32_t table_bits = 3;
+            while(self->num_symbols > (1u << (table_bits+2u))){
+                table_bits++;
+            }
+
+            self->table_shift = DM_LENGTH_SHIFT - table_bits;
+
+            self->table_size = 1 << table_bits;
+
+            uint32_t decoder_table_size = (self->table_size+2)*sizeof(uint32_t);
+            self->decoder_table = (uint32_t *)malloc(decoder_table_size);
+            memset(self->decoder_table, 0, decoder_table_size);
+        } else { // small alphabet; no table needed
+            self->table_shift = 0;
+            self->table_size = 0;
+        }
+
+        self->distribution = (uint32_t *)malloc(self->num_symbols*sizeof(uint32_t));
+        self->symbol_count = (uint32_t *)malloc(self->num_symbols*sizeof(uint32_t));
+
+        memset(self->distribution, 0, self->num_symbols*sizeof(uint32_t));
+    }
+
+    self->total_count = 0;
+    self->update_cycle = self->num_symbols;
+    if(table != Py_None){
+        // check that table is a list of ints
+        if (!PyList_Check(table)) {
+            PyErr_SetString(PyExc_TypeError, "table must be a list of ints");
+            return NULL;
+        }
+        // copy table into symbol_count
+        for (uint32_t i = 0; i < self->num_symbols; i++) {
+            PyObject *item = PyList_GetItem(table, i);
+            if (!PyLong_Check(item)) {
+                PyErr_SetString(PyExc_TypeError, "table must be a list of ints");
+                return NULL;
+            }
+            self->symbol_count[i] = PyLong_AsUnsignedLong(item);
+        }
+    } else {
+        memset(self->symbol_count, 1, self->num_symbols*sizeof(uint32_t));
+    }
+
+    ArithmeticModel__update(self);
+    self->symbols_until_update = (self->num_symbols+6) >> 1;
+    self->update_cycle = self->symbols_until_update;
+
+    Py_RETURN_NONE;
+}
+
+void
+ArithmeticModel__update(ArithmeticModelObject *self)
+{
+    // halve counts when threshold is reached
+    self->total_count += self->update_cycle;
+    if(self->total_count > DM_MAX_COUNT) {
+        self->total_count = 0;
+        for(uint32_t i = 0; i < self->num_symbols; i++) {
+            self->symbol_count[i] = (self->symbol_count[i]+1) >> 1;
+            self->total_count += self->symbol_count[i];
+        }
+    }
+
+    // compute distribution
+    uint32_t sum = 0;
+    uint32_t s = 0;
+    uint32_t scale = 0x80000000 / self->total_count;
+
+
+    if(self->compress != 0 || self->table_size == 0){
+        for(uint32_t k = 0; k < self->num_symbols; k++) {
+            self->distribution[k] = (scale*sum) >> (31 - DM_LENGTH_SHIFT);
+            sum += self->symbol_count[k];
+        }
+    } else {
+        for(uint32_t k = 0; k < self->num_symbols; k++) {
+            self->distribution[k] = (scale*sum) >> (31 - DM_LENGTH_SHIFT);
+            sum += self->symbol_count[k];
+            uint32_t w = self->distribution[k] >> self->table_shift;
+            while(s < w){
+                s++;
+                self->decoder_table[s] = k-1;
+            }
+        }
+        self->decoder_table[0] = 0;
+        while( s<=self->table_size){
+            s++;
+            self->decoder_table[s] = self->num_symbols-1;
+        }
+    }
+
+    // set frequency of model updates
+    self->update_cycle = (5 * self->update_cycle) >> 2;
+    uint32_t max_cycle = (self->num_symbols + 6) << 3;
+    self->update_cycle = MIN(self->update_cycle, max_cycle);
+    self->symbols_until_update = self->update_cycle;
 }
 
 static void
@@ -259,6 +388,8 @@ ArithmeticModel_dealloc(ArithmeticModelObject *self)
 }
 
 static PyMethodDef ArithmeticModel_methods[] = {
+    {"init",            (PyCFunction)ArithmeticModel_init,  METH_VARARGS,
+        PyDoc_STR("init() -> None")},
     {NULL,              NULL}           /* sentinel */
 };
 
