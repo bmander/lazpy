@@ -216,6 +216,102 @@ static PyTypeObject ArithmeticBitModel_Type = {
     0,                          /*tp_is_gc*/
 };
 
+typedef struct {
+    PyObject_HEAD
+    uint32_t num_symbols;
+    uint32_t compress;
+
+    // tables
+    uint32_t *distribution;
+    uint32_t *symbol_count;
+    uint32_t *decoder_table;
+} ArithmeticModelObject;
+
+static int
+ArithmeticModel__init__(ArithmeticModelObject *self, PyObject *args, PyObject *kwargs)
+{
+    // get num_symbols and compress from args
+    if (!PyArg_ParseTuple(args, "II", &self->num_symbols, &self->compress)) {
+        return -1;
+    }
+
+    self->distribution = NULL;
+    self->symbol_count = NULL;
+    self->decoder_table = NULL;
+
+    return 0;
+}
+
+static void
+ArithmeticModel_dealloc(ArithmeticModelObject *self)
+{
+    if (self->distribution != NULL) {
+        free(self->distribution);
+    }
+    if (self->symbol_count != NULL) {
+        free(self->symbol_count);
+    }
+    if (self->decoder_table != NULL) {
+        free(self->decoder_table);
+    }
+
+    PyObject_Del(self);
+}
+
+static PyMethodDef ArithmeticModel_methods[] = {
+    {NULL,              NULL}           /* sentinel */
+};
+
+PyGetSetDef ArithmeticModel_getset[] = {
+    {NULL}
+};
+
+static PyTypeObject ArithmeticModel_Type = {
+    /* The ob_type field must be initialized in the module init function
+     * to be portable to Windows without using C++. */
+    PyVarObject_HEAD_INIT(NULL, 0)
+    "cmodelsmodule.ArithmeticModel",             /*tp_name*/
+    sizeof(ArithmeticModelObject),          /*tp_basicsize*/
+    0,                          /*tp_itemsize*/
+    /* methods */
+    (destructor)ArithmeticModel_dealloc,    /*tp_dealloc*/
+    0,                          /*tp_vectorcall_offset*/
+    (getattrfunc)0,             /*tp_getattr*/
+    0,   /*tp_setattr*/
+    0,                          /*tp_as_async*/
+    0,                          /*tp_repr*/
+    0,                          /*tp_as_number*/
+    0,                          /*tp_as_sequence*/
+    0,                          /*tp_as_mapping*/
+    0,                          /*tp_hash*/
+    0,                          /*tp_call*/
+    0,                          /*tp_str*/
+    0, /*tp_getattro*/
+    0,                          /*tp_setattro*/
+    0,                          /*tp_as_buffer*/
+    Py_TPFLAGS_DEFAULT,         /*tp_flags*/
+    0,                          /*tp_doc*/
+    0,                          /*tp_traverse*/
+    0,                          /*tp_clear*/
+    0,                          /*tp_richcompare*/
+    0,                          /*tp_weaklistoffset*/
+    0,                          /*tp_iter*/
+    0,                          /*tp_iternext*/
+    ArithmeticModel_methods,                /*tp_methods*/
+    0,                          /*tp_members*/
+    ArithmeticModel_getset,                          /*tp_getset*/
+    0,                          /*tp_base*/
+    0,                          /*tp_dict*/
+    0,                          /*tp_descr_get*/
+    0,                          /*tp_descr_set*/
+    0,                          /*tp_dictoffset*/
+    (initproc)ArithmeticModel__init__,                          /*tp_init*/
+    0,                          /*tp_alloc*/
+    PyType_GenericNew,                          /*tp_new*/
+    0,                          /*tp_free*/
+    0,                          /*tp_is_gc*/
+};
+
 /* List of functions defined in the module */
 
 static PyMethodDef cmodels_methods[] = {
@@ -242,12 +338,14 @@ cmodels_exec(PyObject *m)
        behavior.
     */
     ArithmeticBitModel_Type.tp_base = &PyBaseObject_Type;
-
-    /* Finalize the type object including setting type of the new type
-     * object; doing it here is required for portability, too. */
     if (PyType_Ready(&ArithmeticBitModel_Type) < 0)
         goto fail;
     PyModule_AddObject(m, "ArithmeticBitModel", (PyObject *)&ArithmeticBitModel_Type);
+
+    ArithmeticModel_Type.tp_base = &PyBaseObject_Type;
+    if (PyType_Ready(&ArithmeticModel_Type) < 0)
+        goto fail;
+    PyModule_AddObject(m, "ArithmeticModel", (PyObject *)&ArithmeticModel_Type);
 
     return 0;
  fail:
