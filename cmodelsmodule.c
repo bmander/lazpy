@@ -21,6 +21,11 @@ static PyObject *ErrorObject;
 typedef struct {
     PyObject_HEAD
     PyObject            *x_attr;        /* Attributes dictionary */
+    uint32_t bit_0_prob;
+    uint32_t bit_0_count;
+    uint32_t bit_count;
+    uint32_t update_cycle;
+    uint32_t bits_until_update;
 } ArithmeticBitModelObject;
 
 static PyTypeObject ArithmeticBitModel_Type;
