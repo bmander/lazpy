@@ -72,9 +72,28 @@ ArithmeticBitModel_init(ArithmeticBitModelObject *self, PyObject *args)
 }
 
 static PyObject *
+ArithmeticBitModel_get_bit_0_prob(ArithmeticBitModelObject *self, PyObject *args)
+{
+    return PyLong_FromUnsignedLong(self->bit_0_prob);
+}
+
+static PyObject *
+ArithmeticBitModel_set_bit_0_prob(ArithmeticBitModelObject *self, PyObject *value, void *closure)
+{
+    if (!PyLong_Check(value)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "The bit_0_prob attribute value must be an integer");
+        return NULL;
+    }
+    self->bit_0_prob = PyLong_AsUnsignedLong(value);
+
+    return 0;
+}
+
+static PyObject *
 ArithmeticBitModel_get_bit_0_count(ArithmeticBitModelObject *self, void *closure)
 {
-    return PyLong_FromLong(self->bit_0_count);
+    return PyLong_FromUnsignedLong(self->bit_0_count);
 }
 
 static PyObject *
@@ -84,7 +103,7 @@ ArithmeticBitModel_set_bit_0_count(ArithmeticBitModelObject *self, PyObject *val
         PyErr_SetString(PyExc_TypeError, "The bit_0_count attribute value must be an integer");
         return NULL;
     }
-    self->bit_0_count = PyLong_AsLong(value);
+    self->bit_0_count = PyLong_AsUnsignedLong(value);
     return 0;
 }
 
@@ -106,11 +125,16 @@ static PyMethodDef ArithmeticBitModel_methods[] = {
 };
 
 PyGetSetDef ArithmeticBitModel_getset[] = {
-    {"bit_0_count",  /* name */
-     (getter) ArithmeticBitModel_get_bit_0_count,  /* getter */
-     (setter) ArithmeticBitModel_set_bit_0_count,  /* setter */
-     NULL,  /* doc */
-     NULL /* closure */},
+    {"bit_0_prob", /* name */
+     (getter)ArithmeticBitModel_get_bit_0_prob, /* getter */
+     (setter)ArithmeticBitModel_set_bit_0_prob, /* setter */
+     NULL, /* doc */
+     NULL}, /* closure */
+    {"bit_0_count",
+     (getter) ArithmeticBitModel_get_bit_0_count,
+     (setter) ArithmeticBitModel_set_bit_0_count,
+     NULL,
+     NULL},
     {NULL}
 };
 
