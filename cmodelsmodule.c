@@ -19,6 +19,7 @@
 
 #define BM_LENGTH_SHIFT 13
 #define BM_MAX_COUNT (1 << BM_LENGTH_SHIFT)
+#define MIN(a,b) ((a) < (b) ? (a) : (b))
 
 static PyObject *ErrorObject;
 
@@ -47,6 +48,28 @@ newArithmeticBitModelObject(PyObject *arg)
     return self;
 }
 
+static void
+updateArithmeticBitModel(ArithmeticBitModelObject *self) {
+    // halve counts when threshold is reached
+    self->bit_count += self->update_cycle;
+    if(self->bit_count >= BM_MAX_COUNT) {
+        self->bit_count = (self->bit_count + 1) >> 1;
+        self->bit_0_count = (self->bit_0_count + 1) >> 1;
+        if(self->bit_0_count == self->bit_count) {
+            self->bit_count += 1;
+        }
+    }
+
+    // compute scaled bit 0 probability
+    uint32_t scale = 0x80000000 / self->bit_count;
+    self->bit_0_prob = (self->bit_0_count * scale) >> (31 - BM_LENGTH_SHIFT);
+
+    // update frequency of model updates
+    self->update_cycle = (5 * self->update_cycle) >> 2;
+    self->update_cycle = MIN(self->update_cycle, 64);
+    self->bits_until_update = self->update_cycle;
+}
+
 /* ArithmeticBitModel methods */
 
 static void
@@ -66,6 +89,15 @@ ArithmeticBitModel_init(ArithmeticBitModelObject *self, PyObject *args)
 
     // start with frequent updates
     self->update_cycle = self->bits_until_update = 4;
+
+    Py_INCREF(Py_None);
+    return Py_None;
+}
+
+static PyObject *
+ArithmeticBitModel_update(ArithmeticBitModelObject *self, PyObject *args)
+{
+    updateArithmeticBitModel(self);
 
     Py_INCREF(Py_None);
     return Py_None;
@@ -119,8 +151,10 @@ ArithmeticBitModel_demo(ArithmeticBitModelObject *self, PyObject *args)
 static PyMethodDef ArithmeticBitModel_methods[] = {
     {"demo",            (PyCFunction)ArithmeticBitModel_demo,  METH_VARARGS,
         PyDoc_STR("demo() -> None")},
-    {"init",            (PyCFunction)ArithmeticBitModel_init,  METH_VARARGS,
+    {"init",            (PyCFunction)ArithmeticBitModel_init,  METH_NOARGS,
         PyDoc_STR("init() -> None")},
+    {"update",          (PyCFunction)ArithmeticBitModel_update,  METH_NOARGS,
+        PyDoc_STR("update() -> None")},
     {NULL,              NULL}           /* sentinel */
 };
 
