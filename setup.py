@@ -1,6 +1,6 @@
 from distutils.core import setup, Extension
 
-cmodels = Extension('cmodels', sources=['cmodels.c'])
+cmodels = Extension('cmodels', sources=['cmodelsmodule.c'])
 
 setup(name="lazpy",
       version="0.1",
