@@ -1,7 +1,9 @@
 from utils import unsigned_int
 import models
+import cmodels
 
 BM_LENGTH_SHIFT = 13
+
 
 class ArithmeticEncoder:
     def __init__(self):
@@ -57,28 +59,28 @@ class ArithmeticDecoder:
         y = self.length
 
         # use table lookup for faster decoding
-        if m.decoder_table is not None:
+        if m.has_decoder_table():
             self.length >>= m.DM_LENGTH_SHIFT
             dv = self.value // self.length
             t = dv >> m.table_shift
 
             # use table to get first symbol
-            sym = m.decoder_table[t]
-            n = m.decoder_table[t+1] + 1
+            sym = m.decoder_table_lookup(t)
+            n = m.decoder_table_lookup(t+1) + 1
 
             # finish with bisection search
             while n > sym+1:
                 k = (sym + n) >> 1
-                if m.distribution[k] > dv:
+                if m.distribution_lookup(k) > dv:
                     n = k
                 else:
                     sym = k
 
             # compute products
-            x = m.distribution[sym] * self.length
+            x = m.distribution_lookup(sym) * self.length
 
             if sym != m.last_symbol:
-                y = m.distribution[sym+1] * self.length
+                y = m.distribution_lookup(sym+1) * self.length
 
         # decode using only multiplications
         else:
@@ -89,7 +91,7 @@ class ArithmeticDecoder:
 
             # decode via bisection search
             while k != sym:
-                z = self.length * m.distribution[k]
+                z = self.length * m.distribution_lookup(k)
                 if z > self.value:
                     n = k
                     y = z  # value is smaller
@@ -106,13 +108,7 @@ class ArithmeticDecoder:
         if self.length < self.AC_MIN_LENGTH:
             self._renorm_dec_interval()
 
-        m.symbol_count[sym] += 1
-
-        m.symbols_until_update -= 1  # TODO get the model to handle this
-        if m.symbols_until_update == 0:  # periodic model update
-            m._update()
-
-        assert sym < m.num_symbols
+        m.increment_symbol_count(sym)
 
         return sym
 
