@@ -629,6 +629,8 @@ cmodels_exec(PyObject *m)
         goto fail;
     PyModule_AddObject(m, "ArithmeticModel", (PyObject *)&ArithmeticModel_Type);
 
+    PyModule_AddIntConstant(m, "DM_LENGTH_SHIFT", DM_LENGTH_SHIFT);
+
     return 0;
  fail:
     Py_XDECREF(m);

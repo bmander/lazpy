@@ -60,7 +60,7 @@ class ArithmeticDecoder:
 
         # use table lookup for faster decoding
         if m.has_decoder_table():
-            self.length >>= m.DM_LENGTH_SHIFT
+            self.length >>= cmodels.DM_LENGTH_SHIFT
             dv = self.value // self.length
             t = dv >> m.table_shift
 
@@ -133,7 +133,7 @@ class ArithmeticDecoder:
         return self.read_bits(32)
 
     def create_symbol_model(self, num_symbols):
-        return models.ArithmeticModel(num_symbols, False)
+        return cmodels.ArithmeticModel(num_symbols, False)
 
     def __repr__(self):
         return f"ArithmeticDecoder(value={self.value}, length={self.length})"
