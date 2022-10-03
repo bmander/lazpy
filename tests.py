@@ -53,7 +53,7 @@ class TestArithmeticModel:
         assert model.compress is False
 
         assert model.decoder_table_lookup(0) == 0
-        assert model.distribution_lookup(32) == 4096
+        assert model.decoder_table_lookup(32) == 127
         assert model.decoder_table_lookup(65) == 255
         with pytest.raises(Exception):
             model.decoder_table_lookup(66)
@@ -71,6 +71,24 @@ class TestArithmeticModel:
             model.distribution_lookup(256)
 
         assert model.has_decoder_table() is True
+
+    def test_table_init(self):
+        model = models.ArithmeticModel(8, False)
+        with pytest.raises(ValueError):
+            model.init([1, 1, 2, 3, 5, 8, 13, 21, 34])
+
+        model.init([1, 1, 2, 3, 5, 8, 13, 21])
+
+        assert model.symbol_count_lookup(0) == 1
+        assert model.symbol_count_lookup(7) == 21
+
+        assert model.has_decoder_table() is False
+
+        assert model.distribution_lookup(0) == 0
+        assert model.distribution_lookup(4) == 28672
+        assert model.distribution_lookup(5) == 49152
+        assert model.distribution_lookup(6) == 81920
+        assert model.distribution_lookup(7) == 135168
 
 
 class TestCArithmeticModel:
@@ -114,3 +132,48 @@ class TestCArithmeticModel:
             model.distribution_lookup(4)
 
         assert model.has_decoder_table() is False
+
+    def test_init_256(self):
+        model = cmodels.ArithmeticModel(256, False)
+        model.init()
+
+        assert model.num_symbols == 256
+        assert model.compress is False
+
+        assert model.decoder_table_lookup(0) == 0
+        assert model.decoder_table_lookup(32) == 127
+        assert model.decoder_table_lookup(65) == 255
+        with pytest.raises(Exception):
+            model.decoder_table_lookup(66)
+
+        assert model.symbol_count_lookup(0) == 1
+        assert model.symbol_count_lookup(32) == 1
+        assert model.symbol_count_lookup(255) == 1
+        with pytest.raises(Exception):
+            model.symbol_count_lookup(256)
+
+        assert model.distribution_lookup(0) == 0
+        assert model.distribution_lookup(32) == 4096
+        assert model.distribution_lookup(255) == 32640
+        with pytest.raises(Exception):
+            model.distribution_lookup(256)
+
+        assert model.has_decoder_table() is True
+
+    def test_table_init(self):
+        model = cmodels.ArithmeticModel(8, False)
+        with pytest.raises(ValueError):
+            model.init([1, 1, 2, 3, 5, 8, 13, 21, 34])
+
+        model.init([1, 1, 2, 3, 5, 8, 13, 21])
+
+        assert model.symbol_count_lookup(0) == 1
+        assert model.symbol_count_lookup(7) == 21
+
+        assert model.has_decoder_table() is False
+
+        assert model.distribution_lookup(0) == 0
+        assert model.distribution_lookup(4) == 28672
+        assert model.distribution_lookup(5) == 49152
+        assert model.distribution_lookup(6) == 81920
+        assert model.distribution_lookup(7) == 135168
