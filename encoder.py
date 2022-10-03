@@ -85,7 +85,7 @@ class ArithmeticDecoder:
         # decode using only multiplications
         else:
             x = sym = 0
-            self.length >>= m.DM_LENGTH_SHIFT
+            self.length >>= cmodels.DM_LENGTH_SHIFT
             n = m.num_symbols
             k = n >> 1
 

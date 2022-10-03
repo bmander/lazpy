@@ -525,6 +525,18 @@ ArithmeticModel_get_compress(ArithmeticModelObject *self, PyObject *args)
     }
 }
 
+static PyObject *
+ArithmeticModel_get_table_shift(ArithmeticModelObject *self, PyObject *args)
+{
+    return PyLong_FromUnsignedLong(self->table_shift);
+}
+
+static PyObject *
+ArithmeticModel_get_last_symbol(ArithmeticModelObject *self, PyObject *args)
+{
+    return PyLong_FromUnsignedLong(self->last_symbol);
+}
+
 
 static PyMethodDef ArithmeticModel_methods[] = {
     {"init",            (PyCFunction)ArithmeticModel_init,  METH_VARARGS,
@@ -545,6 +557,8 @@ static PyMethodDef ArithmeticModel_methods[] = {
 PyGetSetDef ArithmeticModel_getset[] = {
     {"num_symbols", (getter)ArithmeticModel_get_num_symbols, NULL, "number of symbols", NULL},
     {"compress", (getter)ArithmeticModel_get_compress, NULL, "compress", NULL},
+    {"table_shift", (getter)ArithmeticModel_get_table_shift, NULL, "table_shift", NULL},
+    {"last_symbol", (getter)ArithmeticModel_get_last_symbol, NULL, "last_symbol", NULL},
     {NULL}
 };
 
