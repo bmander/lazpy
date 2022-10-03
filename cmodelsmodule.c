@@ -23,6 +23,7 @@
 
 #define DM_LENGTH_SHIFT 15
 #define DM_MAX_COUNT (1 << DM_LENGTH_SHIFT)
+#define RAISE_ERROR(msg) { PyErr_SetString(PyExc_Exception, msg); return NULL; }
 
 typedef struct {
     PyObject_HEAD
@@ -237,7 +238,7 @@ typedef struct {
     uint32_t *decoder_table;
 } ArithmeticModelObject;
 
-void
+int
 ArithmeticModel__update(ArithmeticModelObject *self);
 
 static int
@@ -258,6 +259,7 @@ ArithmeticModel__init__(ArithmeticModelObject *self, PyObject *args, PyObject *k
 static PyObject *
 ArithmeticModel_init(ArithmeticModelObject *self, PyObject *args, PyObject *kwargs)
 {   
+
     PyObject * table = Py_None;
     if (!PyArg_ParseTuple(args, "|O", &table)) {
         return NULL;
@@ -328,14 +330,16 @@ ArithmeticModel_init(ArithmeticModelObject *self, PyObject *args, PyObject *kwar
         }
     }
 
-    ArithmeticModel__update(self);
+    if (ArithmeticModel__update(self) == 1) {
+        return NULL;
+    }
     self->symbols_until_update = (self->num_symbols+6) >> 1;
     self->update_cycle = self->symbols_until_update;
 
     Py_RETURN_NONE;
 }
 
-void
+int
 ArithmeticModel__update(ArithmeticModelObject *self)
 {
     // halve counts when threshold is reached
@@ -349,9 +353,15 @@ ArithmeticModel__update(ArithmeticModelObject *self)
     }
 
     // compute distribution
+
+    // TODO use of 64 bits is a hack to get the C impl to behave like the 
+    // python impl. The weird thing is, the python impl must have been
+    // behaving differently than the original 32 bit implementation, and yet
+    // the end result worked just fine. After all the unit tests pass, change
+    // this back to 32 bits to see if it still works.
     uint32_t sum = 0;
     uint32_t s = 0;
-    uint32_t scale = 0x80000000 / self->total_count;
+    uint32_t scale = 0x80000000u / self->total_count;
 
 
     if(self->compress != 0 || self->table_size == 0){
@@ -376,11 +386,15 @@ ArithmeticModel__update(ArithmeticModelObject *self)
         }
     }
 
+
+
     // set frequency of model updates
     self->update_cycle = (5 * self->update_cycle) >> 2;
     uint32_t max_cycle = (self->num_symbols + 6) << 3;
     self->update_cycle = MIN(self->update_cycle, max_cycle);
     self->symbols_until_update = self->update_cycle;
+
+    return 0;
 }
 
 static void

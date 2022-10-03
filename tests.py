@@ -87,8 +87,8 @@ class TestArithmeticModel:
         assert model.distribution_lookup(0) == 0
         assert model.distribution_lookup(4) == 28672
         assert model.distribution_lookup(5) == 49152
-        assert model.distribution_lookup(6) == 81920
-        assert model.distribution_lookup(7) == 135168
+        assert model.distribution_lookup(6) == 16384
+        assert model.distribution_lookup(7) == 4096
 
 
 class TestCArithmeticModel:
@@ -175,5 +175,5 @@ class TestCArithmeticModel:
         assert model.distribution_lookup(0) == 0
         assert model.distribution_lookup(4) == 28672
         assert model.distribution_lookup(5) == 49152
-        assert model.distribution_lookup(6) == 81920
-        assert model.distribution_lookup(7) == 135168
+        assert model.distribution_lookup(6) == 16384
+        assert model.distribution_lookup(7) == 4096

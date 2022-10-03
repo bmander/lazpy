@@ -105,8 +105,11 @@ class ArithmeticModel:
 
         if self.compress or self.table_size == 0:
             for k in range(self.num_symbols):
-                self._distribution[k] = (scale*sum) >> \
-                                       (31 - self.DM_LENGTH_SHIFT)
+                # duplicate overflow math. interestingly, it doesn't seem to
+                # affect the output, but it's nice to keep this close to the
+                # c version
+                big = (scale*sum) & 0xffffffff
+                self._distribution[k] = big >> (31 - self.DM_LENGTH_SHIFT)
                 sum += self._symbol_count[k]
         else:
             for k in range(self.num_symbols):
@@ -121,6 +124,7 @@ class ArithmeticModel:
             while s <= self.table_size:
                 s += 1
                 self._decoder_table[s] = self.num_symbols - 1
+
 
         # set frequency of model updates
         self.update_cycle = (5 * self.update_cycle) >> 2
