@@ -135,14 +135,23 @@ class ArithmeticModel:
 
     def decoder_table_lookup(self, ix):
         # for compatibility with the C version
+        if self._decoder_table is None:
+            raise Exception("No decoder table")
+
         return self._decoder_table[ix]
 
     def distribution_lookup(self, sym):
         # for compatibility with the C version
+        if self._distribution is None:
+            raise Exception("No distribution")
+
         return self._distribution[sym]
 
     def symbol_count_lookup(self, sym):
         # for compatibility with the C version
+        if self._symbol_count is None:
+            raise Exception("No symbol count")
+            
         return self._symbol_count[sym]
 
     def has_decoder_table(self):
