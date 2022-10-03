@@ -55,6 +55,9 @@ class ArithmeticModel:
         self._symbol_count = None
 
     def init(self, table=None):
+        if table is not None and len(table) != self.num_symbols:
+            raise ValueError("Table size does not match number of symbols")
+
         if self._distribution is None:
             if self.num_symbols < 2 or self.num_symbols > 2048:
                 raise Exception("Invalid number of symbols")
