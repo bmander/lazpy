@@ -257,11 +257,13 @@ ArithmeticModel__init__(ArithmeticModelObject *self, PyObject *args, PyObject *k
 
 static PyObject *
 ArithmeticModel_init(ArithmeticModelObject *self, PyObject *args, PyObject *kwargs)
-{
-    PyObject * table;
-    if (!PyArg_ParseTuple(args, "O", &table)) {
+{   
+    PyObject * table = Py_None;
+    if (!PyArg_ParseTuple(args, "|O", &table)) {
         return NULL;
     }
+
+    
 
     if (self->distribution == NULL){
         if (self->num_symbols < 2 || self->num_symbols > 2048) {
@@ -319,6 +321,7 @@ ArithmeticModel_init(ArithmeticModelObject *self, PyObject *args, PyObject *kwar
     ArithmeticModel__update(self);
     self->symbols_until_update = (self->num_symbols+6) >> 1;
     self->update_cycle = self->symbols_until_update;
+    
 
     Py_RETURN_NONE;
 }
@@ -387,9 +390,96 @@ ArithmeticModel_dealloc(ArithmeticModelObject *self)
     PyObject_Del(self);
 }
 
+static PyObject *
+ArithmeticModel_increment_symbol_count(ArithmeticModelObject *self, PyObject *args)
+{
+    uint32_t symbol;
+    if (!PyArg_ParseTuple(args, "I", &symbol)) {
+        return NULL;
+    }
+
+    self->symbol_count[symbol]++;
+    self->symbols_until_update--;
+
+    if (self->symbols_until_update == 0) {
+        ArithmeticModel__update(self);
+    }
+
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+ArithmeticModel_decoder_table_lookup(ArithmeticModelObject *self, PyObject *args)
+{
+    uint32_t index;
+    if (!PyArg_ParseTuple(args, "I", &index)) {
+        return NULL;
+    }
+
+    if(index >= self->table_size+2) {
+        PyErr_SetString(PyExc_ValueError, "index out of range");
+        return NULL;
+    }
+
+    return PyLong_FromUnsignedLong(self->decoder_table[index]);
+}
+
+static PyObject *
+ArithmeticModel_distribution_lookup(ArithmeticModelObject *self, PyObject *args)
+{
+    uint32_t index;
+    if (!PyArg_ParseTuple(args, "I", &index)) {
+        return NULL;
+    }
+
+    if(index >= self->num_symbols) {
+        PyErr_SetString(PyExc_ValueError, "index out of range");
+        return NULL;
+    }
+
+    return PyLong_FromUnsignedLong(self->distribution[index]);
+}
+
+static PyObject *
+ArithmeticModel_symbol_count_lookup(ArithmeticModelObject *self, PyObject *args)
+{
+    uint32_t index;
+    if (!PyArg_ParseTuple(args, "I", &index)) {
+        return NULL;
+    }
+
+    if(index >= self->num_symbols) {
+        PyErr_SetString(PyExc_ValueError, "index out of range");
+        return NULL;
+    }
+
+    return PyLong_FromUnsignedLong(self->symbol_count[index]);
+}
+
+static PyObject *
+ArithmeticModel_has_decoder_table(ArithmeticModelObject *self, PyObject *args)
+{
+    if(self->table_size == 0) {
+        Py_RETURN_FALSE;
+    } else {
+        Py_RETURN_TRUE;
+    }
+}
+
+
 static PyMethodDef ArithmeticModel_methods[] = {
     {"init",            (PyCFunction)ArithmeticModel_init,  METH_VARARGS,
         PyDoc_STR("init() -> None")},
+    {"increment_symbol_count", (PyCFunction)ArithmeticModel_increment_symbol_count, METH_VARARGS,
+        PyDoc_STR("increment_symbol_count(symbol) -> None")},
+    {"decoder_table_lookup", (PyCFunction)ArithmeticModel_decoder_table_lookup, METH_VARARGS,
+        PyDoc_STR("decoder_table_lookup(index) -> symbol")},
+    {"distribution_lookup", (PyCFunction)ArithmeticModel_distribution_lookup, METH_VARARGS,
+        PyDoc_STR("distribution_lookup(index) -> symbol")},
+    {"symbol_count_lookup", (PyCFunction)ArithmeticModel_symbol_count_lookup, METH_VARARGS,
+        PyDoc_STR("symbol_count_lookup(index) -> symbol")},
+    {"has_decoder_table", (PyCFunction)ArithmeticModel_has_decoder_table, METH_VARARGS,
+        PyDoc_STR("has_decoder_table() -> bool")},
     {NULL,              NULL}           /* sentinel */
 };
 
