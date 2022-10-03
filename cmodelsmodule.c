@@ -315,13 +315,14 @@ ArithmeticModel_init(ArithmeticModelObject *self, PyObject *args, PyObject *kwar
             self->symbol_count[i] = PyLong_AsUnsignedLong(item);
         }
     } else {
-        memset(self->symbol_count, 1, self->num_symbols*sizeof(uint32_t));
+        for(uint32_t i = 0; i < self->num_symbols; i++){
+            self->symbol_count[i] = 1;
+        }
     }
 
     ArithmeticModel__update(self);
     self->symbols_until_update = (self->num_symbols+6) >> 1;
     self->update_cycle = self->symbols_until_update;
-    
 
     Py_RETURN_NONE;
 }
@@ -417,7 +418,6 @@ static PyObject *
 ArithmeticModel_decoder_table_lookup(ArithmeticModelObject *self, PyObject *args)
 {
     if(self->decoder_table == NULL) {
-        // raise Exception
         PyErr_SetString(PyExc_Exception, "Model not initialized");
         return NULL;
     }
