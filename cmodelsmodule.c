@@ -393,6 +393,11 @@ ArithmeticModel_dealloc(ArithmeticModelObject *self)
 static PyObject *
 ArithmeticModel_increment_symbol_count(ArithmeticModelObject *self, PyObject *args)
 {
+    if (self->distribution == NULL) {
+        PyErr_SetString(PyExc_ValueError, "Model not initialized");
+        return NULL;
+    }
+
     uint32_t symbol;
     if (!PyArg_ParseTuple(args, "I", &symbol)) {
         return NULL;
@@ -411,13 +416,19 @@ ArithmeticModel_increment_symbol_count(ArithmeticModelObject *self, PyObject *ar
 static PyObject *
 ArithmeticModel_decoder_table_lookup(ArithmeticModelObject *self, PyObject *args)
 {
+    if(self->decoder_table == NULL) {
+        // raise Exception
+        PyErr_SetString(PyExc_Exception, "Model not initialized");
+        return NULL;
+    }
+
     uint32_t index;
     if (!PyArg_ParseTuple(args, "I", &index)) {
         return NULL;
     }
 
     if(index >= self->table_size+2) {
-        PyErr_SetString(PyExc_ValueError, "index out of range");
+        PyErr_SetString(PyExc_IndexError, "index out of range");
         return NULL;
     }
 
@@ -427,13 +438,18 @@ ArithmeticModel_decoder_table_lookup(ArithmeticModelObject *self, PyObject *args
 static PyObject *
 ArithmeticModel_distribution_lookup(ArithmeticModelObject *self, PyObject *args)
 {
+    if(self->distribution == NULL) {
+        PyErr_SetString(PyExc_Exception, "Model not initialized");
+        return NULL;
+    }
+
     uint32_t index;
     if (!PyArg_ParseTuple(args, "I", &index)) {
         return NULL;
     }
 
     if(index >= self->num_symbols) {
-        PyErr_SetString(PyExc_ValueError, "index out of range");
+        PyErr_SetString(PyExc_IndexError, "index out of range");
         return NULL;
     }
 
@@ -443,13 +459,18 @@ ArithmeticModel_distribution_lookup(ArithmeticModelObject *self, PyObject *args)
 static PyObject *
 ArithmeticModel_symbol_count_lookup(ArithmeticModelObject *self, PyObject *args)
 {
+    if(self->symbol_count == NULL) {
+        PyErr_SetString(PyExc_Exception, "Model not initialized");
+        return NULL;
+    }
+
     uint32_t index;
     if (!PyArg_ParseTuple(args, "I", &index)) {
         return NULL;
     }
 
     if(index >= self->num_symbols) {
-        PyErr_SetString(PyExc_ValueError, "index out of range");
+        PyErr_SetString(PyExc_IndexError, "index out of range");
         return NULL;
     }
 
@@ -463,6 +484,22 @@ ArithmeticModel_has_decoder_table(ArithmeticModelObject *self, PyObject *args)
         Py_RETURN_FALSE;
     } else {
         Py_RETURN_TRUE;
+    }
+}
+
+static PyObject *
+ArithmeticModel_get_num_symbols(ArithmeticModelObject *self, PyObject *args)
+{
+    return PyLong_FromUnsignedLong(self->num_symbols);
+}
+
+static PyObject *
+ArithmeticModel_get_compress(ArithmeticModelObject *self, PyObject *args)
+{
+    if(self->compress == 1) {
+        Py_RETURN_TRUE;
+    } else {
+        Py_RETURN_FALSE;
     }
 }
 
@@ -484,6 +521,8 @@ static PyMethodDef ArithmeticModel_methods[] = {
 };
 
 PyGetSetDef ArithmeticModel_getset[] = {
+    {"num_symbols", (getter)ArithmeticModel_get_num_symbols, NULL, "number of symbols", NULL},
+    {"compress", (getter)ArithmeticModel_get_compress, NULL, "compress", NULL},
     {NULL}
 };
 
