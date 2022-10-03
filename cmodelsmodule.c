@@ -263,7 +263,15 @@ ArithmeticModel_init(ArithmeticModelObject *self, PyObject *args, PyObject *kwar
         return NULL;
     }
 
-    
+    if (table != Py_None && !PyList_Check(table)) {
+        PyErr_SetString(PyExc_TypeError, "The table argument must be a list");
+        return NULL;
+    }
+
+    if (table != Py_None && PyList_Size(table) != self->num_symbols) {
+        PyErr_SetString(PyExc_ValueError, "The table argument must be the same length as num_symbols");
+        return NULL;
+    }
 
     if (self->distribution == NULL){
         if (self->num_symbols < 2 || self->num_symbols > 2048) {
