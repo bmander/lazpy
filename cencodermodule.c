@@ -66,6 +66,18 @@ typedef struct {
     PyObject *fp;
 } ArithmeticDecoderObject;
 
+PyObject *
+getBytesFromPythonFileLikeObject(PyObject *fp, uint32_t length) {
+    PyObject *read = PyObject_GetAttrString(fp, "read");
+    PyObject *readArgs = PyTuple_New(1);
+    PyTuple_SetItem(readArgs, 0, PyLong_FromLong(length));
+    PyObject *read_result = PyObject_CallObject(read, readArgs);
+    Py_DECREF(read);
+    Py_DECREF(readArgs);
+
+    return read_result;
+}
+
 static int
 ArithmeticDecoder_init(ArithmeticDecoderObject *self, PyObject *args, PyObject *kwds)
 {
@@ -83,33 +95,17 @@ ArithmeticDecoder_init(ArithmeticDecoderObject *self, PyObject *args, PyObject *
 static PyObject *
 ArithmeticDecoder_start(ArithmeticDecoderObject *self, PyObject *args)
 {
-    PyObject *fp = self->fp;
-    PyObject *read = PyObject_GetAttrString(fp, "read");
-    PyObject *read_args = PyTuple_New(1);
-    PyTuple_SetItem(read_args, 0, PyLong_FromLong(4));
-    PyObject *read_result = PyObject_CallObject(read, read_args);
-    Py_DECREF(read_args);
-    Py_DECREF(read);
-    if (read_result == NULL) {
-        return NULL;
-    }
-    if (!PyBytes_Check(read_result)) {
-        PyErr_SetString(PyExc_TypeError, "read() did not return bytes");
-        return NULL;
-    }
-    if (PyBytes_Size(read_result) != 4) {
-        PyErr_SetString(PyExc_ValueError, "read() did not return 4 bytes");
-        return NULL;
-    }
-    uint32_t *read_result_bytes = (uint32_t*)PyBytes_AsString(read_result);
+    PyObject *read_result = getBytesFromPythonFileLikeObject(self->fp, 4);
+    void *bytes = PyBytes_AsString(read_result);
 
-    self->value = *read_result_bytes;
-
+    self->value = *((uint32_t *)bytes);
     self->length = AC_MAX_LENGTH;
 
     Py_DECREF(read_result);
+
     Py_RETURN_NONE;
 }
+
 
 static PyObject *
 ArithmeticDecoder_length(ArithmeticDecoderObject *self, PyObject *args)
