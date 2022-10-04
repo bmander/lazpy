@@ -1,5 +1,8 @@
 #include "Python.h"
 
+#define AC_MAX_LENGTH 0xFFFFFFFF
+#define AC_MIN_LENGTH 0x01000000
+
 typedef struct {
     PyObject_HEAD
     /* Type-specific fields go here. */
@@ -77,6 +80,60 @@ ArithmeticDecoder_init(ArithmeticDecoderObject *self, PyObject *args, PyObject *
     return 0;
 }
 
+static PyObject *
+ArithmeticDecoder_start(ArithmeticDecoderObject *self, PyObject *args)
+{
+    PyObject *fp = self->fp;
+    PyObject *read = PyObject_GetAttrString(fp, "read");
+    PyObject *read_args = PyTuple_New(1);
+    PyTuple_SetItem(read_args, 0, PyLong_FromLong(4));
+    PyObject *read_result = PyObject_CallObject(read, read_args);
+    Py_DECREF(read_args);
+    Py_DECREF(read);
+    if (read_result == NULL) {
+        return NULL;
+    }
+    if (!PyBytes_Check(read_result)) {
+        PyErr_SetString(PyExc_TypeError, "read() did not return bytes");
+        return NULL;
+    }
+    if (PyBytes_Size(read_result) != 4) {
+        PyErr_SetString(PyExc_ValueError, "read() did not return 4 bytes");
+        return NULL;
+    }
+    uint32_t *read_result_bytes = (uint32_t*)PyBytes_AsString(read_result);
+
+    self->value = *read_result_bytes;
+
+    self->length = AC_MAX_LENGTH;
+
+    Py_DECREF(read_result);
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+ArithmeticDecoder_length(ArithmeticDecoderObject *self, PyObject *args)
+{
+    return PyLong_FromLong(self->length);
+}
+
+static PyObject *
+ArithmeticDecoder_value(ArithmeticDecoderObject *self, PyObject *args)
+{
+    return PyLong_FromLong(self->value);
+}
+
+static PyMethodDef ArithmeticDecoder_methods[] = {
+    {"start", (PyCFunction)ArithmeticDecoder_start, METH_VARARGS, "Start decoding"},
+    {NULL, NULL}  /* Sentinel */
+};
+
+PyGetSetDef ArithmeticDecoder_getset[] = {
+    {"length", (getter)ArithmeticDecoder_length, NULL, "length", NULL},
+    {"value", (getter)ArithmeticDecoder_value, NULL, "value", NULL},
+    {NULL}  /* Sentinel */
+};
+
 static PyTypeObject ArithmeticDecoder_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
     "cencodermodule.ArithmeticDecoder", /*tp_name*/
@@ -106,9 +163,9 @@ static PyTypeObject ArithmeticDecoder_Type = {
     0,                          /*tp_weaklistoffset*/
     0,                          /*tp_iter*/
     0,                          /*tp_iternext*/
-    0,                /*tp_methods*/
+    ArithmeticDecoder_methods,                /*tp_methods*/
     0,                          /*tp_members*/
-    0,                          /*tp_getset*/
+    ArithmeticDecoder_getset,                          /*tp_getset*/
     0,                          /*tp_base*/
     0,                          /*tp_dict*/
     0,                          /*tp_descr_get*/

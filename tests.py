@@ -3,6 +3,7 @@ import cmodels
 import cencoder
 import pytest
 import io
+import struct
 
 
 class TestArithmeticModel:
@@ -191,3 +192,16 @@ class TestCArithmeticDeoder:
     def test_create(self):
         fp = io.BytesIO()
         decoder = cencoder.ArithmeticDecoder(fp)
+        assert decoder.length == 0
+        assert decoder.value == 0
+
+    def test_start(self):
+        intval = 323232
+
+        fp = io.BytesIO()
+        fp.write(struct.pack('I', intval))
+        fp.seek(0)
+        decoder = cencoder.ArithmeticDecoder(fp)
+        decoder.start()
+        assert decoder.length == 4294967295
+        assert decoder.value == intval
