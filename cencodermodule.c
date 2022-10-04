@@ -15,13 +15,19 @@ ArithmeticEncoder_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
     return NULL;
 }
 
+static void
+ArithmeticEncoder_dealloc(ArithmeticEncoderObject *self)
+{
+    PyObject_Del(self);
+}
+
 static PyTypeObject ArithmeticEncoder_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
     "cencodermodule.ArithmeticEncoder", /*tp_name*/
     sizeof(ArithmeticEncoderObject), /*tp_basicsize*/
     0,                          /*tp_itemsize*/
     /* methods */
-    (destructor)0,    /*tp_dealloc*/
+    (destructor)ArithmeticEncoder_dealloc,    /*tp_dealloc*/
     0,                          /*tp_vectorcall_offset*/
     (getattrfunc)0,             /*tp_getattr*/
     0,   /*tp_setattr*/
@@ -92,6 +98,13 @@ ArithmeticDecoder_init(ArithmeticDecoderObject *self, PyObject *args, PyObject *
     return 0;
 }
 
+static void
+ArithmeticDecoder_dealloc(ArithmeticDecoderObject *self)
+{
+    Py_XDECREF(self->fp);
+    PyObject_Del(self);
+}
+
 static PyObject *
 ArithmeticDecoder_start(ArithmeticDecoderObject *self, PyObject *args)
 {
@@ -136,7 +149,7 @@ static PyTypeObject ArithmeticDecoder_Type = {
     sizeof(ArithmeticDecoderObject), /*tp_basicsize*/
     0,                          /*tp_itemsize*/
     /* methods */
-    (destructor)0,    /*tp_dealloc*/
+    (destructor)ArithmeticDecoder_dealloc,    /*tp_dealloc*/
     0,                          /*tp_vectorcall_offset*/
     (getattrfunc)0,             /*tp_getattr*/
     0,   /*tp_setattr*/
