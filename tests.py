@@ -1,5 +1,7 @@
+from re import A
 import models
 import cmodels
+import cencoder
 import pytest
 
 
@@ -177,3 +179,8 @@ class TestCArithmeticModel:
         assert model.distribution_lookup(5) == 49152
         assert model.distribution_lookup(6) == 16384
         assert model.distribution_lookup(7) == 4096
+
+
+def test_encoder_not_implemented():
+    with pytest.raises(NotImplementedError):
+        cencoder.ArithmeticEncoder()
