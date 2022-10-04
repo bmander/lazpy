@@ -56,6 +56,71 @@ static PyTypeObject ArithmeticEncoder_Type = {
     0,                          /*tp_is_gc*/
 };
 
+typedef struct {
+    PyObject_HEAD
+    uint32_t length;
+    uint32_t value;
+    PyObject *fp;
+} ArithmeticDecoderObject;
+
+static int
+ArithmeticDecoder_init(ArithmeticDecoderObject *self, PyObject *args, PyObject *kwds)
+{
+    PyObject *fp;
+    if (!PyArg_ParseTuple(args, "O", &fp)) {
+        return -1;
+    }
+    Py_INCREF(fp);
+    self->fp = fp;
+    self->length = 0;
+    self->value = 0;
+    return 0;
+}
+
+static PyTypeObject ArithmeticDecoder_Type = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    "cencodermodule.ArithmeticDecoder", /*tp_name*/
+    sizeof(ArithmeticDecoderObject), /*tp_basicsize*/
+    0,                          /*tp_itemsize*/
+    /* methods */
+    (destructor)0,    /*tp_dealloc*/
+    0,                          /*tp_vectorcall_offset*/
+    (getattrfunc)0,             /*tp_getattr*/
+    0,   /*tp_setattr*/
+    0,                          /*tp_as_async*/
+    0,                          /*tp_repr*/
+    0,                          /*tp_as_number*/
+    0,                          /*tp_as_sequence*/
+    0,                          /*tp_as_mapping*/
+    0,                          /*tp_hash*/
+    0,                          /*tp_call*/
+    0,                          /*tp_str*/
+    0, /*tp_getattro*/
+    0,                          /*tp_setattro*/
+    0,                          /*tp_as_buffer*/
+    Py_TPFLAGS_DEFAULT,         /*tp_flags*/
+    0,                          /*tp_doc*/
+    0,                          /*tp_traverse*/
+    0,                          /*tp_clear*/
+    0,                          /*tp_richcompare*/
+    0,                          /*tp_weaklistoffset*/
+    0,                          /*tp_iter*/
+    0,                          /*tp_iternext*/
+    0,                /*tp_methods*/
+    0,                          /*tp_members*/
+    0,                          /*tp_getset*/
+    0,                          /*tp_base*/
+    0,                          /*tp_dict*/
+    0,                          /*tp_descr_get*/
+    0,                          /*tp_descr_set*/
+    0,                          /*tp_dictoffset*/
+    (initproc)ArithmeticDecoder_init,                          /*tp_init*/
+    0,                          /*tp_alloc*/
+    PyType_GenericNew,                          /*tp_new*/
+    0,                          /*tp_free*/
+    0,                          /*tp_is_gc*/
+};
+
 
 static PyMethodDef cencoder_methods[] = {
     {NULL,              NULL}           /* sentinel */
@@ -84,6 +149,11 @@ cencoder_exec(PyObject *m)
     if (PyType_Ready(&ArithmeticEncoder_Type) < 0)
         goto fail;
     PyModule_AddObject(m, "ArithmeticEncoder", (PyObject *)&ArithmeticEncoder_Type);
+
+    ArithmeticDecoder_Type.tp_base = &PyBaseObject_Type;
+    if (PyType_Ready(&ArithmeticDecoder_Type) < 0)
+        goto fail;
+    PyModule_AddObject(m, "ArithmeticDecoder", (PyObject *)&ArithmeticDecoder_Type);
 
     return 0;
  fail:

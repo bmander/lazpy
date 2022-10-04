@@ -1,8 +1,8 @@
-from re import A
 import models
 import cmodels
 import cencoder
 import pytest
+import io
 
 
 class TestArithmeticModel:
@@ -184,3 +184,10 @@ class TestCArithmeticModel:
 def test_encoder_not_implemented():
     with pytest.raises(NotImplementedError):
         cencoder.ArithmeticEncoder()
+
+
+class TestCArithmeticDeoder:
+
+    def test_create(self):
+        fp = io.BytesIO()
+        decoder = cencoder.ArithmeticDecoder(fp)
