@@ -1,4 +1,5 @@
 #include "Python.h"
+#include "cmodelsmodule.h"
 
 #define AC_MAX_LENGTH 0xFFFFFFFF
 #define AC_MIN_LENGTH 0x01000000
@@ -119,6 +120,53 @@ ArithmeticDecoder_start(ArithmeticDecoderObject *self, PyObject *args)
     Py_RETURN_NONE;
 }
 
+void
+ArithmeticDecoder__renorm_dec_interval(ArithmeticDecoderObject *self) {
+    if (self->length < AC_MIN_LENGTH) {
+        PyObject *read_result = getBytesFromPythonFileLikeObject(self->fp, 1);
+        void *bytes = PyBytes_AsString(read_result);
+
+        self->value = (self->value << 8) | *((uint8_t *)bytes);
+        self->length <<= 8;
+
+        Py_DECREF(read_result);
+    }
+}
+
+static PyObject *
+ArithmeticDecoder_decode_bit(ArithmeticDecoderObject *self, PyObject *args)
+{
+    // get ArithmeticBitModel from args
+    PyObject *argm;
+    if (!PyArg_ParseTuple(args, "O!", &ArithmeticBitModel_Type, &argm)) {
+        return NULL;
+    }
+    ArithmeticBitModelObject *m = (ArithmeticBitModelObject *)argm;
+
+    uint32_t x = m->bit_0_prob * (self->length >> BM_LENGTH_SHIFT);
+    uint32_t sym = (self->value >= x);
+
+    if (sym==0){
+        self->length = x;
+        m->bit_0_count++;
+    } else {
+        self->value -= x;
+        self->length -= x;
+    }
+
+    if(self->length < AC_MIN_LENGTH){
+        ArithmeticDecoder__renorm_dec_interval(self);
+    }
+
+    m->bits_until_update--;
+    if (m->bits_until_update == 0) { 
+        updateArithmeticBitModel(m);
+    }
+
+    return PyLong_FromUnsignedLong(sym);
+    
+}
+
 
 static PyObject *
 ArithmeticDecoder_length(ArithmeticDecoderObject *self, PyObject *args)
@@ -134,6 +182,7 @@ ArithmeticDecoder_value(ArithmeticDecoderObject *self, PyObject *args)
 
 static PyMethodDef ArithmeticDecoder_methods[] = {
     {"start", (PyCFunction)ArithmeticDecoder_start, METH_VARARGS, "Start decoding"},
+    {"decode_bit", (PyCFunction)ArithmeticDecoder_decode_bit, METH_VARARGS, "Decode a bit"},
     {NULL, NULL}  /* Sentinel */
 };
 

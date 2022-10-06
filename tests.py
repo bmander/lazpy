@@ -1,6 +1,7 @@
 import models
 import cmodels
 import cencoder
+import encoder
 import pytest
 import io
 import struct
@@ -185,6 +186,13 @@ class TestCArithmeticModel:
 def test_encoder_not_implemented():
     with pytest.raises(NotImplementedError):
         cencoder.ArithmeticEncoder()
+
+
+class TestArithmeticDecoder:
+    def test_create(self):
+        decoder = encoder.ArithmeticDecoder()
+        assert decoder.length == 0
+        assert decoder.value == 0
 
 
 class TestCArithmeticDeoder:

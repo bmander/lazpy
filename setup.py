@@ -1,7 +1,8 @@
 from distutils.core import setup, Extension
 
 cmodels = Extension('cmodels', sources=['cmodelsmodule.c'])
-cencoder = Extension('cencoder', sources=['cencodermodule.c'])
+cencoder = Extension('cencoder', sources=['cencodermodule.c',
+                                          'cmodelsmodule.c'])
 
 setup(name="lazpy",
       version="0.1",
