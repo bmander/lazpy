@@ -71,6 +71,15 @@ ArithmeticBitModel_init(ArithmeticBitModelObject *self, PyObject *args)
     return Py_None;
 }
 
+static int
+ArithmeticBitModel__init__(ArithmeticBitModelObject *self, PyObject *args, PyObject *kwargs)
+{   
+    ArithmeticBitModel_init(self, args);
+
+    return 0;
+}
+
+
 static PyObject *
 ArithmeticBitModel_update(ArithmeticBitModelObject *self, PyObject *args)
 {
@@ -201,7 +210,7 @@ static PyTypeObject ArithmeticBitModel_Type = {
     0,                          /*tp_descr_get*/
     0,                          /*tp_descr_set*/
     0,                          /*tp_dictoffset*/
-    0,                          /*tp_init*/
+    (initproc)ArithmeticBitModel__init__,                          /*tp_init*/
     0,                          /*tp_alloc*/
     PyType_GenericNew,                          /*tp_new*/
     0,                          /*tp_free*/

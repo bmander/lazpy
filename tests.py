@@ -180,6 +180,26 @@ class TestCArithmeticModel:
         assert model.distribution_lookup(6) == 16384
         assert model.distribution_lookup(7) == 4096
 
+class TestArithmeticBitModel:
+    def test_create(self):
+        model = models.ArithmeticBitModel()
+        assert model is not None
+
+        assert model.bit_0_count == 1
+        assert model.bit_count == 2
+        assert model.bit_0_prob == 4096
+        assert model.update_cycle == 4
+        assert model.bits_until_update == 4
+
+class TestCArithmeticBitModel:
+    def test_create(self):
+        model = cpylaz.ArithmeticBitModel()
+        assert model is not None
+
+        assert model.bit_0_count == 1
+        assert model.bit_0_prob == 4096
+        assert model.bits_until_update == 4
+
 
 def test_encoder_not_implemented():
     with pytest.raises(NotImplementedError):
@@ -212,6 +232,20 @@ class TestArithmeticDecoder:
         assert decoder.length == 4294967295
         assert decoder.value == 2908556787
 
+    def test_decode_bit(self):
+        fp = io.BytesIO(file_contents)
+        decoder = encoder.ArithmeticDecoder(fp)
+        m = models.ArithmeticBitModel()
+        decoder.start()
+
+        bits = [1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1,
+        0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1, 0,
+        0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0]
+
+        testbits = [int(decoder.decode_bit(m)) for i in range(64)]
+
+        assert bits == testbits
+
 
 class TestCArithmeticDeoder:
 
@@ -227,3 +261,17 @@ class TestCArithmeticDeoder:
         decoder.start()
         assert decoder.length == 4294967295
         assert decoder.value == 2908556787
+
+    def test_decode_bit(self):
+        fp = io.BytesIO(file_contents)
+        decoder = cpylaz.ArithmeticDecoder(fp)
+        m = cpylaz.ArithmeticBitModel()
+        decoder.start()
+
+        bits = [1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1,
+        0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1, 0,
+        0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0]
+
+        testbits = [int(decoder.decode_bit(m)) for i in range(64)]
+
+        assert bits == testbits
