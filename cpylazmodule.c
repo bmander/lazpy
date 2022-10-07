@@ -166,7 +166,7 @@ static PyTypeObject ArithmeticBitModel_Type = {
     /* The ob_type field must be initialized in the module init function
      * to be portable to Windows without using C++. */
     PyVarObject_HEAD_INIT(NULL, 0)
-    "cpylazmodule.ArithmeticBitModel",             /*tp_name*/
+    "cpylaz.ArithmeticBitModel",             /*tp_name*/
     sizeof(ArithmeticBitModelObject),          /*tp_basicsize*/
     0,                          /*tp_itemsize*/
     /* methods */
@@ -554,7 +554,7 @@ static PyTypeObject ArithmeticModel_Type = {
     /* The ob_type field must be initialized in the module init function
      * to be portable to Windows without using C++. */
     PyVarObject_HEAD_INIT(NULL, 0)
-    "cpylazmodule.ArithmeticModel",             /*tp_name*/
+    "cpylaz.ArithmeticModel",             /*tp_name*/
     sizeof(ArithmeticModelObject),          /*tp_basicsize*/
     0,                          /*tp_itemsize*/
     /* methods */
@@ -617,7 +617,7 @@ ArithmeticEncoder_dealloc(ArithmeticEncoderObject *self)
 
 static PyTypeObject ArithmeticEncoder_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
-    "cpylazmodule.ArithmeticEncoder", /*tp_name*/
+    "cpylaz.ArithmeticEncoder", /*tp_name*/
     sizeof(ArithmeticEncoderObject), /*tp_basicsize*/
     0,                          /*tp_itemsize*/
     /* methods */
@@ -789,7 +789,7 @@ PyGetSetDef ArithmeticDecoder_getset[] = {
 
 static PyTypeObject ArithmeticDecoder_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
-    "cencodermodule.ArithmeticDecoder", /*tp_name*/
+    "cpylaz.ArithmeticDecoder", /*tp_name*/
     sizeof(ArithmeticDecoderObject), /*tp_basicsize*/
     0,                          /*tp_itemsize*/
     /* methods */
