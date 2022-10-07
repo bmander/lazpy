@@ -1,6 +1,5 @@
 import models
-import cmodels
-import cencoder
+import cpylaz
 import encoder
 import pytest
 import io
@@ -98,7 +97,7 @@ class TestArithmeticModel:
 class TestCArithmeticModel:
 
     def test_create(self):
-        model = cmodels.ArithmeticModel(256, False)
+        model = cpylaz.ArithmeticModel(256, False)
         assert model.num_symbols == 256
         assert model.compress is False
 
@@ -114,7 +113,7 @@ class TestCArithmeticModel:
         assert model.has_decoder_table() is False
 
     def test_init_4(self):
-        model = cmodels.ArithmeticModel(4, False)
+        model = cpylaz.ArithmeticModel(4, False)
         model.init()
 
         assert model.num_symbols == 4
@@ -138,7 +137,7 @@ class TestCArithmeticModel:
         assert model.has_decoder_table() is False
 
     def test_init_256(self):
-        model = cmodels.ArithmeticModel(256, False)
+        model = cpylaz.ArithmeticModel(256, False)
         model.init()
 
         assert model.num_symbols == 256
@@ -165,7 +164,7 @@ class TestCArithmeticModel:
         assert model.has_decoder_table() is True
 
     def test_table_init(self):
-        model = cmodels.ArithmeticModel(8, False)
+        model = cpylaz.ArithmeticModel(8, False)
         with pytest.raises(ValueError):
             model.init([1, 1, 2, 3, 5, 8, 13, 21, 34])
 
@@ -185,21 +184,19 @@ class TestCArithmeticModel:
 
 def test_encoder_not_implemented():
     with pytest.raises(NotImplementedError):
-        cencoder.ArithmeticEncoder()
+        cpylaz.ArithmeticEncoder()
 
 
 class TestArithmeticDecoder:
     def test_create(self):
-        decoder = encoder.ArithmeticDecoder()
-        assert decoder.length == 0
-        assert decoder.value == 0
-
+        decoder = encoder.ArithmeticDecoder(None)
+        assert decoder is not None
 
 class TestCArithmeticDeoder:
 
     def test_create(self):
         fp = io.BytesIO()
-        decoder = cencoder.ArithmeticDecoder(fp)
+        decoder = cpylaz.ArithmeticDecoder(fp)
         assert decoder.length == 0
         assert decoder.value == 0
 
@@ -209,7 +206,7 @@ class TestCArithmeticDeoder:
         fp = io.BytesIO()
         fp.write(struct.pack('I', intval))
         fp.seek(0)
-        decoder = cencoder.ArithmeticDecoder(fp)
+        decoder = cpylaz.ArithmeticDecoder(fp)
         decoder.start()
         assert decoder.length == 4294967295
         assert decoder.value == intval

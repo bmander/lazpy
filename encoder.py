@@ -1,6 +1,6 @@
 from utils import unsigned_int
 import models
-import cmodels
+import cpylaz
 
 BM_LENGTH_SHIFT = 13
 
@@ -60,7 +60,7 @@ class ArithmeticDecoder:
 
         # use table lookup for faster decoding
         if m.has_decoder_table():
-            self.length >>= cmodels.DM_LENGTH_SHIFT
+            self.length >>= cpylaz.DM_LENGTH_SHIFT
             dv = self.value // self.length
             t = dv >> m.table_shift
 
@@ -85,7 +85,7 @@ class ArithmeticDecoder:
         # decode using only multiplications
         else:
             x = sym = 0
-            self.length >>= cmodels.DM_LENGTH_SHIFT
+            self.length >>= cpylaz.DM_LENGTH_SHIFT
             n = m.num_symbols
             k = n >> 1
 
@@ -133,7 +133,7 @@ class ArithmeticDecoder:
         return self.read_bits(32)
 
     def create_symbol_model(self, num_symbols):
-        return cmodels.ArithmeticModel(num_symbols, False)
+        return cpylaz.ArithmeticModel(num_symbols, False)
 
     def __repr__(self):
         return f"ArithmeticDecoder(value={self.value}, length={self.length})"

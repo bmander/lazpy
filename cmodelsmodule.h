@@ -1,28 +1,3 @@
-#ifndef Py_CMODELSMODULE_H
-#define Py_CMODELSMODULE_H
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-/* C API functions */
-#define PyCModels_ArithmeicBitModelObject_Check_NUM 0
-#define PyCModels_ArithmeicBitModelObject_Check_RETURN void
-#define PyCModels_ArithmeicBitModelObject_Check_PROTO (ArithmeticBitModelObject *)
-
-/* Total number of C API pointers */
-#define PyCModels_API_pointers 1
-
-#ifdef CMODELS_MODULE
-/* This section is used when compiling cmodelsmodule.c */
-
-static PyCModels_ArithmeicBitModelObject_Check_RETURN updateArithmeticBitModel PyCModels_ArithmeicBitModelObject_Check_PROTO;
-
-#else
-/* This section is used in modules that use cmodelsmodule's API */
-
-static void **PyCModels_API;
-
-#endif
 
 #define BM_LENGTH_SHIFT 13
 #define BM_MAX_COUNT (1 << BM_LENGTH_SHIFT)
@@ -44,10 +19,3 @@ typedef struct {
 static PyTypeObject ArithmeticBitModel_Type;
 
 #define ArithmeticBitModelObject_Check(v)      (Py_TYPE(v) == &ArithmeticBitModel_Type)
-
-
-#ifdef __cplusplus
-}
-#endif
-
-#endif /* !Py_CMODELSMODULE_H */
