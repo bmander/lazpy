@@ -246,6 +246,21 @@ class TestArithmeticDecoder:
 
         assert bits == testbits
 
+    def test_decode_symbol(self):
+        fp = io.BytesIO(file_contents)
+        decoder = encoder.ArithmeticDecoder(fp)
+        m = models.ArithmeticModel(8, compress=False)
+        m.init()
+        decoder.start()
+
+        symbols = [5, 3, 2, 5, 6, 6, 7, 2, 6, 5, 1, 6, 5, 3, 5, 3, 4, 7, 7, 3, 
+        6, 6, 5, 1, 6, 7, 3, 5, 6, 7, 7, 4, 6, 6, 5, 6, 7, 6, 1, 5, 7, 6, 5, 
+        5, 6, 7, 7, 6, 5, 5, 7, 7, 0, 5, 7, 6, 6, 6, 6, 2, 5, 5, 5, 7]
+
+        test_symbols = [decoder.decode_symbol(m) for i in range(64)]
+
+        assert symbols == test_symbols
+
 
 class TestCArithmeticDeoder:
 
@@ -275,3 +290,19 @@ class TestCArithmeticDeoder:
         testbits = [int(decoder.decode_bit(m)) for i in range(64)]
 
         assert bits == testbits
+
+
+    def test_decode_symbol(self):
+        fp = io.BytesIO(file_contents)
+        decoder = cpylaz.ArithmeticDecoder(fp)
+        m = cpylaz.ArithmeticModel(8, False)
+        m.init()
+        decoder.start()
+
+        symbols = [5, 3, 2, 5, 6, 6, 7, 2, 6, 5, 1, 6, 5, 3, 5, 3, 4, 7, 7, 3, 
+        6, 6, 5, 1, 6, 7, 3, 5, 6, 7, 7, 4, 6, 6, 5, 6, 7, 6, 1, 5, 7, 6, 5, 
+        5, 6, 7, 7, 6, 5, 5, 7, 7, 0, 5, 7, 6, 6, 6, 6, 2, 5, 5, 5, 7]
+
+        test_symbols = [decoder.decode_symbol(m) for i in range(64)]
+
+        assert symbols == test_symbols
