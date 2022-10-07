@@ -410,6 +410,17 @@ ArithmeticModel_dealloc(ArithmeticModelObject *self)
     PyObject_Del(self);
 }
 
+void
+ArithmeticModel__increment_symbol_count(ArithmeticModelObject *self, uint32_t symbol)
+{
+    self->symbol_count[symbol]++;
+    self->symbols_until_update--;
+
+    if (self->symbols_until_update == 0) {
+        ArithmeticModel__update(self);
+    }
+}
+
 static PyObject *
 ArithmeticModel_increment_symbol_count(ArithmeticModelObject *self, PyObject *args)
 {
@@ -423,12 +434,7 @@ ArithmeticModel_increment_symbol_count(ArithmeticModelObject *self, PyObject *ar
         return NULL;
     }
 
-    self->symbol_count[symbol]++;
-    self->symbols_until_update--;
-
-    if (self->symbols_until_update == 0) {
-        ArithmeticModel__update(self);
-    }
+    ArithmeticModel__increment_symbol_count(self, symbol);
 
     Py_RETURN_NONE;
 }
@@ -771,6 +777,85 @@ ArithmeticDecoder_decode_bit(ArithmeticDecoderObject *self, PyObject *args)
     
 }
 
+static PyObject *
+ArithmeticDecoder_decode_symbol(ArithmeticDecoderObject *self, PyObject *args) {
+    // get ArithmeticModel from args
+    PyObject *argm;
+    if (!PyArg_ParseTuple(args, "O!", &ArithmeticModel_Type, &argm)) {
+        return NULL;
+    }
+    ArithmeticModelObject *m = (ArithmeticModelObject *)argm;
+
+    uint32_t y = self->length;
+    uint32_t x;
+    uint32_t sym;
+    uint32_t n;
+    uint32_t k;
+
+    // use table lookup for faster decoding
+    if(m->table_size > 0){
+
+        self->length >>= DM_LENGTH_SHIFT;
+        uint32_t dv = self->value / self->length;
+        uint32_t t = dv >> m->table_shift;
+
+        // use table to get first symbol
+        sym = m->decoder_table[t];
+        n = m->decoder_table[t+1] + 1;
+
+        // finish with bisection search
+        while(n > sym+1) {
+            uint32_t k = (sym + n) >> 1;
+            if(m->distribution[k] > dv) {
+                n = k;
+            } else {
+                sym = k;
+            }
+        }
+
+        // compute products
+        x = m->distribution[sym] * self->length;
+
+        if(sym != m->last_symbol) {
+            y = m->distribution[sym+1] * self->length;
+        }
+    } else {
+        // decode using only multiplications
+        x = sym = 0;
+        self->length >>= DM_LENGTH_SHIFT;
+        n = m->num_symbols;
+        k = n >> 1;
+
+        // decode via bisection search
+        while(k != sym){
+            uint32_t z = self->length * m->distribution[k];
+            if(z > self->value){
+                n = k;
+                y = z;  // value is smaller
+            } else {
+                sym = k;
+                x = z;  // value is larger or equal
+            }
+
+            k = (sym + n) >> 1;
+        }
+    }
+
+
+    // update interval
+    self->value -= x;
+    self->length = y - x;
+
+    if(self->length < AC_MIN_LENGTH){
+        ArithmeticDecoder__renorm_dec_interval(self);
+    }
+
+    ArithmeticModel__increment_symbol_count(m, sym);
+
+    return PyLong_FromUnsignedLong(sym);
+
+}
+
 
 static PyObject *
 ArithmeticDecoder_length(ArithmeticDecoderObject *self, PyObject *args)
@@ -787,6 +872,7 @@ ArithmeticDecoder_value(ArithmeticDecoderObject *self, PyObject *args)
 static PyMethodDef ArithmeticDecoder_methods[] = {
     {"start", (PyCFunction)ArithmeticDecoder_start, METH_VARARGS, "Start decoding"},
     {"decode_bit", (PyCFunction)ArithmeticDecoder_decode_bit, METH_VARARGS, "Decode a bit"},
+    {"decode_symbol", (PyCFunction)ArithmeticDecoder_decode_symbol, METH_VARARGS, "Decode a symbol"},
     {NULL, NULL}  /* Sentinel */
 };
 
