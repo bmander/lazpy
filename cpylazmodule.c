@@ -704,9 +704,10 @@ static PyObject *
 ArithmeticDecoder_start(ArithmeticDecoderObject *self, PyObject *args)
 {
     PyObject *read_result = getBytesFromPythonFileLikeObject(self->fp, 4);
-    void *bytes = PyBytes_AsString(read_result);
+    uint8_t *bytes = (uint8_t*)PyBytes_AsString(read_result);
 
-    self->value = *((uint32_t *)bytes);
+    // read big endian uint32_t
+    self->value = bytes[0] << 24 | bytes[1] << 16 | bytes[2] << 8 | bytes[3];
     self->length = AC_MAX_LENGTH;
 
     Py_DECREF(read_result);
@@ -765,13 +766,13 @@ ArithmeticDecoder_decode_bit(ArithmeticDecoderObject *self, PyObject *args)
 static PyObject *
 ArithmeticDecoder_length(ArithmeticDecoderObject *self, PyObject *args)
 {
-    return PyLong_FromLong(self->length);
+    return PyLong_FromUnsignedLong(self->length);
 }
 
 static PyObject *
 ArithmeticDecoder_value(ArithmeticDecoderObject *self, PyObject *args)
 {
-    return PyLong_FromLong(self->value);
+    return PyLong_FromUnsignedLong(self->value);
 }
 
 static PyMethodDef ArithmeticDecoder_methods[] = {

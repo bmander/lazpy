@@ -3,7 +3,6 @@ import cpylaz
 import encoder
 import pytest
 import io
-import struct
 
 
 class TestArithmeticModel:
@@ -186,11 +185,33 @@ def test_encoder_not_implemented():
     with pytest.raises(NotImplementedError):
         cpylaz.ArithmeticEncoder()
 
+# string filled with random bits
+file_contents = b"\xad]\r\xf3-v*V\xa9\xd3\xf9\xbb\x7f\x9a\x06\xc9^hWv\xe7\xe7" \
+b"\rXE\xf0w\x88+\xe0G\x12\xe0\x06?c\xc8\xd7e\xa1\xe0\t\x86\x08\x9a\x11\x88\xd4" \
+b"U\xbfb?d`H\xdcgq\x15\xab\tx\xe7\x8bP\\\xf0\x99\xa9\xf1\xf2G-@7y\xf9J\x94)" \
+b"\x17\xe6\xa2>\x17\x8d\xdf\x14\xf3\xc9\x85Q\xc5?BTB\xfd\x9d\xa8>\xf80\x8a\x19" \
+b"\x01(\xc2N\xe0`\xbc$\x9b\x91\xe0\xed\xe3\x19K\xdb\xba\x01\x11\x9a\xf2\x89" \
+b"\x01\xb1\xb5\xb2%\xe7=.ua\xbb\x92(-\xb4\xde=*#\xec\x15Hs:\x80\xa7\x0b\xba" \
+b"\xe6\xbcD!'\x1c\x08\t\x1db\xfeT\xa5_\x15OeL\x81,Z\xf2\\|\x86i[\xc0\x1fQ\x9e" \
+b";2]\xef\x92\xbb\x16\xfd\xcb\x88\x9f\x13Je\xe8-@\x8a\xbd\xc7)v\xb3K\xcc\x9e" \
+b"\xa4\xaf\xc8\xb5\x05\x1c!\x97i\xe4\x8c\x89n\xb5\x9c\xb0\xbc\x00\x85\re\xed0" \
+b"\x8b\xe0\xe4\x0c\x1c; \xbf*\x89\xec\xa9\x80\xc2n\xc0R(\x8d|\x1a"
 
 class TestArithmeticDecoder:
     def test_create(self):
-        decoder = encoder.ArithmeticDecoder(None)
+        fp = io.BytesIO(file_contents)
+        decoder = encoder.ArithmeticDecoder(fp)
         assert decoder is not None
+
+    def test_start(self):
+        fp = io.BytesIO(file_contents)
+        decoder = encoder.ArithmeticDecoder(fp)
+        decoder.start()
+
+        assert decoder.fp == fp
+        assert decoder.length == 4294967295
+        assert decoder.value == 2908556787
+
 
 class TestCArithmeticDeoder:
 
@@ -201,12 +222,8 @@ class TestCArithmeticDeoder:
         assert decoder.value == 0
 
     def test_start(self):
-        intval = 323232
-
-        fp = io.BytesIO()
-        fp.write(struct.pack('I', intval))
-        fp.seek(0)
+        fp = io.BytesIO(file_contents)
         decoder = cpylaz.ArithmeticDecoder(fp)
         decoder.start()
         assert decoder.length == 4294967295
-        assert decoder.value == intval
+        assert decoder.value == 2908556787
