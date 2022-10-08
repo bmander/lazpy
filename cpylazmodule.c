@@ -898,6 +898,20 @@ ArithmeticDecoder_read_int(ArithmeticDecoderObject *self, PyObject *args){
     return PyLong_FromUnsignedLong(sym);
 }
 
+static PyObject *
+ArithmeticDecoder_create_symbol_model(ArithmeticModelObject *self, PyObject *args) {
+    uint32_t num_symbols;
+    if (!PyArg_ParseTuple(args, "I", &num_symbols)) {
+        return NULL;
+    }
+
+    PyObject *newargs = PyTuple_New(2);
+    PyTuple_SetItem(newargs, 0, PyLong_FromUnsignedLong(num_symbols));
+    PyTuple_SetItem(newargs, 1, PyBool_FromLong(0));
+    PyObject *model = PyObject_CallObject((PyObject *)&ArithmeticModel_Type, newargs);
+
+    return model;
+}
 
 static PyObject *
 ArithmeticDecoder_length(ArithmeticDecoderObject *self, PyObject *args)
@@ -917,6 +931,7 @@ static PyMethodDef ArithmeticDecoder_methods[] = {
     {"decode_symbol", (PyCFunction)ArithmeticDecoder_decode_symbol, METH_VARARGS, "Decode a symbol"},
     {"read_bits", (PyCFunction)ArithmeticDecoder_read_bits, METH_VARARGS, "Read bits"},
     {"read_int", (PyCFunction)ArithmeticDecoder_read_int, METH_VARARGS, "Read int"},
+    {"create_symbol_model", (PyCFunction)ArithmeticDecoder_create_symbol_model, METH_VARARGS, "Create symbol model"},
     {NULL, NULL}  /* Sentinel */
 };
 

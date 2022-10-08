@@ -302,6 +302,15 @@ class TestArithmeticDecoder:
 
         assert decoder.read_int() == 3142626653
 
+    def test_create_symbol_model(self):
+        fp = io.BytesIO(file_contents)
+        decoder = encoder.ArithmeticDecoder(fp)
+
+        model = decoder.create_symbol_model(8)
+
+        assert model is not None
+        assert model.num_symbols == 8
+
 
 class TestCArithmeticDeoder:
 
@@ -381,10 +390,19 @@ class TestCArithmeticDeoder:
         assert decoder.read_bits(8) == 76
         assert decoder.read_bits(16) == 46932
         assert decoder.read_bits(32) == 3890320431
-        
+
     def test_read_int(self):
         fp = io.BytesIO(file_contents)
-        decoder = encoder.ArithmeticDecoder(fp)
+        decoder = cpylaz.ArithmeticDecoder(fp)
         decoder.start()
 
         assert decoder.read_int() == 3142626653
+
+    def test_create_symbol_model(self):
+        fp = io.BytesIO(file_contents)
+        decoder = cpylaz.ArithmeticDecoder(fp)
+
+        model = decoder.create_symbol_model(8)
+
+        assert model is not None
+        assert model.num_symbols == 8
