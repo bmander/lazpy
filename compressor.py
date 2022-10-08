@@ -1,16 +1,17 @@
-import encoder
 import models
-import cmodels
+import cpylaz
 
 
 class IntegerCompressor:
     def __init__(self, dec_or_enc, bits=16, contexts=1, bits_high=8, range=0):
-        if type(dec_or_enc) == encoder.ArithmeticDecoder:
+        if type(dec_or_enc) == cpylaz.ArithmeticDecoder:
             self.dec = dec_or_enc
             self.enc = None
-        elif type(dec_or_enc) == encoder.ArithmeticEncoder:
+        elif type(dec_or_enc) == cpylaz.ArithmeticEncoder:
             self.dec = None
             self.enc = dec_or_enc
+        else:
+            raise ValueError("First argument must be an encoder or decoder")
 
         self.bits = bits
         self.contexts = contexts
@@ -52,7 +53,7 @@ class IntegerCompressor:
                 model = self.dec.create_symbol_model(self.corr_bits+1)
                 self.m_bits.append(model)
 
-            self.m_corrector = [cmodels.ArithmeticBitModel()]
+            self.m_corrector = [cpylaz.ArithmeticBitModel()]
             for i in range(1, self.corr_bits):
                 if i <= self.bits_high:
                     self.m_corrector.append(

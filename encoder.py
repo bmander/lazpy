@@ -1,5 +1,4 @@
 from utils import unsigned_int
-import models
 import cpylaz
 
 BM_LENGTH_SHIFT = 13
