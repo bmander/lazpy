@@ -856,25 +856,18 @@ ArithmeticDecoder_decode_symbol(ArithmeticDecoderObject *self, PyObject *args) {
 
 }
 
-#define READBITS_ERROR 0xFFFFFFFF
-
 uint32_t
 ArithmeticDecoder__read_bits(ArithmeticDecoderObject *self, uint32_t bits) {
-
 
     if(bits > 19) {
         uint32_t lower = ArithmeticDecoder__read_bits(self, 16);
         uint32_t upper = ArithmeticDecoder__read_bits(self, bits-16);
-
-
-
         return (upper << 16) | lower;
     }
 
     self->length >>= bits;
     uint32_t sym = self->value / (self->length);
     self->value = self->value % self->length;
-
     
     if(self->length < AC_MIN_LENGTH){
        ArithmeticDecoder__renorm_dec_interval(self);
@@ -896,10 +889,12 @@ ArithmeticDecoder_read_bits(ArithmeticDecoderObject *self, PyObject *args) {
     }
 
     uint32_t sym = ArithmeticDecoder__read_bits(self, bits);
-    if(sym == READBITS_ERROR) {
-        return NULL;
-    }
+    return PyLong_FromUnsignedLong(sym);
+}
 
+static PyObject *
+ArithmeticDecoder_read_int(ArithmeticDecoderObject *self, PyObject *args){
+    uint32_t sym = ArithmeticDecoder__read_bits(self, 32);
     return PyLong_FromUnsignedLong(sym);
 }
 
@@ -921,6 +916,7 @@ static PyMethodDef ArithmeticDecoder_methods[] = {
     {"decode_bit", (PyCFunction)ArithmeticDecoder_decode_bit, METH_VARARGS, "Decode a bit"},
     {"decode_symbol", (PyCFunction)ArithmeticDecoder_decode_symbol, METH_VARARGS, "Decode a symbol"},
     {"read_bits", (PyCFunction)ArithmeticDecoder_read_bits, METH_VARARGS, "Read bits"},
+    {"read_int", (PyCFunction)ArithmeticDecoder_read_int, METH_VARARGS, "Read int"},
     {NULL, NULL}  /* Sentinel */
 };
 
