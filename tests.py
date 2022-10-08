@@ -261,6 +261,41 @@ class TestArithmeticDecoder:
 
         assert symbols == test_symbols
 
+    def test_read_bits(self):
+        fp = io.BytesIO(file_contents)
+        decoder = encoder.ArithmeticDecoder(fp)
+        decoder.start()
+
+        assert decoder.read_bits(32) == 3142626653
+
+        fp = io.BytesIO(file_contents)
+        decoder = encoder.ArithmeticDecoder(fp)
+        decoder.start()
+
+        assert decoder.read_bits(1) == 1
+        assert decoder.value == 761073140
+        assert decoder.length == 2147483647
+        assert decoder.read_bits(2) == 1
+        assert decoder.value == 224202229
+        assert decoder.length == 536870911
+        assert decoder.read_bits(3) == 3
+        assert decoder.value == 22875640
+        assert decoder.length == 67108863
+        assert decoder.read_bits(8) == 87
+        assert decoder.value == 17714989
+        assert decoder.length == 67108608
+        assert decoder.read_bits(16) == 17316
+        assert decoder.value == 47281706
+        assert decoder.length == 67043328
+        assert decoder.read_bits(18) == 185418
+        assert decoder.value == 1951836627
+        assert decoder.length == 4278190080
+        assert decoder.read_bits(4) == 7
+        assert decoder.read_bits(8) == 76
+        assert decoder.read_bits(16) == 46932
+        assert decoder.read_bits(32) == 3890320431
+
+
 
 class TestCArithmeticDeoder:
 
@@ -306,3 +341,37 @@ class TestCArithmeticDeoder:
         test_symbols = [decoder.decode_symbol(m) for i in range(64)]
 
         assert symbols == test_symbols
+        
+    def test_read_bits(self):
+        fp = io.BytesIO(file_contents)
+        decoder = encoder.ArithmeticDecoder(fp)
+        decoder.start()
+
+        assert decoder.read_bits(32) == 3142626653
+
+        fp = io.BytesIO(file_contents)
+        decoder = cpylaz.ArithmeticDecoder(fp)
+        decoder.start()
+
+        assert decoder.read_bits(1) == 1
+        assert decoder.value == 761073140
+        assert decoder.length == 2147483647
+        assert decoder.read_bits(2) == 1
+        assert decoder.value == 224202229
+        assert decoder.length == 536870911
+        assert decoder.read_bits(3) == 3
+        assert decoder.value == 22875640
+        assert decoder.length == 67108863
+        assert decoder.read_bits(8) == 87
+        assert decoder.value == 17714989
+        assert decoder.length == 67108608
+        assert decoder.read_bits(16) == 17316
+        assert decoder.value == 47281706
+        assert decoder.length == 67043328
+        assert decoder.read_bits(18) == 185418
+        assert decoder.value == 1951836627
+        assert decoder.length == 4278190080
+        assert decoder.read_bits(4) == 7
+        assert decoder.read_bits(8) == 76
+        assert decoder.read_bits(16) == 46932
+        assert decoder.read_bits(32) == 3890320431
