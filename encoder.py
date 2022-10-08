@@ -18,6 +18,8 @@ class ArithmeticDecoder:
 
     def __init__(self, fp):
         self.fp = fp
+        self.length = 0
+        self.value = 0
 
     def start(self):
         self.length = self.AC_MAX_LENGTH

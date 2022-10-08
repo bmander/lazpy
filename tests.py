@@ -223,6 +223,8 @@ class TestArithmeticDecoder:
         decoder = encoder.ArithmeticDecoder(fp)
         assert decoder is not None
 
+        assert repr(decoder) == "ArithmeticDecoder(value=0, length=0)"
+
     def test_start(self):
         fp = io.BytesIO(file_contents)
         decoder = encoder.ArithmeticDecoder(fp)
@@ -319,6 +321,8 @@ class TestCArithmeticDeoder:
         decoder = cpylaz.ArithmeticDecoder(fp)
         assert decoder.length == 0
         assert decoder.value == 0
+
+        assert repr(decoder) == "ArithmeticDecoder(value=0, length=0)"
 
     def test_start(self):
         fp = io.BytesIO(file_contents)

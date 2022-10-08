@@ -914,6 +914,11 @@ ArithmeticDecoder_create_symbol_model(ArithmeticModelObject *self, PyObject *arg
 }
 
 static PyObject *
+ArithmeticDecoder__repr__(ArithmeticDecoderObject *self) {
+    return PyUnicode_FromFormat("ArithmeticDecoder(value=%d, length=%d)", self->value, self->length);
+}
+
+static PyObject *
 ArithmeticDecoder_length(ArithmeticDecoderObject *self, PyObject *args)
 {
     return PyLong_FromUnsignedLong(self->length);
@@ -952,7 +957,7 @@ static PyTypeObject ArithmeticDecoder_Type = {
     (getattrfunc)0,             /*tp_getattr*/
     0,   /*tp_setattr*/
     0,                          /*tp_as_async*/
-    0,                          /*tp_repr*/
+    (reprfunc)ArithmeticDecoder__repr__,                          /*tp_repr*/
     0,                          /*tp_as_number*/
     0,                          /*tp_as_sequence*/
     0,                          /*tp_as_mapping*/
