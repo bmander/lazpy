@@ -2,6 +2,7 @@ import models
 import cpylaz
 import encoder
 import pytest
+import compressor
 import io
 
 
@@ -410,3 +411,19 @@ class TestCArithmeticDeoder:
 
         assert model is not None
         assert model.num_symbols == 8
+
+
+class TestIntegerCompressor:
+    def test_create(self):
+        fp = io.BytesIO()
+        dec = cpylaz.ArithmeticDecoder(fp)
+        ic = compressor.IntegerCompressor(dec)
+        assert ic is not None
+
+
+class TestCIntegerCompressor:
+    def test_create(self):
+        fp = io.BytesIO()
+        dec = cpylaz.ArithmeticDecoder(fp)
+        ic = cpylaz.IntegerCompressor(dec)
+        assert ic is not None
