@@ -257,17 +257,17 @@ static PyObject *
 ArithmeticModel_init(ArithmeticModelObject *self, PyObject *args, PyObject *kwargs)
 {   
 
-    PyObject * table = Py_None;
+    PyObject * table = NULL;
     if (!PyArg_ParseTuple(args, "|O", &table)) {
         return NULL;
     }
 
-    if (table != Py_None && !PyList_Check(table)) {
+    if (table != NULL && !PyList_Check(table)) {
         PyErr_SetString(PyExc_TypeError, "The table argument must be a list");
         return NULL;
     }
 
-    if (table != Py_None && PyList_Size(table) != self->num_symbols) {
+    if (table != NULL && PyList_Size(table) != self->num_symbols) {
         PyErr_SetString(PyExc_ValueError, "The table argument must be the same length as num_symbols");
         return NULL;
     }
@@ -306,7 +306,7 @@ ArithmeticModel_init(ArithmeticModelObject *self, PyObject *args, PyObject *kwar
 
     self->total_count = 0;
     self->update_cycle = self->num_symbols;
-    if(table != Py_None){
+    if(table != NULL){
         // check that table is a list of ints
         if (!PyList_Check(table)) {
             PyErr_SetString(PyExc_TypeError, "table must be a list of ints");
@@ -899,11 +899,7 @@ ArithmeticDecoder_read_int(ArithmeticDecoderObject *self, PyObject *args){
 }
 
 static PyObject *
-ArithmeticDecoder_create_symbol_model(ArithmeticModelObject *self, PyObject *args) {
-    uint32_t num_symbols;
-    if (!PyArg_ParseTuple(args, "I", &num_symbols)) {
-        return NULL;
-    }
+ArithmeticDecoder__create_symbol_model(ArithmeticModelObject *self, uint32_t num_symbols) {
 
     PyObject *newargs = PyTuple_New(2);
     PyTuple_SetItem(newargs, 0, PyLong_FromUnsignedLong(num_symbols));
@@ -911,6 +907,16 @@ ArithmeticDecoder_create_symbol_model(ArithmeticModelObject *self, PyObject *arg
     PyObject *model = PyObject_CallObject((PyObject *)&ArithmeticModel_Type, newargs);
 
     return model;
+}
+
+static PyObject *
+ArithmeticDecoder_create_symbol_model(ArithmeticModelObject *self, PyObject *args) {
+    uint32_t num_symbols;
+    if (!PyArg_ParseTuple(args, "I", &num_symbols)) {
+        return NULL;
+    }
+
+    return ArithmeticDecoder__create_symbol_model(self, num_symbols);
 }
 
 static PyObject *
@@ -990,6 +996,195 @@ static PyTypeObject ArithmeticDecoder_Type = {
     0,                          /*tp_is_gc*/
 };
 
+typedef struct {
+    PyObject_HEAD
+    PyObject *enc;
+    PyObject *dec;
+    uint32_t k;
+    uint32_t bits;
+    uint32_t contexts;
+    uint32_t bits_high;
+    uint32_t range;
+    uint32_t corr_bits;
+    uint32_t corr_range;
+    int32_t corr_min;
+    int32_t corr_max;
+    PyObject **m_bits;
+    PyObject **m_corrector;
+} IntegerCompressorObject;
+
+static int
+IntegerCompressor__init__(IntegerCompressorObject *self, PyObject *args, PyObject *kwargs) {
+    PyObject *enc_or_dec;
+    uint32_t bits=16;
+    uint32_t contexts=1;
+    uint32_t bits_high=8;
+    uint32_t range=0;
+    if (!PyArg_ParseTuple(args, "O|IIII", &enc_or_dec, &bits, &contexts, &bits_high, &range)) {
+        return -1;
+    }
+
+    if (PyObject_IsInstance(enc_or_dec, (PyObject *)&ArithmeticEncoder_Type)) {
+        self->enc = enc_or_dec;
+        Py_INCREF(self->enc);
+        self->dec = NULL;
+    } else if (PyObject_IsInstance(enc_or_dec, (PyObject *)&ArithmeticDecoder_Type)) {
+        self->dec = enc_or_dec;
+        Py_INCREF(self->dec);
+        self->enc = NULL;
+    } else {
+        PyErr_SetString(PyExc_TypeError, "Argument must be an encoder or decoder");
+        return -1;
+    }
+
+    self->bits = bits;
+    self->contexts = contexts;
+    self->bits_high = bits_high;
+    self->range = range;
+
+    if(range != 0) {
+        self->corr_bits = 0;
+        self->corr_range = range;
+        while(range != 0) {
+            range >>= 1;
+            self->corr_bits += 1;
+        }
+        if(self->corr_range == (1u << (self->corr_bits - 1u))) {
+            self->corr_bits -= 1;
+        }
+        self->corr_min = -self->corr_range / 2;
+        self->corr_max = self->corr_min+self->corr_range-1;
+    } else if( bits > 0 && bits < 32) {
+        self->corr_bits = bits;
+        self->corr_range = 1 << bits;
+        self->corr_min = -self->corr_range / 2;
+        self->corr_max = self->corr_min+self->corr_range-1;
+    } else {
+        self->corr_bits = 32;
+        self->corr_range = 0;
+        self->corr_min = -0x7FFFFFFF;
+        self->corr_max = 0x7FFFFFFF;
+    }
+
+    self->m_bits = NULL;
+    self->m_corrector = NULL;
+
+    self->k = 0;
+
+    return 0;
+}
+
+static void
+IntegerCompressor_dealloc(IntegerCompressorObject *self) {
+    Py_XDECREF(self->enc);
+    Py_XDECREF(self->dec);
+    if(self->m_bits != NULL) {
+        for(uint32_t i=0; i<self->contexts; i++) {
+            Py_XDECREF(self->m_bits[i]);
+        }
+        free(self->m_bits);
+    }
+    if(self->m_corrector != NULL) {
+        for(uint32_t i=0; i<self->contexts; i++) {
+            Py_XDECREF(self->m_corrector[i]);
+        }
+        free(self->m_corrector);
+    }
+    Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+// static PyObject *
+// IntegerCompressor_init_decompressor(IntegerCompressorObject *self, PyObject *args){
+
+//     if(self.m_bits == NULL){
+//         self.m_bits = malloc(self.contexts * sizeof(PyObject *));
+//         self.m_corrector = malloc(self.contexts * sizeof(PyObject *));
+//         for(uint32_t i=0; i<self.contexts; i++) {
+//             PyObject *model = ArithmeticDecoder__create_symbol_model(self->dec, self->corr_bits+1);
+//             Py_INCREF(model);
+//             self.m_bits[i] = model;
+//         }
+
+//         // create new ArithmeticBitModelObject
+//         PyObject *bitmodel = PyObject_CallObject((PyObject *)&ArithmeticBitModel_Type, NULL);
+//         self.m_corrector[0] = bitmodel;
+
+//         for(int32_t i=1; i<self->corr_bits; i++){
+//             uint32_t num_symbols;
+//             if(i <= self->bits_high){
+//                 num_symbols = 1 << i;
+//             } else {
+//                 num_symbols = 1 << self->bits_high;
+//             } 
+//             PyObject *model = ArithmeticDecoder__create_symbol_model(self->dec, num_symbols);
+//             Py_INCREF(model);
+//             self.m_corrector[i] = model;
+//         }
+//     }
+
+//     for(uint32_t i=0; i<self.contexts; i++) {
+//         ArithmeticModel_init(self.m_bits[i]);
+//     }
+//     for i in range(self.contexts):
+//         self.m_bits[i].init()
+
+//     self.m_corrector[0].init()
+
+//     for i in range(1, self.corr_bits):
+//         self.m_corrector[i].init()
+
+static PyMethodDef IntegerCompressor_methods[] = {
+    {NULL, NULL}  /* Sentinel */
+};
+
+PyGetSetDef IntegerCompressor_getset[] = {
+    {NULL}  /* Sentinel */
+};
+
+static PyTypeObject IntegerCompressor_Type = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    "cpylaz.IntegerCompressor", /*tp_name*/
+    sizeof(IntegerCompressorObject), /*tp_basicsize*/
+    0,                          /*tp_itemsize*/
+    /* methods */
+    (destructor)IntegerCompressor_dealloc,    /*tp_dealloc*/
+    0,                          /*tp_vectorcall_offset*/
+    (getattrfunc)0,             /*tp_getattr*/
+    0,   /*tp_setattr*/
+    0,                          /*tp_as_async*/
+    0,                          /*tp_repr*/
+    0,                          /*tp_as_number*/
+    0,                          /*tp_as_sequence*/
+    0,                          /*tp_as_mapping*/
+    0,                          /*tp_hash*/
+    0,                          /*tp_call*/
+    0,                          /*tp_str*/
+    0, /*tp_getattro*/
+    0,                          /*tp_setattro*/
+    0,                          /*tp_as_buffer*/
+    Py_TPFLAGS_DEFAULT,         /*tp_flags*/
+    0,                          /*tp_doc*/
+    0,                          /*tp_traverse*/
+    0,                          /*tp_clear*/
+    0,                          /*tp_richcompare*/
+    0,                          /*tp_weaklistoffset*/
+    0,                          /*tp_iter*/
+    0,                          /*tp_iternext*/
+    IntegerCompressor_methods,                /*tp_methods*/
+    0,                          /*tp_members*/
+    IntegerCompressor_getset,                          /*tp_getset*/
+    0,                          /*tp_base*/
+    0,                          /*tp_dict*/
+    0,                          /*tp_descr_get*/
+    0,                          /*tp_descr_set*/
+    0,                          /*tp_dictoffset*/
+    (initproc)IntegerCompressor__init__,                          /*tp_init*/
+    0,                          /*tp_alloc*/
+    PyType_GenericNew,                          /*tp_new*/
+    0,                          /*tp_free*/
+    0,                          /*tp_is_gc*/
+};
+
 /* List of functions defined in the module */
 
 static PyMethodDef cpylaz_methods[] = {
@@ -1034,6 +1229,11 @@ cpylaz_exec(PyObject *m)
     if (PyType_Ready(&ArithmeticDecoder_Type) < 0)
         goto fail;
     PyModule_AddObject(m, "ArithmeticDecoder", (PyObject *)&ArithmeticDecoder_Type);
+
+    IntegerCompressor_Type.tp_base = &PyBaseObject_Type;
+    if (PyType_Ready(&IntegerCompressor_Type) < 0)
+        goto fail;
+    PyModule_AddObject(m, "IntegerCompressor", (PyObject *)&IntegerCompressor_Type);
 
     PyModule_AddIntConstant(m, "DM_LENGTH_SHIFT", DM_LENGTH_SHIFT);
 
