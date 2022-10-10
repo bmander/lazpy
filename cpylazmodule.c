@@ -254,23 +254,8 @@ ArithmeticModel__init__(ArithmeticModelObject *self, PyObject *args, PyObject *k
 }
 
 static PyObject *
-ArithmeticModel_init(ArithmeticModelObject *self, PyObject *args, PyObject *kwargs)
+_ArithmeticModel_init(ArithmeticModelObject *self, PyObject *table)
 {   
-
-    PyObject * table = NULL;
-    if (!PyArg_ParseTuple(args, "|O", &table)) {
-        return NULL;
-    }
-
-    if (table != NULL && !PyList_Check(table)) {
-        PyErr_SetString(PyExc_TypeError, "The table argument must be a list");
-        return NULL;
-    }
-
-    if (table != NULL && PyList_Size(table) != self->num_symbols) {
-        PyErr_SetString(PyExc_ValueError, "The table argument must be the same length as num_symbols");
-        return NULL;
-    }
 
     if (self->distribution == NULL){
         if (self->num_symbols < 2 || self->num_symbols > 2048) {
@@ -334,6 +319,29 @@ ArithmeticModel_init(ArithmeticModelObject *self, PyObject *args, PyObject *kwar
     self->update_cycle = self->symbols_until_update;
 
     Py_RETURN_NONE;
+}
+
+static PyObject *
+ArithmeticModel_init(ArithmeticModelObject *self, PyObject *args, PyObject *kwargs)
+{   
+
+    PyObject * table = NULL;
+    if (!PyArg_ParseTuple(args, "|O", &table)) {
+        return NULL;
+    }
+
+    if (table != NULL && !PyList_Check(table)) {
+        PyErr_SetString(PyExc_TypeError, "The table argument must be a list");
+        return NULL;
+    }
+
+    if (table != NULL && PyList_Size(table) != self->num_symbols) {
+        PyErr_SetString(PyExc_ValueError, "The table argument must be the same length as num_symbols");
+        return NULL;
+    }
+
+    return _ArithmeticModel_init(self, table);
+
 }
 
 int
@@ -411,7 +419,7 @@ ArithmeticModel_dealloc(ArithmeticModelObject *self)
 }
 
 void
-ArithmeticModel__increment_symbol_count(ArithmeticModelObject *self, uint32_t symbol)
+_ArithmeticModel_increment_symbol_count(ArithmeticModelObject *self, uint32_t symbol)
 {
     self->symbol_count[symbol]++;
     self->symbols_until_update--;
@@ -434,7 +442,7 @@ ArithmeticModel_increment_symbol_count(ArithmeticModelObject *self, PyObject *ar
         return NULL;
     }
 
-    ArithmeticModel__increment_symbol_count(self, symbol);
+    _ArithmeticModel_increment_symbol_count(self, symbol);
 
     Py_RETURN_NONE;
 }
@@ -850,18 +858,18 @@ ArithmeticDecoder_decode_symbol(ArithmeticDecoderObject *self, PyObject *args) {
         ArithmeticDecoder__renorm_dec_interval(self);
     }
 
-    ArithmeticModel__increment_symbol_count(m, sym);
+    _ArithmeticModel_increment_symbol_count(m, sym);
 
     return PyLong_FromUnsignedLong(sym);
 
 }
 
 uint32_t
-ArithmeticDecoder__read_bits(ArithmeticDecoderObject *self, uint32_t bits) {
+_ArithmeticDecoder_read_bits(ArithmeticDecoderObject *self, uint32_t bits) {
 
     if(bits > 19) {
-        uint32_t lower = ArithmeticDecoder__read_bits(self, 16);
-        uint32_t upper = ArithmeticDecoder__read_bits(self, bits-16);
+        uint32_t lower = _ArithmeticDecoder_read_bits(self, 16);
+        uint32_t upper = _ArithmeticDecoder_read_bits(self, bits-16);
         return (upper << 16) | lower;
     }
 
@@ -888,18 +896,18 @@ ArithmeticDecoder_read_bits(ArithmeticDecoderObject *self, PyObject *args) {
         return NULL;
     }
 
-    uint32_t sym = ArithmeticDecoder__read_bits(self, bits);
+    uint32_t sym = _ArithmeticDecoder_read_bits(self, bits);
     return PyLong_FromUnsignedLong(sym);
 }
 
 static PyObject *
 ArithmeticDecoder_read_int(ArithmeticDecoderObject *self, PyObject *args){
-    uint32_t sym = ArithmeticDecoder__read_bits(self, 32);
+    uint32_t sym = _ArithmeticDecoder_read_bits(self, 32);
     return PyLong_FromUnsignedLong(sym);
 }
 
 static PyObject *
-ArithmeticDecoder__create_symbol_model(ArithmeticModelObject *self, uint32_t num_symbols) {
+_ArithmeticDecoder_create_symbol_model(ArithmeticModelObject *self, uint32_t num_symbols) {
 
     PyObject *newargs = PyTuple_New(2);
     PyTuple_SetItem(newargs, 0, PyLong_FromUnsignedLong(num_symbols));
@@ -916,7 +924,7 @@ ArithmeticDecoder_create_symbol_model(ArithmeticModelObject *self, PyObject *arg
         return NULL;
     }
 
-    return ArithmeticDecoder__create_symbol_model(self, num_symbols);
+    return _ArithmeticDecoder_create_symbol_model(self, num_symbols);
 }
 
 static PyObject *
@@ -1100,7 +1108,7 @@ IntegerCompressor_dealloc(IntegerCompressorObject *self) {
 //         self.m_bits = malloc(self.contexts * sizeof(PyObject *));
 //         self.m_corrector = malloc(self.contexts * sizeof(PyObject *));
 //         for(uint32_t i=0; i<self.contexts; i++) {
-//             PyObject *model = ArithmeticDecoder__create_symbol_model(self->dec, self->corr_bits+1);
+//             PyObject *model = _ArithmeticDecoder_create_symbol_model(self->dec, self->corr_bits+1);
 //             Py_INCREF(model);
 //             self.m_bits[i] = model;
 //         }
@@ -1116,7 +1124,7 @@ IntegerCompressor_dealloc(IntegerCompressorObject *self) {
 //             } else {
 //                 num_symbols = 1 << self->bits_high;
 //             } 
-//             PyObject *model = ArithmeticDecoder__create_symbol_model(self->dec, num_symbols);
+//             PyObject *model = _ArithmeticDecoder_create_symbol_model(self->dec, num_symbols);
 //             Py_INCREF(model);
 //             self.m_corrector[i] = model;
 //         }
