@@ -420,7 +420,18 @@ class TestIntegerCompressor:
         ic = compressor.IntegerCompressor(dec)
         assert ic is not None
 
+        assert ic.dec is dec
+        assert ic.enc is None
+        assert ic.bits == 16
+        assert ic.contexts == 1
+        assert ic.bits_high == 8
+        assert ic.range == 0
+
         ic.init_decompressor()
+
+        assert ic.get_m_bits(0).num_symbols == 17
+        assert type(ic.get_corrector(0)) == cpylaz.ArithmeticBitModel
+        assert ic.get_corrector(1).num_symbols == 2
 
 
 class TestCIntegerCompressor:
@@ -430,4 +441,15 @@ class TestCIntegerCompressor:
         ic = cpylaz.IntegerCompressor(dec)
         assert ic is not None
 
+        assert ic.dec is dec
+        assert ic.enc is None
+        assert ic.bits == 16
+        assert ic.contexts == 1
+        assert ic.bits_high == 8
+        assert ic.range == 0
+
         ic.init_decompressor()
+
+        assert ic.get_m_bits(0).num_symbols == 17
+        assert type(ic.get_corrector(0)) == cpylaz.ArithmeticBitModel
+        assert ic.get_corrector(1).num_symbols == 2

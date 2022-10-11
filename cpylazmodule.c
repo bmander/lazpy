@@ -1040,11 +1040,11 @@ IntegerCompressor__init__(IntegerCompressorObject *self, PyObject *args, PyObjec
     if (PyObject_IsInstance(enc_or_dec, (PyObject *)&ArithmeticEncoder_Type)) {
         self->enc = enc_or_dec;
         Py_INCREF(self->enc);
-        self->dec = NULL;
+        self->dec = Py_None;
     } else if (PyObject_IsInstance(enc_or_dec, (PyObject *)&ArithmeticDecoder_Type)) {
         self->dec = enc_or_dec;
         Py_INCREF(self->dec);
-        self->enc = NULL;
+        self->enc = Py_None;
     } else {
         PyErr_SetString(PyExc_TypeError, "Argument must be an encoder or decoder");
         return -1;
@@ -1148,12 +1148,82 @@ IntegerCompressor_init_decompressor(IntegerCompressorObject *self, PyObject *arg
     Py_RETURN_NONE;
 }
 
+static PyObject *
+IntegerCompressor_get_m_bits(IntegerCompressorObject *self, PyObject *args){
+    // returns the m_bits at the given index
+    uint32_t index;
+    if (!PyArg_ParseTuple(args, "I", &index)) {
+        return NULL;
+    }
+    if(index >= self->contexts) {
+        PyErr_SetString(PyExc_IndexError, "Index out of range");
+        return NULL;
+    }
+    Py_INCREF(self->m_bits[index]);
+    return self->m_bits[index];
+}
+
+static PyObject *
+IntegerCompressor_get_corrector(IntegerCompressorObject *self, PyObject *args){
+    // returns the m_corrector at the given index
+    uint32_t index;
+    if (!PyArg_ParseTuple(args, "I", &index)) {
+        return NULL;
+    }
+    if(index >= self->corr_bits) {
+        PyErr_SetString(PyExc_IndexError, "Index out of range");
+        return NULL;
+    }
+    Py_INCREF(self->m_corrector[index]);
+    return self->m_corrector[index];
+}
+
+static PyObject *
+IntegerCompressor_get_enc(IntegerCompressorObject *self, void *closure) {
+    Py_INCREF(self->enc);
+    return self->enc;
+}
+
+static PyObject *
+IntegerCompressor_get_dec(IntegerCompressorObject *self, void *closure) {
+    Py_INCREF(self->dec);
+    return self->dec;
+}
+
+static PyObject *
+IntegerCompressor_get_bits(IntegerCompressorObject *self, void *closure) {
+    return PyLong_FromUnsignedLong(self->bits);
+}
+
+static PyObject *
+IntegerCompressor_get_contexts(IntegerCompressorObject *self, void *closure) {
+    return PyLong_FromUnsignedLong(self->contexts);
+}
+
+static PyObject *
+IntegerCompressor_get_bits_high(IntegerCompressorObject *self, void *closure) {
+    return PyLong_FromUnsignedLong(self->bits_high);
+}
+
+static PyObject *
+IntegerCompressor_get_range(IntegerCompressorObject *self, void *closure) {
+    return PyLong_FromUnsignedLong(self->range);
+}
+
 static PyMethodDef IntegerCompressor_methods[] = {
     {"init_decompressor", (PyCFunction)IntegerCompressor_init_decompressor, METH_NOARGS, NULL},
+    {"get_m_bits", (PyCFunction)IntegerCompressor_get_m_bits, METH_VARARGS, NULL},
+    {"get_corrector", (PyCFunction)IntegerCompressor_get_corrector, METH_VARARGS, NULL},
     {NULL, NULL}  /* Sentinel */
 };
 
 PyGetSetDef IntegerCompressor_getset[] = {
+    {"enc", (getter)IntegerCompressor_get_enc, NULL, "Encoder", NULL},
+    {"dec", (getter)IntegerCompressor_get_dec, NULL, "Decoder", NULL},
+    {"bits", (getter)IntegerCompressor_get_bits, NULL, "Bits", NULL},
+    {"contexts", (getter)IntegerCompressor_get_contexts, NULL, "Contexts", NULL},
+    {"bits_high", (getter)IntegerCompressor_get_bits_high, NULL, "Bits high", NULL},
+    {"range", (getter)IntegerCompressor_get_range, NULL, "Range", NULL},
     {NULL}  /* Sentinel */
 };
 

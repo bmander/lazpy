@@ -107,3 +107,11 @@ class IntegerCompressor:
             real -= self.corr_range
 
         return real
+
+    def get_m_bits(self, i):
+        # matches C API
+        return self.m_bits[i]
+
+    def get_corrector(self, i):
+        # matches C API
+        return self.m_corrector[i]
