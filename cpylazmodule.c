@@ -756,15 +756,9 @@ ArithmeticDecoder__renorm_dec_interval(ArithmeticDecoderObject *self) {
     }
 }
 
-static PyObject *
-ArithmeticDecoder_decode_bit(ArithmeticDecoderObject *self, PyObject *args)
+static uint32_t
+_ArithmeticDecoder_decode_bit(ArithmeticDecoderObject *self, ArithmeticBitModelObject *m)
 {
-    // get ArithmeticBitModel from args
-    PyObject *argm;
-    if (!PyArg_ParseTuple(args, "O!", &ArithmeticBitModel_Type, &argm)) {
-        return NULL;
-    }
-    ArithmeticBitModelObject *m = (ArithmeticBitModelObject *)argm;
 
     uint32_t x = m->bit_0_prob * (self->length >> BM_LENGTH_SHIFT);
     uint32_t sym = (self->value >= x);
@@ -785,6 +779,21 @@ ArithmeticDecoder_decode_bit(ArithmeticDecoderObject *self, PyObject *args)
     if (m->bits_until_update == 0) { 
         updateArithmeticBitModel(m);
     }
+
+    return sym;
+}
+
+static PyObject *
+ArithmeticDecoder_decode_bit(ArithmeticDecoderObject *self, PyObject *args)
+{
+    // get ArithmeticBitModel from args
+    PyObject *argm;
+    if (!PyArg_ParseTuple(args, "O!", &ArithmeticBitModel_Type, &argm)) {
+        return NULL;
+    }
+    ArithmeticBitModelObject *m = (ArithmeticBitModelObject *)argm;
+
+    uint32_t sym = _ArithmeticDecoder_decode_bit(self, m);
 
     return PyLong_FromUnsignedLong(sym);
     
@@ -1154,12 +1163,37 @@ IntegerCompressor_init_decompressor(IntegerCompressorObject *self, PyObject *arg
     Py_RETURN_NONE;
 }
 
-// static uint32_t
-// _IntegerCompressor_read_corrector(IntegerCompressorObject *self, ArithmeticModelObject *model){
-//     self->k = _ArithmeticDecoder_decode_symbol((ArithmeticDecoderObject *)self->dec, model);
+static uint32_t
+_IntegerCompressor_read_corrector(IntegerCompressorObject *self, ArithmeticModelObject *model){
+    uint32_t c, k1, c1;
 
+    self->k = _ArithmeticDecoder_decode_symbol((ArithmeticDecoderObject *)self->dec, model);
 
-// }
+    if(self->k != 0) {
+        if(self->k < 32) {
+            c = _ArithmeticDecoder_decode_symbol((ArithmeticDecoderObject *)self->dec, (ArithmeticModelObject *)self->m_corrector[self->k]);
+            if(self->k > self->bits_high){
+                k1 = self->k - self->bits_high;
+                c1 = _ArithmeticDecoder_read_bits((ArithmeticDecoderObject *)self->dec, k1);
+                c = (c << k1) | c1;
+            }
+
+            // translate c back into its correct interval
+            if(c >= (1u << (self->k-1u))) {
+                c += 1;
+            } else {
+                c -= (1u << self->k)-1u;
+            }
+
+        } else { 
+            c = self->corr_min;
+        }
+    } else {
+        c = _ArithmeticDecoder_decode_bit((ArithmeticDecoderObject *)self->dec, (ArithmeticBitModelObject *)self->m_corrector[0]);
+    }
+
+    return c;
+}
 
 static PyObject *
 IntegerCompressor_get_m_bits(IntegerCompressorObject *self, PyObject *args){
