@@ -790,15 +790,8 @@ ArithmeticDecoder_decode_bit(ArithmeticDecoderObject *self, PyObject *args)
     
 }
 
-static PyObject *
-ArithmeticDecoder_decode_symbol(ArithmeticDecoderObject *self, PyObject *args) {
-    // get ArithmeticModel from args
-    PyObject *argm;
-    if (!PyArg_ParseTuple(args, "O!", &ArithmeticModel_Type, &argm)) {
-        return NULL;
-    }
-    ArithmeticModelObject *m = (ArithmeticModelObject *)argm;
-
+static uint32_t
+_ArithmeticDecoder_decode_symbol(ArithmeticDecoderObject *self, ArithmeticModelObject *m) {
     uint32_t y = self->length;
     uint32_t x;
     uint32_t sym;
@@ -865,8 +858,21 @@ ArithmeticDecoder_decode_symbol(ArithmeticDecoderObject *self, PyObject *args) {
 
     _ArithmeticModel_increment_symbol_count(m, sym);
 
-    return PyLong_FromUnsignedLong(sym);
+    return sym;
+}
 
+static PyObject *
+ArithmeticDecoder_decode_symbol(ArithmeticDecoderObject *self, PyObject *args) {
+    // get ArithmeticModel from args
+    PyObject *argm;
+    if (!PyArg_ParseTuple(args, "O!", &ArithmeticModel_Type, &argm)) {
+        return NULL;
+    }
+    ArithmeticModelObject *m = (ArithmeticModelObject *)argm;
+
+    uint32_t sym = _ArithmeticDecoder_decode_symbol(self, m);
+
+    return PyLong_FromUnsignedLong(sym);
 }
 
 uint32_t
@@ -1147,6 +1153,13 @@ IntegerCompressor_init_decompressor(IntegerCompressorObject *self, PyObject *arg
 
     Py_RETURN_NONE;
 }
+
+// static uint32_t
+// _IntegerCompressor_read_corrector(IntegerCompressorObject *self, ArithmeticModelObject *model){
+//     self->k = _ArithmeticDecoder_decode_symbol((ArithmeticDecoderObject *)self->dec, model);
+
+
+// }
 
 static PyObject *
 IntegerCompressor_get_m_bits(IntegerCompressorObject *self, PyObject *args){
