@@ -75,11 +75,9 @@ class IntegerCompressor:
 
         if self.k != 0:
             if self.k < 32:
-                if self.k <= self.bits_high:
-                    c = self.dec.decode_symbol(self.m_corrector[self.k])
-                else:
+                c = self.dec.decode_symbol(self.m_corrector[self.k])
+                if self.k > self.bits_high:
                     k1 = self.k-self.bits_high
-                    c = self.dec.decode_symbol(self.m_corrector[self.k])
                     c1 = self.dec.read_bits(k1)
                     c = (c << k1) | c1
 
