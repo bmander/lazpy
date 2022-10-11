@@ -1195,6 +1195,36 @@ _IntegerCompressor_read_corrector(IntegerCompressorObject *self, ArithmeticModel
     return c;
 }
 
+static uint32_t
+_IntegerCompressor_decompress(IntegerCompressorObject *self, uint32_t pred, uint32_t context){
+    uint32_t real;
+
+    real = pred + _IntegerCompressor_read_corrector(self, (ArithmeticModelObject *)self->m_bits[context]);
+
+    if(real < 0) {
+        real += self->corr_range;
+    } else if(real >= self->corr_range) {
+        real -= self->corr_range;
+    }
+
+    return real;
+}
+
+static PyObject *
+IntegerCompressor_decompress(IntegerCompressorObject *self, PyObject *args){
+    uint32_t pred, real;
+    uint32_t context = 0;
+
+    if(!PyArg_ParseTuple(args, "I|I", &pred, &context)) {
+        return NULL;
+    }
+
+    real = _IntegerCompressor_decompress(self, pred, context);
+
+    return PyLong_FromUnsignedLong(real);
+}
+
+
 static PyObject *
 IntegerCompressor_get_m_bits(IntegerCompressorObject *self, PyObject *args){
     // returns the m_bits at the given index
@@ -1261,6 +1291,7 @@ static PyMethodDef IntegerCompressor_methods[] = {
     {"init_decompressor", (PyCFunction)IntegerCompressor_init_decompressor, METH_NOARGS, NULL},
     {"get_m_bits", (PyCFunction)IntegerCompressor_get_m_bits, METH_VARARGS, NULL},
     {"get_corrector", (PyCFunction)IntegerCompressor_get_corrector, METH_VARARGS, NULL},
+    {"decompress", (PyCFunction)IntegerCompressor_decompress, METH_VARARGS, NULL},
     {NULL, NULL}  /* Sentinel */
 };
 

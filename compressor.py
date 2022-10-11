@@ -1,13 +1,15 @@
-import models
+import encoder
 import cpylaz
 
 
 class IntegerCompressor:
     def __init__(self, dec_or_enc, bits=16, contexts=1, bits_high=8, range=0):
-        if type(dec_or_enc) == cpylaz.ArithmeticDecoder:
+        if type(dec_or_enc) in {cpylaz.ArithmeticDecoder, 
+                                encoder.ArithmeticDecoder}:
             self.dec = dec_or_enc
             self.enc = None
-        elif type(dec_or_enc) == cpylaz.ArithmeticEncoder:
+        elif type(dec_or_enc) in {cpylaz.ArithmeticEncoder,
+                                  encoder.ArithmeticEncoder}:
             self.dec = None
             self.enc = dec_or_enc
         else:

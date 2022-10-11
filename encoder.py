@@ -34,6 +34,9 @@ class ArithmeticDecoder:
             self.length <<= 8
 
     def decode_bit(self, m):
+        if self.length == 0:
+            raise RuntimeError("Decoder interval is empty - have you called start()?")
+
         # m is an ArithmeticBitModel
         x = m.bit_0_prob * (self.length >> BM_LENGTH_SHIFT)
         sym = (self.value >= x)
@@ -56,6 +59,9 @@ class ArithmeticDecoder:
 
     def decode_symbol(self, m):
         # m is an ArithmeticModel
+        
+        if self.length == 0:
+            raise RuntimeError("Decoder interval is empty - have you called start()?")
 
         y = self.length
 

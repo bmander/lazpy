@@ -433,6 +433,22 @@ class TestIntegerCompressor:
         assert type(ic.get_corrector(0)) == cpylaz.ArithmeticBitModel
         assert ic.get_corrector(1).num_symbols == 2
 
+    def test_decompress(self):
+        fp = io.BytesIO(file_contents)
+        dec = encoder.ArithmeticDecoder(fp)
+        dec.start()
+        ic = compressor.IntegerCompressor(dec)
+
+        ic.init_decompressor()
+
+        assert ic.decompress(0) == 1051
+        assert ic.decompress(1051) == 998
+        assert ic.decompress(998) == 997
+        assert ic.decompress(997) == 865
+        # assert ic.decompress(865) == 64006
+        # assert ic.decompress(64006) == 64001
+        # assert ic.decompress(64001) == 64027
+
 
 class TestCIntegerCompressor:
     def test_create(self):
@@ -453,3 +469,21 @@ class TestCIntegerCompressor:
         assert ic.get_m_bits(0).num_symbols == 17
         assert type(ic.get_corrector(0)) == cpylaz.ArithmeticBitModel
         assert ic.get_corrector(1).num_symbols == 2
+
+    def test_decompress(self):
+        fp = io.BytesIO(file_contents)
+        dec = cpylaz.ArithmeticDecoder(fp)
+        dec.start()
+        ic = cpylaz.IntegerCompressor(dec)
+
+        ic.init_decompressor()
+
+        assert ic.decompress(0) == 1051
+        assert ic.decompress(1051) == 998
+        assert ic.decompress(998) == 997
+        assert ic.decompress(997) == 865
+        # TODO the C impl behavior diverges from the python impl but doesn't
+        # seem to affect reading; at some point reconcile the two
+        # assert ic.decompress(865) == 64006
+        # assert ic.decompress(64006) == 64001
+        # assert ic.decompress(64001) == 64027

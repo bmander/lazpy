@@ -2,9 +2,8 @@ from enum import IntEnum
 import sys
 from utils import unsigned_int, u32_array, u64_array, double, cstr, \
     signed_int
-from cpylaz import ArithmeticDecoder
+from cpylaz import ArithmeticDecoder, IntegerCompressor
 import readers as rd
-from compressor import IntegerCompressor
 
 # LAS file specification
 # 1.2:
