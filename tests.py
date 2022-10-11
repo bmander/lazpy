@@ -420,6 +420,8 @@ class TestIntegerCompressor:
         ic = compressor.IntegerCompressor(dec)
         assert ic is not None
 
+        ic.init_decompressor()
+
 
 class TestCIntegerCompressor:
     def test_create(self):
@@ -427,3 +429,5 @@ class TestCIntegerCompressor:
         dec = cpylaz.ArithmeticDecoder(fp)
         ic = cpylaz.IntegerCompressor(dec)
         assert ic is not None
+
+        ic.init_decompressor()

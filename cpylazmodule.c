@@ -56,8 +56,8 @@ ArithmeticBitModel_dealloc(ArithmeticBitModelObject *self)
     PyObject_Del(self);
 }
 
-static PyObject *
-ArithmeticBitModel_init(ArithmeticBitModelObject *self, PyObject *args)
+static void
+_ArithmeticBitModel_init(ArithmeticBitModelObject *self)
 {
     // initialize equiprobable model
     self->bit_0_count = 1;
@@ -66,15 +66,20 @@ ArithmeticBitModel_init(ArithmeticBitModelObject *self, PyObject *args)
 
     // start with frequent updates
     self->update_cycle = self->bits_until_update = 4;
+}
 
-    Py_INCREF(Py_None);
+static PyObject *
+ArithmeticBitModel_init(ArithmeticBitModelObject *self, PyObject *args)
+{
+    _ArithmeticBitModel_init(self);
+
     return Py_None;
 }
 
 static int
 ArithmeticBitModel__init__(ArithmeticBitModelObject *self, PyObject *args, PyObject *kwargs)
 {   
-    ArithmeticBitModel_init(self, args);
+    _ArithmeticBitModel_init(self);
 
     return 0;
 }
@@ -907,7 +912,7 @@ ArithmeticDecoder_read_int(ArithmeticDecoderObject *self, PyObject *args){
 }
 
 static PyObject *
-_ArithmeticDecoder_create_symbol_model(ArithmeticModelObject *self, uint32_t num_symbols) {
+_ArithmeticDecoder_create_symbol_model(ArithmeticDecoderObject *self, uint32_t num_symbols) {
 
     PyObject *newargs = PyTuple_New(2);
     PyTuple_SetItem(newargs, 0, PyLong_FromUnsignedLong(num_symbols));
@@ -918,7 +923,7 @@ _ArithmeticDecoder_create_symbol_model(ArithmeticModelObject *self, uint32_t num
 }
 
 static PyObject *
-ArithmeticDecoder_create_symbol_model(ArithmeticModelObject *self, PyObject *args) {
+ArithmeticDecoder_create_symbol_model(ArithmeticDecoderObject *self, PyObject *args) {
     uint32_t num_symbols;
     if (!PyArg_ParseTuple(args, "I", &num_symbols)) {
         return NULL;
@@ -1101,47 +1106,50 @@ IntegerCompressor_dealloc(IntegerCompressorObject *self) {
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
-// static PyObject *
-// IntegerCompressor_init_decompressor(IntegerCompressorObject *self, PyObject *args){
+static PyObject *
+IntegerCompressor_init_decompressor(IntegerCompressorObject *self, PyObject *args){
 
-//     if(self.m_bits == NULL){
-//         self.m_bits = malloc(self.contexts * sizeof(PyObject *));
-//         self.m_corrector = malloc(self.contexts * sizeof(PyObject *));
-//         for(uint32_t i=0; i<self.contexts; i++) {
-//             PyObject *model = _ArithmeticDecoder_create_symbol_model(self->dec, self->corr_bits+1);
-//             Py_INCREF(model);
-//             self.m_bits[i] = model;
-//         }
+    if(self->m_bits == NULL){
+        self->m_bits = malloc(self->contexts * sizeof(PyObject *));
+        self->m_corrector = malloc(self->corr_bits * sizeof(PyObject *));
+        for(uint32_t i=0; i<self->contexts; i++) {
+            PyObject *model = _ArithmeticDecoder_create_symbol_model(
+                (ArithmeticDecoderObject *)self->dec, self->corr_bits+1);
+            Py_INCREF(model);
+            self->m_bits[i] = model;
+        }
 
-//         // create new ArithmeticBitModelObject
-//         PyObject *bitmodel = PyObject_CallObject((PyObject *)&ArithmeticBitModel_Type, NULL);
-//         self.m_corrector[0] = bitmodel;
+        PyObject *bitmodel = PyObject_CallObject((PyObject *)&ArithmeticBitModel_Type, NULL);
+        self->m_corrector[0] = bitmodel;
 
-//         for(int32_t i=1; i<self->corr_bits; i++){
-//             uint32_t num_symbols;
-//             if(i <= self->bits_high){
-//                 num_symbols = 1 << i;
-//             } else {
-//                 num_symbols = 1 << self->bits_high;
-//             } 
-//             PyObject *model = _ArithmeticDecoder_create_symbol_model(self->dec, num_symbols);
-//             Py_INCREF(model);
-//             self.m_corrector[i] = model;
-//         }
-//     }
+        for(uint32_t i=1; i<self->corr_bits; i++){
+            uint32_t num_symbols;
+            if(i <= self->bits_high){
+                num_symbols = 1 << i;
+            } else {
+                num_symbols = 1 << self->bits_high;
+            } 
+            PyObject *model = _ArithmeticDecoder_create_symbol_model((ArithmeticDecoderObject *)self->dec, num_symbols);
+            Py_INCREF(model);
+            self->m_corrector[i] = model;
+        }
+    }
 
-//     for(uint32_t i=0; i<self.contexts; i++) {
-//         ArithmeticModel_init(self.m_bits[i]);
-//     }
-//     for i in range(self.contexts):
-//         self.m_bits[i].init()
+    for(uint32_t i=0; i<self->contexts; i++) {
+        _ArithmeticModel_init((ArithmeticModelObject *)self->m_bits[i], NULL);
+    }
 
-//     self.m_corrector[0].init()
+    _ArithmeticBitModel_init((ArithmeticBitModelObject *)self->m_corrector[0]);
 
-//     for i in range(1, self.corr_bits):
-//         self.m_corrector[i].init()
+    for(uint32_t i=1; i<self->corr_bits; i++){
+        _ArithmeticModel_init((ArithmeticModelObject *)self->m_corrector[i], NULL);
+    }
+
+    Py_RETURN_NONE;
+}
 
 static PyMethodDef IntegerCompressor_methods[] = {
+    {"init_decompressor", (PyCFunction)IntegerCompressor_init_decompressor, METH_NOARGS, NULL},
     {NULL, NULL}  /* Sentinel */
 };
 
