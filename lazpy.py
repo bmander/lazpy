@@ -331,7 +331,8 @@ class Reader:
         point = []
 
         # if this is a new chunk
-        # read the first uncompressed point and then initialize them
+        # read the first uncompressed point and use it to initialize the reader
+        # functions
         if self.chunk_count == self.chunk_size:
             for reader_raw, reader_compressed in zip(self.readers_raw,
                                                      self.readers_compressed):
