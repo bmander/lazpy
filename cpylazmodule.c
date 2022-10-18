@@ -1357,6 +1357,78 @@ static PyTypeObject IntegerCompressor_Type = {
     0,                          /*tp_is_gc*/
 };
 
+// StreamingMedian5
+
+typedef struct {
+    int32_t values[5];
+    int32_t high;
+} StreamingMedian5;
+
+inline void StreamingMedian5_init(StreamingMedian5 *self) {
+    self->values[0] = 0;
+    self->values[1] = 0;
+    self->values[2] = 0;
+    self->values[3] = 0;
+    self->values[4] = 0;
+    self->high = 1;
+}
+
+inline void add(StreamingMedian5 *self, int32_t v){
+    if (self->high) {
+        if (v < self->values[2]) {
+            self->values[4] = self->values[3];
+            self->values[3] = self->values[2];
+            if (v < self->values[0]) {
+                self->values[2] = self->values[1];
+                self->values[1] = self->values[0];
+                self->values[0] = v;
+            } else if (v < self->values[1]) {
+                self->values[2] = self->values[1];
+                self->values[1] = v;
+            } else {
+                self->values[2] = v;
+            }
+        } else {
+            if (v < self->values[3]) {
+                self->values[4] = self->values[3];
+                self->values[3] = v;
+            } else {
+                self->values[4] = v;
+            }
+            self->high = 0;
+        }
+    } else {
+        if (self->values[2] < v) {
+            self->values[0] = self->values[1];
+            self->values[1] = self->values[2];
+            if (self->values[4] < v) {
+                self->values[2] = self->values[3];
+                self->values[3] = self->values[4];
+                self->values[4] = v;
+            } else if (self->values[3] < v) {
+                self->values[2] = self->values[3];
+                self->values[3] = v;
+            } else {
+                self->values[2] = v;
+            }
+        } else {
+            if (self->values[1] < v) {
+                self->values[0] = self->values[1];
+                self->values[1] = v;
+            } else {
+                self->values[0] = v;
+            }
+            self->high = 1;
+        }
+    }
+}
+
+inline int32_t get(StreamingMedian5* self)
+{
+    return self->values[2];
+}
+
+
 /* List of functions defined in the module */
 
 static PyMethodDef cpylaz_methods[] = {
