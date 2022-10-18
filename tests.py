@@ -442,12 +442,19 @@ class TestIntegerCompressor:
         ic.init_decompressor()
 
         assert ic.decompress(0) == 1051
+        assert ic.k == 11
         assert ic.decompress(1051) == 998
+        assert ic.k == 6
         assert ic.decompress(998) == 997
+        assert ic.k == 1
         assert ic.decompress(997) == 865
-        # assert ic.decompress(865) == 64006
-        # assert ic.decompress(64006) == 64001
-        # assert ic.decompress(64001) == 64027
+        assert ic.k == 8
+        assert ic.decompress(865) == 64006
+        assert ic.k == 12
+        assert ic.decompress(64006) == 64001
+        assert ic.k == 3
+        assert ic.decompress(64001) == 64027
+        assert ic.k == 5
 
 
 class TestCIntegerCompressor:
@@ -479,11 +486,16 @@ class TestCIntegerCompressor:
         ic.init_decompressor()
 
         assert ic.decompress(0) == 1051
+        assert ic.k == 11
         assert ic.decompress(1051) == 998
+        assert ic.k == 6
         assert ic.decompress(998) == 997
+        assert ic.k == 1
         assert ic.decompress(997) == 865
-        # TODO the C impl behavior diverges from the python impl but doesn't
-        # seem to affect reading; at some point reconcile the two
-        # assert ic.decompress(865) == 64006
-        # assert ic.decompress(64006) == 64001
-        # assert ic.decompress(64001) == 64027
+        assert ic.k == 8
+        assert ic.decompress(865) == 64006
+        assert ic.k == 12
+        assert ic.decompress(64006) == 64001
+        assert ic.k == 3
+        assert ic.decompress(64001) == 64027
+        assert ic.k == 5

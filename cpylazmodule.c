@@ -1163,11 +1163,13 @@ IntegerCompressor_init_decompressor(IntegerCompressorObject *self, PyObject *arg
     Py_RETURN_NONE;
 }
 
-static uint32_t
+static int32_t
 _IntegerCompressor_read_corrector(IntegerCompressorObject *self, ArithmeticModelObject *model){
-    uint32_t c, k1, c1;
+    uint32_t k1, c1;
+    int32_t c;
 
     self->k = _ArithmeticDecoder_decode_symbol((ArithmeticDecoderObject *)self->dec, model);
+
 
     if(self->k != 0) {
         if(self->k < 32) {
@@ -1179,7 +1181,7 @@ _IntegerCompressor_read_corrector(IntegerCompressorObject *self, ArithmeticModel
             }
 
             // translate c back into its correct interval
-            if(c >= (1u << (self->k-1u))) {
+            if(c >= (1 << (self->k-1))) {
                 c += 1;
             } else {
                 c -= (1u << self->k)-1u;
@@ -1195,15 +1197,15 @@ _IntegerCompressor_read_corrector(IntegerCompressorObject *self, ArithmeticModel
     return c;
 }
 
-static uint32_t
-_IntegerCompressor_decompress(IntegerCompressorObject *self, uint32_t pred, uint32_t context){
-    uint32_t real;
+static int32_t
+_IntegerCompressor_decompress(IntegerCompressorObject *self, int32_t pred, uint32_t context){
+    int32_t real;
 
     real = pred + _IntegerCompressor_read_corrector(self, (ArithmeticModelObject *)self->m_bits[context]);
 
     if(real < 0) {
         real += self->corr_range;
-    } else if(real >= self->corr_range) {
+    } else if(real >= (int32_t)self->corr_range) {
         real -= self->corr_range;
     }
 
@@ -1212,16 +1214,16 @@ _IntegerCompressor_decompress(IntegerCompressorObject *self, uint32_t pred, uint
 
 static PyObject *
 IntegerCompressor_decompress(IntegerCompressorObject *self, PyObject *args){
-    uint32_t pred, real;
+    int32_t pred, real;
     uint32_t context = 0;
 
-    if(!PyArg_ParseTuple(args, "I|I", &pred, &context)) {
+    if(!PyArg_ParseTuple(args, "i|I", &pred, &context)) {
         return NULL;
     }
 
     real = _IntegerCompressor_decompress(self, pred, context);
 
-    return PyLong_FromUnsignedLong(real);
+    return PyLong_FromLong(real);
 }
 
 
@@ -1287,6 +1289,11 @@ IntegerCompressor_get_range(IntegerCompressorObject *self, void *closure) {
     return PyLong_FromUnsignedLong(self->range);
 }
 
+static PyObject *
+IntegerCompressor_get_k(IntegerCompressorObject *self, void *closure) {
+    return PyLong_FromUnsignedLong(self->k);
+}
+
 static PyMethodDef IntegerCompressor_methods[] = {
     {"init_decompressor", (PyCFunction)IntegerCompressor_init_decompressor, METH_NOARGS, NULL},
     {"get_m_bits", (PyCFunction)IntegerCompressor_get_m_bits, METH_VARARGS, NULL},
@@ -1302,6 +1309,7 @@ PyGetSetDef IntegerCompressor_getset[] = {
     {"contexts", (getter)IntegerCompressor_get_contexts, NULL, "Contexts", NULL},
     {"bits_high", (getter)IntegerCompressor_get_bits_high, NULL, "Bits high", NULL},
     {"range", (getter)IntegerCompressor_get_range, NULL, "Range", NULL},
+    {"k", (getter)IntegerCompressor_get_k, NULL, "K", NULL},
     {NULL}  /* Sentinel */
 };
 

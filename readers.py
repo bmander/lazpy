@@ -1,4 +1,4 @@
-from compressor import IntegerCompressor
+from cpylaz import IntegerCompressor
 from utils import StreamingMedian5, u8_fold, u32_zero_bit_0, unsigned_int
 from lastypes import LasPoint10
 
