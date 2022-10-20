@@ -499,3 +499,15 @@ class TestCIntegerCompressor:
         assert ic.k == 3
         assert ic.decompress(64001) == 64027
         assert ic.k == 5
+
+class Testread_item_compressed_point10_v2:
+    def test_create(self):
+        fp = io.BytesIO(file_contents)
+        dec = cpylaz.ArithmeticDecoder(fp)
+        dec.start()
+
+        ricp = cpylaz.read_item_compressed_point10_v2(dec)
+
+        assert ricp is not None
+
+        assert ricp.dec == dec

@@ -1428,7 +1428,161 @@ inline int32_t get(StreamingMedian5* self)
     return self->values[2];
 }
 
+const uint8_t number_return_map[8][8] = 
+{
+  { 15, 14, 13, 12, 11, 10,  9,  8 },
+  { 14,  0,  1,  3,  6, 10, 10,  9 },
+  { 13,  1,  2,  4,  7, 11, 11, 10 },
+  { 12,  3,  4,  5,  8, 12, 12, 11 },
+  { 11,  6,  7,  8,  9, 13, 13, 12 },
+  { 10, 10, 11, 12, 13, 14, 14, 13 },
+  {  9, 10, 11, 12, 13, 14, 15, 14 },
+  {  8,  9, 10, 11, 12, 13, 14, 15 }
+};
 
+const uint8_t number_return_level[8][8] = 
+{
+  {  0,  1,  2,  3,  4,  5,  6,  7 },
+  {  1,  0,  1,  2,  3,  4,  5,  6 },
+  {  2,  1,  0,  1,  2,  3,  4,  5 },
+  {  3,  2,  1,  0,  1,  2,  3,  4 },
+  {  4,  3,  2,  1,  0,  1,  2,  3 },
+  {  5,  4,  3,  2,  1,  0,  1,  2 },
+  {  6,  5,  4,  3,  2,  1,  0,  1 },
+  {  7,  6,  5,  4,  3,  2,  1,  0 }
+};
+
+typedef struct {
+    PyObject_HEAD
+    ArithmeticDecoderObject *dec;
+    ArithmeticModelObject *m_changed_values;
+    IntegerCompressorObject *ic_intensity;
+    ArithmeticModelObject m_scan_rank[2];
+    IntegerCompressorObject *ic_point_source_id;
+    ArithmeticModelObject m_bit_byte[256];
+    ArithmeticModelObject m_classification[256];
+    ArithmeticModelObject m_user_data[256];
+    IntegerCompressorObject *ic_dx;
+    IntegerCompressorObject *ic_dy;
+    IntegerCompressorObject *ic_z;
+    StreamingMedian5 *last_x_diff_median5;
+    StreamingMedian5 *last_y_diff_median5;
+
+    uint16_t last_intensity[16];
+    int32_t last_height[8];
+    uint8_t last_item[20];
+} read_item_compressed_point10_v2Object;
+
+static void
+read_item_compressed_point10_v2_dealloc(read_item_compressed_point10_v2Object* self)
+{
+    Py_XDECREF(self->dec);
+    Py_XDECREF(self->m_changed_values);
+    // Py_XDECREF(self->ic_intensity);
+    // for(int i = 0; i < 2; i++)
+    //     Py_XDECREF(&self->m_scan_rank[i]);
+    // Py_XDECREF(self->ic_point_source_id);
+    // for(int i = 0; i < 256; i++)
+    //     Py_XDECREF(&self->m_bit_byte[i]);
+    // for(int i = 0; i < 256; i++)
+    //     Py_XDECREF(&self->m_classification[i]);
+    // for(int i = 0; i < 256; i++)
+    //     Py_XDECREF(&self->m_user_data[i]);
+    // Py_XDECREF(self->ic_dx);
+    // Py_XDECREF(self->ic_dy);
+    // Py_XDECREF(self->ic_z);
+    // Py_XDECREF(self->last_x_diff_median5);
+    // Py_XDECREF(self->last_y_diff_median5);
+
+    Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+static int
+_read_item_compressed_point10_v2__init__(read_item_compressed_point10_v2Object *self, ArithmeticDecoderObject *dec)
+{
+    self->dec = dec;
+    Py_INCREF(dec);
+
+    self->m_changed_values = (ArithmeticModelObject *)_ArithmeticDecoder_create_symbol_model(self->dec, 64);
+
+    return 0;
+
+}
+
+static int
+read_item_compressed_point10_v2__init__(read_item_compressed_point10_v2Object *self, PyObject *args, PyObject *kwds)
+{
+
+    PyObject *argdec;
+    if (!PyArg_ParseTuple(args, "O!", &ArithmeticDecoder_Type, &argdec)) {
+        return -1;
+    }
+    ArithmeticDecoderObject *dec = (ArithmeticDecoderObject *)argdec;
+
+    return _read_item_compressed_point10_v2__init__(self, (ArithmeticDecoderObject *)dec);
+}
+
+static PyObject *
+read_item_compressed_point10_v2_get_dec(read_item_compressed_point10_v2Object *self, void *closure)
+{
+    Py_INCREF(self->dec);
+    return (PyObject *)self->dec;
+}
+
+
+static PyMethodDef read_item_compressed_point10_v2_methods[] = {
+    {NULL, NULL}  /* Sentinel */
+};
+
+PyGetSetDef read_item_compressed_point10_v2_getset[] = {
+    {"dec", (getter)read_item_compressed_point10_v2_get_dec, NULL, "decoder", NULL},
+    {NULL}  /* Sentinel */
+};
+
+
+static PyTypeObject read_item_compressed_point10_v2_Type = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    "cpylaz.read_item_compressed_point10_v2", /*tp_name*/
+    sizeof(read_item_compressed_point10_v2Object), /*tp_basicsize*/
+    0,                          /*tp_itemsize*/
+    /* methods */
+    (destructor)read_item_compressed_point10_v2_dealloc,    /*tp_dealloc*/
+    0,                          /*tp_vectorcall_offset*/
+    (getattrfunc)0,             /*tp_getattr*/
+    0,   /*tp_setattr*/
+    0,                          /*tp_as_async*/
+    0,                          /*tp_repr*/
+    0,                          /*tp_as_number*/
+    0,                          /*tp_as_sequence*/
+    0,                          /*tp_as_mapping*/
+    0,                          /*tp_hash*/
+    0,                          /*tp_call*/
+    0,                          /*tp_str*/
+    0, /*tp_getattro*/
+    0,                          /*tp_setattro*/
+    0,                          /*tp_as_buffer*/
+    Py_TPFLAGS_DEFAULT,         /*tp_flags*/
+    0,                          /*tp_doc*/
+    0,                          /*tp_traverse*/
+    0,                          /*tp_clear*/
+    0,                          /*tp_richcompare*/
+    0,                          /*tp_weaklistoffset*/
+    0,                          /*tp_iter*/
+    0,                          /*tp_iternext*/
+    read_item_compressed_point10_v2_methods,                /*tp_methods*/
+    0,                          /*tp_members*/
+    read_item_compressed_point10_v2_getset,                          /*tp_getset*/
+    0,                          /*tp_base*/
+    0,                          /*tp_dict*/
+    0,                          /*tp_descr_get*/
+    0,                          /*tp_descr_set*/
+    0,                          /*tp_dictoffset*/
+    (initproc)read_item_compressed_point10_v2__init__,                          /*tp_init*/
+    0,                          /*tp_alloc*/
+    PyType_GenericNew,                          /*tp_new*/
+    0,                          /*tp_free*/
+    0,                          /*tp_is_gc*/
+};
 /* List of functions defined in the module */
 
 static PyMethodDef cpylaz_methods[] = {
@@ -1478,6 +1632,11 @@ cpylaz_exec(PyObject *m)
     if (PyType_Ready(&IntegerCompressor_Type) < 0)
         goto fail;
     PyModule_AddObject(m, "IntegerCompressor", (PyObject *)&IntegerCompressor_Type);
+
+    read_item_compressed_point10_v2_Type.tp_base = &PyBaseObject_Type;
+    if (PyType_Ready(&read_item_compressed_point10_v2_Type) < 0)
+        goto fail;
+    PyModule_AddObject(m, "read_item_compressed_point10_v2", (PyObject *)&read_item_compressed_point10_v2_Type);
 
     PyModule_AddIntConstant(m, "DM_LENGTH_SHIFT", DM_LENGTH_SHIFT);
 
