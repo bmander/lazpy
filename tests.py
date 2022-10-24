@@ -4,6 +4,7 @@ import encoder
 import pytest
 import compressor
 import io
+import sys
 
 
 class TestArithmeticModel:
@@ -511,3 +512,6 @@ class Testread_item_compressed_point10_v2:
         assert ricp is not None
 
         assert ricp.dec == dec
+
+        assert type(ricp.m_changed_values) == cpylaz.ArithmeticModel
+        assert type(ricp.ic_intensity) == cpylaz.IntegerCompressor

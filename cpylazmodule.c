@@ -1041,28 +1041,25 @@ typedef struct {
     PyObject **m_corrector;
 } IntegerCompressorObject;
 
+static PyTypeObject IntegerCompressor_Type;
+
 static int
-IntegerCompressor__init__(IntegerCompressorObject *self, PyObject *args, PyObject *kwargs) {
-    PyObject *enc_or_dec;
-    uint32_t bits=16;
-    uint32_t contexts=1;
-    uint32_t bits_high=8;
-    uint32_t range=0;
-    if (!PyArg_ParseTuple(args, "O|IIII", &enc_or_dec, &bits, &contexts, &bits_high, &range)) {
-        return -1;
+_IntegerCompressor__init__(IntegerCompressorObject *self, PyObject *enc, 
+                           PyObject *dec, uint32_t bits, uint32_t contexts, 
+                           uint32_t bits_high, uint32_t range) {
+
+    if(enc) {
+        Py_INCREF(enc);
+        self->enc = enc;
+    } else {
+        self->enc = Py_None;
     }
 
-    if (PyObject_IsInstance(enc_or_dec, (PyObject *)&ArithmeticEncoder_Type)) {
-        self->enc = enc_or_dec;
-        Py_INCREF(self->enc);
-        self->dec = Py_None;
-    } else if (PyObject_IsInstance(enc_or_dec, (PyObject *)&ArithmeticDecoder_Type)) {
-        self->dec = enc_or_dec;
-        Py_INCREF(self->dec);
-        self->enc = Py_None;
+    if(dec) {
+        Py_INCREF(dec);
+        self->dec = dec;
     } else {
-        PyErr_SetString(PyExc_TypeError, "Argument must be an encoder or decoder");
-        return -1;
+        self->dec = Py_None;
     }
 
     self->bits = bits;
@@ -1100,6 +1097,44 @@ IntegerCompressor__init__(IntegerCompressorObject *self, PyObject *args, PyObjec
     self->k = 0;
 
     return 0;
+}
+
+static int
+IntegerCompressor__init__(IntegerCompressorObject *self, PyObject *args, PyObject *kwargs) {
+
+    uint32_t bits=16;
+    uint32_t contexts=1;
+    uint32_t bits_high=8;
+    uint32_t range=0;
+    PyObject *enc;
+    PyObject *dec;
+
+    PyObject *enc_or_dec;
+    if (!PyArg_ParseTuple(args, "O|IIII", &enc_or_dec, &bits, &contexts, &bits_high, &range)) {
+        return -1;
+    }
+
+    if (PyObject_IsInstance(enc_or_dec, (PyObject *)&ArithmeticEncoder_Type)) {
+        enc = enc_or_dec;
+        dec = NULL;
+    } else if (PyObject_IsInstance(enc_or_dec, (PyObject *)&ArithmeticDecoder_Type)) {
+        enc = NULL;
+        dec = enc_or_dec;
+    } else {
+        PyErr_SetString(PyExc_TypeError, "Argument must be an encoder or decoder");
+        return -1;
+    }
+
+    return _IntegerCompressor__init__(self, enc, dec, bits, contexts, bits_high, range);
+}
+
+static PyObject *
+_IntegerCompressor_create(ArithmeticDecoderObject *dec, uint32_t bits, uint32_t contexts) {
+
+    PyObject *args = Py_BuildValue("(OII)", dec, bits, contexts);
+    PyObject *ic = PyObject_CallObject((PyObject *)&IntegerCompressor_Type, args);
+
+    return ic;
 }
 
 static void
@@ -1457,11 +1492,11 @@ typedef struct {
     ArithmeticDecoderObject *dec;
     ArithmeticModelObject *m_changed_values;
     IntegerCompressorObject *ic_intensity;
-    ArithmeticModelObject m_scan_rank[2];
+    ArithmeticModelObject *m_scan_rank[2];
     IntegerCompressorObject *ic_point_source_id;
-    ArithmeticModelObject m_bit_byte[256];
-    ArithmeticModelObject m_classification[256];
-    ArithmeticModelObject m_user_data[256];
+    ArithmeticModelObject *m_bit_byte[256];
+    ArithmeticModelObject *m_classification[256];
+    ArithmeticModelObject *m_user_data[256];
     IntegerCompressorObject *ic_dx;
     IntegerCompressorObject *ic_dy;
     IntegerCompressorObject *ic_z;
@@ -1478,7 +1513,7 @@ read_item_compressed_point10_v2_dealloc(read_item_compressed_point10_v2Object* s
 {
     Py_XDECREF(self->dec);
     Py_XDECREF(self->m_changed_values);
-    // Py_XDECREF(self->ic_intensity);
+    Py_XDECREF(self->ic_intensity);
     // for(int i = 0; i < 2; i++)
     //     Py_XDECREF(&self->m_scan_rank[i]);
     // Py_XDECREF(self->ic_point_source_id);
@@ -1504,6 +1539,9 @@ _read_item_compressed_point10_v2__init__(read_item_compressed_point10_v2Object *
     Py_INCREF(dec);
 
     self->m_changed_values = (ArithmeticModelObject *)_ArithmeticDecoder_create_symbol_model(self->dec, 64);
+    self->ic_intensity = (IntegerCompressorObject *)_IntegerCompressor_create(self->dec, 16, 4);
+    for(int i = 0; i < 2; i++)
+        self->m_scan_rank[i] = (ArithmeticModelObject *)_ArithmeticDecoder_create_symbol_model(self->dec, 256);
 
     return 0;
 
@@ -1529,6 +1567,31 @@ read_item_compressed_point10_v2_get_dec(read_item_compressed_point10_v2Object *s
     return (PyObject *)self->dec;
 }
 
+static PyObject *
+read_item_compressed_point10_v2_get_m_changed_values(read_item_compressed_point10_v2Object *self, void *closure)
+{
+    Py_INCREF(self->m_changed_values);
+    return (PyObject *)self->m_changed_values;
+}
+
+static PyObject *
+read_item_compressed_point10_v2_get_ic_intensity(read_item_compressed_point10_v2Object *self, void *closure)
+{
+    Py_INCREF(self->ic_intensity);
+    return (PyObject *)self->ic_intensity;
+}
+
+static PyObject *
+read_item_compressed_point10_v2_get_m_scan_rank(read_item_compressed_point10_v2Object *self, void *closure)
+{
+    PyObject *result = PyTuple_New(2);
+    for(int i = 0; i < 2; i++) {
+        Py_INCREF(self->m_scan_rank[i]);
+        PyTuple_SetItem(result, i, (PyObject *)self->m_scan_rank[i]);
+    }
+    return result;
+}
+
 
 static PyMethodDef read_item_compressed_point10_v2_methods[] = {
     {NULL, NULL}  /* Sentinel */
@@ -1536,6 +1599,9 @@ static PyMethodDef read_item_compressed_point10_v2_methods[] = {
 
 PyGetSetDef read_item_compressed_point10_v2_getset[] = {
     {"dec", (getter)read_item_compressed_point10_v2_get_dec, NULL, "decoder", NULL},
+    {"m_changed_values", (getter)read_item_compressed_point10_v2_get_m_changed_values, NULL, "m_changed_values", NULL},
+    {"ic_intensity", (getter)read_item_compressed_point10_v2_get_ic_intensity, NULL, "ic_intensity", NULL},
+    {"m_scan_rank", (getter)read_item_compressed_point10_v2_get_m_scan_rank, NULL, "m_scan_rank", NULL},
     {NULL}  /* Sentinel */
 };
 
