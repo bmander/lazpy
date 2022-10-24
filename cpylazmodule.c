@@ -1500,8 +1500,8 @@ typedef struct {
     IntegerCompressorObject *ic_dx;
     IntegerCompressorObject *ic_dy;
     IntegerCompressorObject *ic_z;
-    StreamingMedian5 *last_x_diff_median5;
-    StreamingMedian5 *last_y_diff_median5;
+    StreamingMedian5 last_x_diff_median5[16];
+    StreamingMedian5 last_y_diff_median5[16];
 
     uint16_t last_intensity[16];
     int32_t last_height[8];
@@ -1514,20 +1514,18 @@ read_item_compressed_point10_v2_dealloc(read_item_compressed_point10_v2Object* s
     Py_XDECREF(self->dec);
     Py_XDECREF(self->m_changed_values);
     Py_XDECREF(self->ic_intensity);
-    // for(int i = 0; i < 2; i++)
-    //     Py_XDECREF(&self->m_scan_rank[i]);
-    // Py_XDECREF(self->ic_point_source_id);
-    // for(int i = 0; i < 256; i++)
-    //     Py_XDECREF(&self->m_bit_byte[i]);
-    // for(int i = 0; i < 256; i++)
-    //     Py_XDECREF(&self->m_classification[i]);
-    // for(int i = 0; i < 256; i++)
-    //     Py_XDECREF(&self->m_user_data[i]);
-    // Py_XDECREF(self->ic_dx);
-    // Py_XDECREF(self->ic_dy);
-    // Py_XDECREF(self->ic_z);
-    // Py_XDECREF(self->last_x_diff_median5);
-    // Py_XDECREF(self->last_y_diff_median5);
+    for(int i = 0; i < 2; i++)
+        Py_XDECREF(&self->m_scan_rank[i]);
+    Py_XDECREF(self->ic_point_source_id);
+    for(int i = 0; i < 256; i++)
+        Py_XDECREF(&self->m_bit_byte[i]);
+    for(int i = 0; i < 256; i++)
+        Py_XDECREF(&self->m_classification[i]);
+    for(int i = 0; i < 256; i++)
+        Py_XDECREF(&self->m_user_data[i]);
+    Py_XDECREF(self->ic_dx);
+    Py_XDECREF(self->ic_dy);
+    Py_XDECREF(self->ic_z);
 
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
@@ -1542,7 +1540,31 @@ _read_item_compressed_point10_v2__init__(read_item_compressed_point10_v2Object *
     self->ic_intensity = (IntegerCompressorObject *)_IntegerCompressor_create(self->dec, 16, 4);
     for(int i = 0; i < 2; i++)
         self->m_scan_rank[i] = (ArithmeticModelObject *)_ArithmeticDecoder_create_symbol_model(self->dec, 256);
+    self->ic_point_source_id = (IntegerCompressorObject *)_IntegerCompressor_create(self->dec, 16, 1);
+    for(int i = 0; i < 256; i++)
+        self->m_bit_byte[i] = NULL;
+    for(int i = 0; i < 256; i++)
+        self->m_classification[i] = NULL;
+    for(int i = 0; i < 256; i++)
+        self->m_user_data[i] = NULL;
+    self->ic_dx = (IntegerCompressorObject *)_IntegerCompressor_create(self->dec, 32, 2);
+    self->ic_dy = (IntegerCompressorObject *)_IntegerCompressor_create(self->dec, 32, 22);
+    self->ic_z = (IntegerCompressorObject *)_IntegerCompressor_create(self->dec, 32, 20);
 
+    for(int i = 0; i < 16; i++) {
+        StreamingMedian5_init(&self->last_x_diff_median5[i]);
+        StreamingMedian5_init(&self->last_y_diff_median5[i]);
+    }
+
+    for(int i = 0; i < 16; i++)
+        self->last_intensity[i] = 0;
+
+    for(int i = 0; i < 8; i++)
+        self->last_height[i] = 0;
+
+    for(int i = 0; i < 20; i++)
+        self->last_item[i] = 0;
+    
     return 0;
 
 }
