@@ -506,6 +506,19 @@ class TestLASpoint:
         point = cpylaz.LASpoint()
 
         assert type(point) == cpylaz.LASpoint
+        assert point.X == 0
+        assert point.Y == 0
+        assert point.Z == 0
+        assert point.intensity == 0
+        assert point.return_number == 0
+        assert point.number_of_returns == 0
+        assert point.scan_direction_flag == 0
+        assert point.edge_of_flight_line == 0
+        assert point.classification == 0
+        assert point.scan_angle_rank == 0
+        assert point.user_data == 0
+        assert point.point_source_ID == 0
+
 
 class Testread_item_compressed_point10_v2:
     def test_create(self):

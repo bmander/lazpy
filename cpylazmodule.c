@@ -1548,6 +1548,58 @@ LASpoint_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
     return (PyObject *)self;
 }
 
+static PyObject *
+LASpoint_getattr(LASpointObject *self, char *name)
+{
+    if (strcmp(name, "X") == 0) {
+        return PyLong_FromUnsignedLong(self->point.X);
+    }
+    if (strcmp(name, "Y") == 0) {
+        return PyLong_FromUnsignedLong(self->point.Y);
+    }
+    if (strcmp(name, "Z") == 0) {
+        return PyLong_FromUnsignedLong(self->point.Z);
+    }
+    if (strcmp(name, "intensity") == 0) {
+        return PyLong_FromUnsignedLong(self->point.intensity);
+    }
+    if (strcmp(name, "return_number") == 0) {
+        return PyLong_FromUnsignedLong(self->point.return_number);
+    }
+    if (strcmp(name, "number_of_returns") == 0) {
+        return PyLong_FromUnsignedLong(self->point.number_of_returns);
+    }
+    if (strcmp(name, "scan_direction_flag") == 0) {
+        return PyLong_FromUnsignedLong(self->point.scan_direction_flag);
+    }
+    if (strcmp(name, "edge_of_flight_line") == 0) {
+        return PyLong_FromUnsignedLong(self->point.edge_of_flight_line);
+    }
+    if (strcmp(name, "classification") == 0) {
+        return PyLong_FromUnsignedLong(self->point.classification);
+    }
+    if (strcmp(name, "synthetic_flag") == 0) {
+        return PyLong_FromUnsignedLong(self->point.synthetic_flag);
+    }
+    if (strcmp(name, "keypoint_flag") == 0) {
+        return PyLong_FromUnsignedLong(self->point.keypoint_flag);
+    }
+    if (strcmp(name, "withheld_flag") == 0) {
+        return PyLong_FromUnsignedLong(self->point.withheld_flag);
+    }
+    if (strcmp(name, "scan_angle_rank") == 0) {
+        return PyLong_FromLong(self->point.scan_angle_rank);
+    }
+    if (strcmp(name, "user_data") == 0) {
+        return PyLong_FromUnsignedLong(self->point.user_data);
+    }
+    if (strcmp(name, "point_source_ID") == 0) {
+        return PyLong_FromUnsignedLong(self->point.point_source_ID);
+    }
+
+    return PyObject_GenericGetAttr((PyObject *)self, PyUnicode_FromString(name));
+}
+
 static PyMethodDef LASpoint_methods[] = {
     {NULL}  /* Sentinel */
 };
@@ -1579,7 +1631,7 @@ static PyTypeObject LASpoint_Type = {
     /* methods */
     (destructor)LASpoint_dealloc,    /*tp_dealloc*/
     0,                          /*tp_vectorcall_offset*/
-    (getattrfunc)0,             /*tp_getattr*/
+    (getattrfunc)LASpoint_getattr,             /*tp_getattr*/
     0,   /*tp_setattr*/
     0,                          /*tp_as_async*/
     0,                          /*tp_repr*/
