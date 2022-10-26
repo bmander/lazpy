@@ -501,6 +501,12 @@ class TestCIntegerCompressor:
         assert ic.decompress(64001) == 64027
         assert ic.k == 5
 
+class TestLASpoint:
+    def test_create(self):
+        point = cpylaz.LASpoint()
+
+        assert type(point) == cpylaz.LASpoint
+
 class Testread_item_compressed_point10_v2:
     def test_create(self):
         fp = io.BytesIO(file_contents)
@@ -515,3 +521,8 @@ class Testread_item_compressed_point10_v2:
 
         assert type(ricp.m_changed_values) == cpylaz.ArithmeticModel
         assert type(ricp.ic_intensity) == cpylaz.IntegerCompressor
+
+        m_scan_rank = ricp.m_scan_rank
+        assert len(m_scan_rank) == 2
+        assert type(m_scan_rank[0]) == cpylaz.ArithmeticModel
+        assert type(m_scan_rank[1]) == cpylaz.ArithmeticModel

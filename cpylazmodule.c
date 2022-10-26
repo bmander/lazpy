@@ -1157,7 +1157,7 @@ IntegerCompressor_dealloc(IntegerCompressorObject *self) {
 }
 
 static PyObject *
-IntegerCompressor_init_decompressor(IntegerCompressorObject *self, PyObject *args){
+_IntegerCompressor_init_decompressor(IntegerCompressorObject *self){
 
     if(self->m_bits == NULL){
         self->m_bits = malloc(self->contexts * sizeof(PyObject *));
@@ -1196,6 +1196,11 @@ IntegerCompressor_init_decompressor(IntegerCompressorObject *self, PyObject *arg
     }
 
     Py_RETURN_NONE;
+}
+
+static PyObject *
+IntegerCompressor_init_decompressor(IntegerCompressorObject *self, PyObject *args){
+    return _IntegerCompressor_init_decompressor(self);
 }
 
 static int32_t
@@ -1488,6 +1493,129 @@ const uint8_t number_return_level[8][8] =
 };
 
 typedef struct {
+    uint32_t X;
+    uint32_t Y;
+    uint32_t Z;
+    uint16_t intensity;
+    uint8_t return_number : 3;
+    uint8_t number_of_returns : 3;
+    uint8_t scan_direction_flag : 1;
+    uint8_t edge_of_flight_line : 1;
+    uint8_t classification : 5;
+    uint8_t synthetic_flag : 1;
+    uint8_t keypoint_flag : 1;
+    uint8_t withheld_flag : 1;
+    int8_t scan_angle_rank;
+    uint8_t user_data;
+    uint16_t point_source_ID;
+} LASpoint;
+
+typedef struct {
+    PyObject_HEAD
+    LASpoint point;
+} LASpointObject;
+
+static void
+LASpoint_dealloc(LASpointObject* self)
+{
+    Py_TYPE(self)->tp_free((PyObject*)self);
+}
+
+static PyObject *
+LASpoint_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    LASpointObject *self;
+
+    self = (LASpointObject *)type->tp_alloc(type, 0);
+    if (self != NULL) {
+        self->point.X = 0;
+        self->point.Y = 0;
+        self->point.Z = 0;
+        self->point.intensity = 0;
+        self->point.return_number = 0;
+        self->point.number_of_returns = 0;
+        self->point.scan_direction_flag = 0;
+        self->point.edge_of_flight_line = 0;
+        self->point.classification = 0;
+        self->point.synthetic_flag = 0;
+        self->point.keypoint_flag = 0;
+        self->point.withheld_flag = 0;
+        self->point.scan_angle_rank = 0;
+        self->point.user_data = 0;
+        self->point.point_source_ID = 0;
+    }
+
+    return (PyObject *)self;
+}
+
+static PyMethodDef LASpoint_methods[] = {
+    {NULL}  /* Sentinel */
+};
+
+PyGetSetDef LASpoint_getset[] = {
+    // {"X", (getter)LASpoint_get_X, (setter)LASpoint_set_X, "X", NULL},
+    // {"Y", (getter)LASpoint_get_Y, (setter)LASpoint_set_Y, "Y", NULL},
+    // {"Z", (getter)LASpoint_get_Z, (setter)LASpoint_set_Z, "Z", NULL},
+    // {"intensity", (getter)LASpoint_get_intensity, (setter)LASpoint_set_intensity, "intensity", NULL},
+    // {"return_number", (getter)LASpoint_get_return_number, (setter)LASpoint_set_return_number, "return_number", NULL},
+    // {"number_of_returns", (getter)LASpoint_get_number_of_returns, (setter)LASpoint_set_number_of_returns, "number_of_returns", NULL},
+    // {"scan_direction_flag", (getter)LASpoint_get_scan_direction_flag, (setter)LASpoint_set_scan_direction_flag, "scan_direction_flag", NULL},
+    // {"edge_of_flight_line", (getter)LASpoint_get_edge_of_flight_line, (setter)LASpoint_set_edge_of_flight_line, "edge_of_flight_line", NULL},
+    // {"classification", (getter)LASpoint_get_classification, (setter)LASpoint_set_classification, "classification", NULL},
+    // {"synthetic_flag", (getter)LASpoint_get_synthetic_flag, (setter)LASpoint_set_synthetic_flag, "synthetic_flag", NULL},
+    // {"keypoint_flag", (getter)LASpoint_get_keypoint_flag, (setter)LASpoint_set_keypoint_flag, "keypoint_flag", NULL},
+    // {"withheld_flag", (getter)LASpoint_get_withheld_flag, (setter)LASpoint_set_withheld_flag, "withheld_flag", NULL},
+    // {"scan_angle_rank", (getter)LASpoint_get_scan_angle_rank, (setter)LASpoint_set_scan_angle_rank, "scan_angle_rank", NULL},
+    // {"user_data", (getter)LASpoint_get_user_data, (setter)LASpoint_set_user_data, "user_data", NULL},
+    // {"point_source_ID", (getter)LASpoint_get_point_source_ID, (setter)LASpoint_set_point_source_ID, "point_source_ID", NULL},
+    {NULL}  /* Sentinel */
+};
+
+static PyTypeObject LASpoint_Type = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    "cpylaz.LASpoint", /*tp_name*/
+    sizeof(LASpointObject), /*tp_basicsize*/
+    0,                          /*tp_itemsize*/
+    /* methods */
+    (destructor)LASpoint_dealloc,    /*tp_dealloc*/
+    0,                          /*tp_vectorcall_offset*/
+    (getattrfunc)0,             /*tp_getattr*/
+    0,   /*tp_setattr*/
+    0,                          /*tp_as_async*/
+    0,                          /*tp_repr*/
+    0,                          /*tp_as_number*/
+    0,                          /*tp_as_sequence*/
+    0,                          /*tp_as_mapping*/
+    0,                          /*tp_hash*/
+    0,                          /*tp_call*/
+    0,                          /*tp_str*/
+    0, /*tp_getattro*/
+    0,                          /*tp_setattro*/
+    0,                          /*tp_as_buffer*/
+    Py_TPFLAGS_DEFAULT,         /*tp_flags*/
+    0,                          /*tp_doc*/
+    0,                          /*tp_traverse*/
+    0,                          /*tp_clear*/
+    0,                          /*tp_richcompare*/
+    0,                          /*tp_weaklistoffset*/
+    0,                          /*tp_iter*/
+    0,                          /*tp_iternext*/
+    LASpoint_methods,                /*tp_methods*/
+    0,                          /*tp_members*/
+    LASpoint_getset,                          /*tp_getset*/
+    0,                          /*tp_base*/
+    0,                          /*tp_dict*/
+    0,                          /*tp_descr_get*/
+    0,                          /*tp_descr_set*/
+    0,                          /*tp_dictoffset*/
+    (initproc)0,                          /*tp_init*/
+    0,                          /*tp_alloc*/
+    LASpoint_new,                          /*tp_new*/
+    0,                          /*tp_free*/
+    0,                          /*tp_is_gc*/
+};
+
+typedef struct {
     PyObject_HEAD
     ArithmeticDecoderObject *dec;
     ArithmeticModelObject *m_changed_values;
@@ -1580,6 +1708,50 @@ read_item_compressed_point10_v2__init__(read_item_compressed_point10_v2Object *s
     ArithmeticDecoderObject *dec = (ArithmeticDecoderObject *)argdec;
 
     return _read_item_compressed_point10_v2__init__(self, (ArithmeticDecoderObject *)dec);
+}
+
+static PyObject *
+read_item_compressed_point10_v2_init(read_item_compressed_point10_v2Object *self, PyObject *args, PyObject *kwds)
+{
+    //init state
+    for(int i = 0; i < 16; i++) {
+        StreamingMedian5_init(&self->last_x_diff_median5[i]);
+        StreamingMedian5_init(&self->last_y_diff_median5[i]);
+    }
+    for(int i = 0; i < 16; i++)
+        self->last_intensity[i] = 0;
+    for(int i = 0; i < 8; i++)
+        self->last_height[i] = 0;
+
+    _ArithmeticModel_init(self->m_changed_values, NULL);
+    _IntegerCompressor_init_decompressor(self->ic_intensity);
+    for(int i = 0; i < 2; i++)
+        _ArithmeticModel_init(self->m_scan_rank[i], NULL);
+    _IntegerCompressor_init_decompressor(self->ic_point_source_id);
+
+    for(int i = 0; i < 256; i++) {
+        if(self->m_bit_byte[i] != NULL)
+            _ArithmeticModel_init(self->m_bit_byte[i], NULL);
+    }
+    for(int i = 0; i < 256; i++) {
+        if(self->m_classification[i] != NULL)
+            _ArithmeticModel_init(self->m_classification[i], NULL);
+    }
+    for(int i = 0; i < 256; i++) {
+        if(self->m_user_data[i] != NULL)
+            _ArithmeticModel_init(self->m_user_data[i], NULL);
+    }
+
+    _IntegerCompressor_init_decompressor(self->ic_dx);
+    _IntegerCompressor_init_decompressor(self->ic_dy);
+    _IntegerCompressor_init_decompressor(self->ic_z);
+
+    // TODO
+    // self.last_item = item.copy()
+    // self.last_item.intensity = 0
+
+    Py_INCREF(Py_None);
+    return Py_None;
 }
 
 static PyObject *
@@ -1721,10 +1893,16 @@ cpylaz_exec(PyObject *m)
         goto fail;
     PyModule_AddObject(m, "IntegerCompressor", (PyObject *)&IntegerCompressor_Type);
 
+    LASpoint_Type.tp_base = &PyBaseObject_Type;
+    if (PyType_Ready(&LASpoint_Type) < 0)
+        goto fail;
+    PyModule_AddObject(m, "LASpoint", (PyObject *)&LASpoint_Type);
+
     read_item_compressed_point10_v2_Type.tp_base = &PyBaseObject_Type;
     if (PyType_Ready(&read_item_compressed_point10_v2_Type) < 0)
         goto fail;
     PyModule_AddObject(m, "read_item_compressed_point10_v2", (PyObject *)&read_item_compressed_point10_v2_Type);
+
 
     PyModule_AddIntConstant(m, "DM_LENGTH_SHIFT", DM_LENGTH_SHIFT);
 
