@@ -519,6 +519,39 @@ class TestLASpoint:
         assert point.user_data == 0
         assert point.point_source_ID == 0
 
+    def test_modify_attrs(self):
+
+        point = cpylaz.LASpoint()
+
+        point.X = 1
+        point.Y = 2
+        point.Z = 3
+        point.intensity = 4
+        point.return_number = 5
+        point.number_of_returns = 6
+        point.scan_direction_flag = 1
+        point.edge_of_flight_line = 1
+        point.classification = 9
+        point.scan_angle_rank = 10
+        point.user_data = 11
+        point.point_source_ID = 12
+
+        assert point.X == 1
+        assert point.Y == 2
+        assert point.Z == 3
+        assert point.intensity == 4
+        assert point.return_number == 5
+        assert point.number_of_returns == 6
+        assert point.scan_direction_flag == 1
+        assert point.edge_of_flight_line == 1
+        assert point.classification == 9
+        assert point.scan_angle_rank == 10
+        assert point.user_data == 11
+        assert point.point_source_ID == 12
+
+        with pytest.raises(AttributeError):
+            point.foobar = 1212
+
 
 class Testread_item_compressed_point10_v2:
     def test_create(self):
@@ -539,3 +572,13 @@ class Testread_item_compressed_point10_v2:
         assert len(m_scan_rank) == 2
         assert type(m_scan_rank[0]) == cpylaz.ArithmeticModel
         assert type(m_scan_rank[1]) == cpylaz.ArithmeticModel
+
+    def test_init(self):
+        point = cpylaz.LASpoint()
+
+        fp = io.BytesIO(file_contents)
+        dec = cpylaz.ArithmeticDecoder(fp)
+        dec.start()
+
+        ricp = cpylaz.read_item_compressed_point10_v2(dec)
+        ricp.init(point)

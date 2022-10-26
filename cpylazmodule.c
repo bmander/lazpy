@@ -1600,26 +1600,84 @@ LASpoint_getattr(LASpointObject *self, char *name)
     return PyObject_GenericGetAttr((PyObject *)self, PyUnicode_FromString(name));
 }
 
+static int
+LASpoint_setattr(LASpointObject *self, char *name, PyObject *value)
+{
+    if (value == NULL) {
+        PyErr_SetString(PyExc_AttributeError, "Cannot delete attributes");
+        return -1;
+    }
+
+    if (strcmp(name, "X") == 0) {
+        self->point.X = PyLong_AsUnsignedLong(value);
+        return 0;
+    }
+    if (strcmp(name, "Y") == 0) {
+        self->point.Y = PyLong_AsUnsignedLong(value);
+        return 0;
+    }
+    if (strcmp(name, "Z") == 0) {
+        self->point.Z = PyLong_AsUnsignedLong(value);
+        return 0;
+    }
+    if (strcmp(name, "intensity") == 0) {
+        self->point.intensity = PyLong_AsUnsignedLong(value);
+        return 0;
+    }
+    if (strcmp(name, "return_number") == 0) {
+        self->point.return_number = PyLong_AsUnsignedLong(value);
+        return 0;
+    }
+    if (strcmp(name, "number_of_returns") == 0) {
+        self->point.number_of_returns = PyLong_AsUnsignedLong(value);
+        return 0;
+    }
+    if (strcmp(name, "scan_direction_flag") == 0) {
+        self->point.scan_direction_flag = PyLong_AsUnsignedLong(value);
+        return 0;
+    }
+    if (strcmp(name, "edge_of_flight_line") == 0) {
+        self->point.edge_of_flight_line = PyLong_AsUnsignedLong(value);
+        return 0;
+    }
+    if (strcmp(name, "classification") == 0) {
+        self->point.classification = PyLong_AsUnsignedLong(value);
+        return 0;
+    }
+    if (strcmp(name, "synthetic_flag") == 0) {
+        self->point.synthetic_flag = PyLong_AsUnsignedLong(value);
+        return 0;
+    }
+    if (strcmp(name, "keypoint_flag") == 0) {
+        self->point.keypoint_flag = PyLong_AsUnsignedLong(value);
+        return 0;
+    }
+    if (strcmp(name, "withheld_flag") == 0) {
+        self->point.withheld_flag = PyLong_AsUnsignedLong(value);
+        return 0;
+    }
+    if (strcmp(name, "scan_angle_rank") == 0) {
+        self->point.scan_angle_rank = PyLong_AsLong(value);
+        return 0;
+    }
+    if (strcmp(name, "user_data") == 0) {
+        self->point.user_data = PyLong_AsUnsignedLong(value);
+        return 0;
+    }
+    if (strcmp(name, "point_source_ID") == 0) {
+        self->point.point_source_ID = PyLong_AsUnsignedLong(value);
+        return 0;
+    }
+
+    PyErr_SetString(PyExc_AttributeError, "Unknown attribute");
+    return -1;
+}
+
 static PyMethodDef LASpoint_methods[] = {
     {NULL}  /* Sentinel */
 };
 
 PyGetSetDef LASpoint_getset[] = {
-    // {"X", (getter)LASpoint_get_X, (setter)LASpoint_set_X, "X", NULL},
-    // {"Y", (getter)LASpoint_get_Y, (setter)LASpoint_set_Y, "Y", NULL},
-    // {"Z", (getter)LASpoint_get_Z, (setter)LASpoint_set_Z, "Z", NULL},
-    // {"intensity", (getter)LASpoint_get_intensity, (setter)LASpoint_set_intensity, "intensity", NULL},
-    // {"return_number", (getter)LASpoint_get_return_number, (setter)LASpoint_set_return_number, "return_number", NULL},
-    // {"number_of_returns", (getter)LASpoint_get_number_of_returns, (setter)LASpoint_set_number_of_returns, "number_of_returns", NULL},
-    // {"scan_direction_flag", (getter)LASpoint_get_scan_direction_flag, (setter)LASpoint_set_scan_direction_flag, "scan_direction_flag", NULL},
-    // {"edge_of_flight_line", (getter)LASpoint_get_edge_of_flight_line, (setter)LASpoint_set_edge_of_flight_line, "edge_of_flight_line", NULL},
-    // {"classification", (getter)LASpoint_get_classification, (setter)LASpoint_set_classification, "classification", NULL},
-    // {"synthetic_flag", (getter)LASpoint_get_synthetic_flag, (setter)LASpoint_set_synthetic_flag, "synthetic_flag", NULL},
-    // {"keypoint_flag", (getter)LASpoint_get_keypoint_flag, (setter)LASpoint_set_keypoint_flag, "keypoint_flag", NULL},
-    // {"withheld_flag", (getter)LASpoint_get_withheld_flag, (setter)LASpoint_set_withheld_flag, "withheld_flag", NULL},
-    // {"scan_angle_rank", (getter)LASpoint_get_scan_angle_rank, (setter)LASpoint_set_scan_angle_rank, "scan_angle_rank", NULL},
-    // {"user_data", (getter)LASpoint_get_user_data, (setter)LASpoint_set_user_data, "user_data", NULL},
-    // {"point_source_ID", (getter)LASpoint_get_point_source_ID, (setter)LASpoint_set_point_source_ID, "point_source_ID", NULL},
     {NULL}  /* Sentinel */
 };
 
@@ -1632,7 +1690,7 @@ static PyTypeObject LASpoint_Type = {
     (destructor)LASpoint_dealloc,    /*tp_dealloc*/
     0,                          /*tp_vectorcall_offset*/
     (getattrfunc)LASpoint_getattr,             /*tp_getattr*/
-    0,   /*tp_setattr*/
+    (setattrfunc)LASpoint_setattr,   /*tp_setattr*/
     0,                          /*tp_as_async*/
     0,                          /*tp_repr*/
     0,                          /*tp_as_number*/
@@ -1685,7 +1743,7 @@ typedef struct {
 
     uint16_t last_intensity[16];
     int32_t last_height[8];
-    uint8_t last_item[20];
+    LASpoint last_item;
 } read_item_compressed_point10_v2Object;
 
 static void
@@ -1742,8 +1800,7 @@ _read_item_compressed_point10_v2__init__(read_item_compressed_point10_v2Object *
     for(int i = 0; i < 8; i++)
         self->last_height[i] = 0;
 
-    for(int i = 0; i < 20; i++)
-        self->last_item[i] = 0;
+    memset(&self->last_item, 0, sizeof(LASpoint));
     
     return 0;
 
@@ -1763,7 +1820,7 @@ read_item_compressed_point10_v2__init__(read_item_compressed_point10_v2Object *s
 }
 
 static PyObject *
-read_item_compressed_point10_v2_init(read_item_compressed_point10_v2Object *self, PyObject *args, PyObject *kwds)
+_read_item_compressed_point10_v2_init(read_item_compressed_point10_v2Object *self, LASpoint last_item)
 {
     //init state
     for(int i = 0; i < 16; i++) {
@@ -1798,13 +1855,26 @@ read_item_compressed_point10_v2_init(read_item_compressed_point10_v2Object *self
     _IntegerCompressor_init_decompressor(self->ic_dy);
     _IntegerCompressor_init_decompressor(self->ic_z);
 
-    // TODO
-    // self.last_item = item.copy()
-    // self.last_item.intensity = 0
+    self->last_item = last_item;
+    self->last_item.intensity = 0;
 
     Py_INCREF(Py_None);
     return Py_None;
 }
+
+static PyObject *
+read_item_compressed_point10_v2_init(read_item_compressed_point10_v2Object *self, PyObject *args, PyObject *kwds)
+{
+    PyObject *arglast_item;
+    uint32_t context=0; // ignored for now
+    if (!PyArg_ParseTuple(args, "O!|I", &LASpoint_Type, &arglast_item, &context)) {
+        return NULL;
+    }
+    LASpointObject *last_item = (LASpointObject *)arglast_item;
+
+    return _read_item_compressed_point10_v2_init(self, last_item->point);
+}
+
 
 static PyObject *
 read_item_compressed_point10_v2_get_dec(read_item_compressed_point10_v2Object *self, void *closure)
@@ -1840,6 +1910,7 @@ read_item_compressed_point10_v2_get_m_scan_rank(read_item_compressed_point10_v2O
 
 
 static PyMethodDef read_item_compressed_point10_v2_methods[] = {
+    {"init", (PyCFunction)read_item_compressed_point10_v2_init, METH_VARARGS, "init"},
     {NULL, NULL}  /* Sentinel */
 };
 
