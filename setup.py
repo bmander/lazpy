@@ -1,6 +1,6 @@
 from distutils.core import setup, Extension
 
-cpylaz = Extension('cpylaz', sources=['cpylazmodule.c'])
+cmodels = Extension('cpylaz', sources=['cpylazmodule.c'])
 
 setup(name="lazpy",
       version="0.1",

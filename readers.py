@@ -162,7 +162,7 @@ class read_item_compressed_point10_v2:
 
         # decompress y
         median = self.last_y_diff_median5[m].get()
-        k_bits = self.ic_dx.k
+        k_bits = self.ic_dx.k #TODO should this be ic_dy.k?
         context = int(n == 1) + (u32_zero_bit_0(k_bits) if k_bits < 20 else 20)
         diff = self.ic_dy.decompress(median, context)
         self.last_item.y = self.last_item.y + diff

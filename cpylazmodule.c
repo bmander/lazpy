@@ -13,6 +13,16 @@
 #define DM_MAX_COUNT (1 << DM_LENGTH_SHIFT)
 #define RAISE_ERROR(msg) { PyErr_SetString(PyExc_Exception, msg); return NULL; }
 
+typedef unsigned char      U8;
+typedef unsigned int       U32;
+#define U8_MIN             ((U8)0x0)  // 0
+#define U8_MAX             ((U8)0xFF) // 255
+#define U8_MAX_MINUS_ONE   ((U8)0xFE) // 254
+#define U8_MAX_PLUS_ONE    0x0100     // 256
+#define U8_FOLD(n)      (((n) < U8_MIN) ? (n+U8_MAX_PLUS_ONE) : (((n) > U8_MAX) ? (n-U8_MAX_PLUS_ONE) : (n)))
+
+#define U32_ZERO_BIT_0(n) (((n)&(U32)0xFFFFFFFE))
+
 typedef struct {
     PyObject_HEAD
     uint32_t bit_0_prob;
@@ -1413,7 +1423,7 @@ inline void StreamingMedian5_init(StreamingMedian5 *self) {
     self->high = 1;
 }
 
-inline void add(StreamingMedian5 *self, int32_t v){
+inline void StreamingMedian5_add(StreamingMedian5 *self, int32_t v){
     if (self->high) {
         if (v < self->values[2]) {
             self->values[4] = self->values[3];
@@ -1463,7 +1473,7 @@ inline void add(StreamingMedian5 *self, int32_t v){
     }
 }
 
-inline int32_t get(StreamingMedian5* self)
+inline int32_t StreamingMedian5_get(StreamingMedian5* self)
 {
     return self->values[2];
 }
@@ -1509,6 +1519,17 @@ typedef struct {
     uint8_t user_data;
     uint16_t point_source_ID;
 } LASpoint;
+
+inline uint8_t
+LASpoint_get_bitfield(LASpoint *self){
+    return ((uint8_t *)self)[14];
+}
+
+inline void
+LASpoint_set_bitfield(LASpoint *self, uint8_t bitfield){
+    ((uint8_t *)self)[14] = bitfield;
+}
+
 
 typedef struct {
     PyObject_HEAD
@@ -1746,6 +1767,7 @@ typedef struct {
     LASpoint last_item;
 } read_item_compressed_point10_v2Object;
 
+
 static void
 read_item_compressed_point10_v2_dealloc(read_item_compressed_point10_v2Object* self)
 {
@@ -1863,6 +1885,110 @@ _read_item_compressed_point10_v2_init(read_item_compressed_point10_v2Object *sel
 }
 
 static PyObject *
+_read_item_compressed_point10_v2_read(read_item_compressed_point10_v2Object *self, uint32_t context) {
+    uint32_t changed_values = _ArithmeticDecoder_decode_symbol(self->dec, self->m_changed_values);
+
+    // decompress bit field byte
+    if(changed_values & 0b100000) {
+        uint32_t bitfield = LASpoint_get_bitfield(&self->last_item);
+        if(self->m_bit_byte[bitfield] == NULL) {
+            ArithmeticModelObject *model = (ArithmeticModelObject *)_ArithmeticDecoder_create_symbol_model(self->dec, 256);
+            _ArithmeticModel_init(model, NULL);
+            self->m_bit_byte[bitfield] = model;
+        }
+
+        bitfield = _ArithmeticDecoder_decode_symbol(self->dec, self->m_bit_byte[bitfield]);
+        LASpoint_set_bitfield(&self->last_item, bitfield);
+    }
+
+    uint32_t r = self->last_item.return_number;
+    uint32_t n = self->last_item.number_of_returns;
+    uint8_t m = number_return_map[n][r];
+    uint8_t el = number_return_level[n][r];
+
+    // decompress intensity
+    if(changed_values & 0b10000) {
+        context = MIN(m, 3);
+        int32_t intensity = _IntegerCompressor_decompress(self->ic_intensity, self->last_intensity[m], context);
+        self->last_item.intensity = intensity;
+        self->last_intensity[m] = intensity;
+    } else {
+        self->last_item.intensity = self->last_intensity[m];
+    }
+
+    // decompress classification
+    if(changed_values & 0b1000) {
+        if(self->m_classification[self->last_item.classification] == NULL) {
+            ArithmeticModelObject *model = (ArithmeticModelObject *)_ArithmeticDecoder_create_symbol_model(self->dec, 256);
+            _ArithmeticModel_init(model, NULL);
+            self->m_classification[self->last_item.classification] = model;
+        }
+        uint8_t classification = _ArithmeticDecoder_decode_symbol(self->dec, self->m_classification[self->last_item.classification]);
+        self->last_item.classification = classification;
+    }
+
+    // decompress scan angle rank
+    if(changed_values & 0b100) {
+        uint8_t f = self->last_item.scan_direction_flag;
+        uint32_t val = _ArithmeticDecoder_decode_symbol(self->dec, self->m_scan_rank[f]);
+        self->last_item.scan_angle_rank = U8_FOLD(val + self->last_item.scan_angle_rank);
+    }
+
+
+    // decompress user data
+    if(changed_values & 0b10) {
+        ArithmeticModelObject *model;
+        if(self->m_user_data[self->last_item.user_data] == NULL) {
+            model = (ArithmeticModelObject *)_ArithmeticDecoder_create_symbol_model(self->dec, 256);
+            _ArithmeticModel_init(model, NULL);
+            self->m_user_data[self->last_item.user_data] = model;
+        }
+
+        model = self->m_user_data[self->last_item.user_data];
+        uint8_t user_data = _ArithmeticDecoder_decode_symbol(self->dec, model);
+        self->last_item.user_data = user_data;
+    }
+
+    // decompress point source ID
+    if(changed_values & 0b1) {
+        uint32_t point_source_id = _IntegerCompressor_decompress(self->ic_point_source_id, self->last_item.point_source_ID, 0);
+        self->last_item.point_source_ID = point_source_id;
+    }
+
+    // decompress x
+    int32_t median = StreamingMedian5_get(&self->last_x_diff_median5[m]);
+    int32_t diff = _IntegerCompressor_decompress(self->ic_dx, median, (n==1));
+    self->last_item.X += diff;
+    StreamingMedian5_add(&self->last_x_diff_median5[m], diff);
+
+    // decompress y
+    median = StreamingMedian5_get(&self->last_y_diff_median5[m]);
+    uint32_t k_bits = self->ic_dx->k; //TODO should this be self->ic_dy->k?
+    context = (n==1) + (k_bits < 20 ? U32_ZERO_BIT_0(k_bits) : 20);
+    diff = _IntegerCompressor_decompress(self->ic_dy, median, context);
+    self->last_item.Y += diff;
+    StreamingMedian5_add(&self->last_y_diff_median5[m], diff);
+
+    // decompress z
+    k_bits = (self->ic_dx->k + self->ic_dy->k) / 2;
+    context = (n == 1) + (k_bits < 18 ? U32_ZERO_BIT_0(k_bits) : 18);
+    int32_t z = _IntegerCompressor_decompress(self->ic_z, self->last_height[el], context);
+    self->last_item.Z = z;
+    self->last_height[el] = z;
+
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+read_item_compressed_point10_v2_read(read_item_compressed_point10_v2Object *self, PyObject *args) {
+    uint32_t context;
+    if (!PyArg_ParseTuple(args, "I", &context)) {
+        return NULL;
+    }
+    return _read_item_compressed_point10_v2_read(self, context);
+}
+
+static PyObject *
 read_item_compressed_point10_v2_init(read_item_compressed_point10_v2Object *self, PyObject *args, PyObject *kwds)
 {
     PyObject *arglast_item;
@@ -1911,6 +2037,7 @@ read_item_compressed_point10_v2_get_m_scan_rank(read_item_compressed_point10_v2O
 
 static PyMethodDef read_item_compressed_point10_v2_methods[] = {
     {"init", (PyCFunction)read_item_compressed_point10_v2_init, METH_VARARGS, "init"},
+    {"read", (PyCFunction)read_item_compressed_point10_v2_read, METH_VARARGS, "read"},
     {NULL, NULL}  /* Sentinel */
 };
 
