@@ -3,3 +3,5 @@ data
 __pycache__
 build
 *.so
+*.egg
+lazpy.egg-info
