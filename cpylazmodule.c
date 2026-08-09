@@ -1,2169 +1,1127 @@
-
+/*
+ * cpylazmodule.c -- Python bindings for the lazpy C core.
+ *
+ * Two layers are exposed:
+ *
+ *   - PointReader / Point: the actual reading API. Header and VLR parsing stay
+ *     in Python (lazpy.py); everything from the first point onward is C.
+ *
+ *   - ArithmeticBitModel / ArithmeticModel / ArithmeticDecoder /
+ *     IntegerCompressor: thin wrappers over the entropy coder. These are not
+ *     needed to read a file, but they let tests.py pin the coder against known
+ *     bit-exact vectors and against the pure-Python reference in models.py and
+ *     encoder.py, which is what catches a desync at its source rather than
+ *     3000 points into a chunk.
+ */
 #include "Python.h"
+#include "structmember.h"
 
+#include "src/laz_types.h"
+#include "src/laz_stream.h"
+#include "src/laz_arithmetic.h"
+#include "src/laz_intcompressor.h"
+#include "src/laz_readitem.h"
+#include "src/laz_readpoint.h"
 
-#define BM_LENGTH_SHIFT 13
-#define BM_MAX_COUNT (1 << BM_LENGTH_SHIFT)
-#define MIN(a,b) ((a) < (b) ? (a) : (b))
-
-#define AC_MAX_LENGTH 0xFFFFFFFF
-#define AC_MIN_LENGTH 0x01000000
-
-#define DM_LENGTH_SHIFT 15
-#define DM_MAX_COUNT (1 << DM_LENGTH_SHIFT)
-#define RAISE_ERROR(msg) { PyErr_SetString(PyExc_Exception, msg); return NULL; }
-
-typedef unsigned char      U8;
-typedef unsigned int       U32;
-#define U8_MIN             ((U8)0x0)  // 0
-#define U8_MAX             ((U8)0xFF) // 255
-#define U8_MAX_MINUS_ONE   ((U8)0xFE) // 254
-#define U8_MAX_PLUS_ONE    0x0100     // 256
-#define U8_FOLD(n)      (((n) < U8_MIN) ? (n+U8_MAX_PLUS_ONE) : (((n) > U8_MAX) ? (n-U8_MAX_PLUS_ONE) : (n)))
-
-#define U32_ZERO_BIT_0(n) (((n)&(U32)0xFFFFFFFE))
+/* ==================================================== ArithmeticBitModel == */
 
 typedef struct {
     PyObject_HEAD
-    uint32_t bit_0_prob;
-    uint32_t bit_0_count;
-    uint32_t bit_count;
-    uint32_t update_cycle;
-    uint32_t bits_until_update;
-} ArithmeticBitModelObject;
+    LazBitModel m;
+} BitModelObject;
 
-static PyTypeObject ArithmeticBitModel_Type;
+static PyTypeObject BitModel_Type;
 
-#define ArithmeticBitModelObject_Check(v)      (Py_TYPE(v) == &ArithmeticBitModel_Type)
-
-static void
-updateArithmeticBitModel(ArithmeticBitModelObject *self) {
-    // halve counts when threshold is reached
-    self->bit_count += self->update_cycle;
-    if(self->bit_count >= BM_MAX_COUNT) {
-        self->bit_count = (self->bit_count + 1) >> 1;
-        self->bit_0_count = (self->bit_0_count + 1) >> 1;
-        if(self->bit_0_count == self->bit_count) {
-            self->bit_count += 1;
-        }
-    }
-
-    // compute scaled bit 0 probability
-    uint32_t scale = 0x80000000 / self->bit_count;
-    self->bit_0_prob = (self->bit_0_count * scale) >> (31 - BM_LENGTH_SHIFT);
-
-    // update frequency of model updates
-    self->update_cycle = (5 * self->update_cycle) >> 2;
-    self->update_cycle = MIN(self->update_cycle, 64);
-    self->bits_until_update = self->update_cycle;
-}
-
-/* ArithmeticBitModel methods */
-
-static void
-ArithmeticBitModel_dealloc(ArithmeticBitModelObject *self)
+static int BitModel_tp_init(BitModelObject *self, PyObject *args, PyObject *kwds)
 {
-    PyObject_Del(self);
-}
-
-static void
-_ArithmeticBitModel_init(ArithmeticBitModelObject *self)
-{
-    // initialize equiprobable model
-    self->bit_0_count = 1;
-    self->bit_count = 2;
-    self->bit_0_prob = 1 << (BM_LENGTH_SHIFT - 1);
-
-    // start with frequent updates
-    self->update_cycle = self->bits_until_update = 4;
-}
-
-static PyObject *
-ArithmeticBitModel_init(ArithmeticBitModelObject *self, PyObject *args)
-{
-    _ArithmeticBitModel_init(self);
-
-    return Py_None;
-}
-
-static int
-ArithmeticBitModel__init__(ArithmeticBitModelObject *self, PyObject *args, PyObject *kwargs)
-{   
-    _ArithmeticBitModel_init(self);
-
+    (void)args; (void)kwds;
+    laz_bit_model_init(&self->m);
     return 0;
 }
 
-
-static PyObject *
-ArithmeticBitModel_update(ArithmeticBitModelObject *self, PyObject *args)
+static PyObject *BitModel_init(BitModelObject *self, PyObject *Py_UNUSED(ignored))
 {
-    updateArithmeticBitModel(self);
-
-    Py_INCREF(Py_None);
-    return Py_None;
+    laz_bit_model_init(&self->m);
+    Py_RETURN_NONE;
 }
 
-static PyObject *
-ArithmeticBitModel_get_bit_0_prob(ArithmeticBitModelObject *self, PyObject *args)
+static PyObject *BitModel_update(BitModelObject *self, PyObject *Py_UNUSED(ignored))
 {
-    return PyLong_FromUnsignedLong(self->bit_0_prob);
+    laz_bit_model_update(&self->m);
+    Py_RETURN_NONE;
 }
 
-static PyObject *
-ArithmeticBitModel_set_bit_0_prob(ArithmeticBitModelObject *self, PyObject *value, void *closure)
-{
-    if (!PyLong_Check(value)) {
-        PyErr_SetString(PyExc_TypeError,
-                        "The bit_0_prob attribute value must be an integer");
-        return NULL;
+#define BITMODEL_GETSET(field)                                                 \
+    static PyObject *BitModel_get_##field(BitModelObject *self, void *c)       \
+    { (void)c; return PyLong_FromUnsignedLong(self->m.field); }                \
+    static int BitModel_set_##field(BitModelObject *self, PyObject *v, void *c)\
+    {                                                                          \
+        unsigned long x;                                                       \
+        (void)c;                                                               \
+        if (v == NULL) { PyErr_SetString(PyExc_AttributeError,                 \
+            "cannot delete " #field); return -1; }                             \
+        x = PyLong_AsUnsignedLong(v);                                          \
+        if (PyErr_Occurred()) return -1;                                       \
+        self->m.field = (U32)x;                                                \
+        return 0;                                                              \
     }
-    self->bit_0_prob = PyLong_AsUnsignedLong(value);
 
-    return 0;
-}
+BITMODEL_GETSET(bit_0_prob)
+BITMODEL_GETSET(bit_0_count)
+BITMODEL_GETSET(bit_count)
+BITMODEL_GETSET(bits_until_update)
+BITMODEL_GETSET(update_cycle)
 
-static PyObject *
-ArithmeticBitModel_get_bit_0_count(ArithmeticBitModelObject *self, void *closure)
-{
-    return PyLong_FromUnsignedLong(self->bit_0_count);
-}
-
-static PyObject *
-ArithmeticBitModel_set_bit_0_count(ArithmeticBitModelObject *self, PyObject *value, void *closure)
-{
-    if (!PyLong_Check(value)) {
-        PyErr_SetString(PyExc_TypeError, "The bit_0_count attribute value must be an integer");
-        return NULL;
-    }
-    self->bit_0_count = PyLong_AsUnsignedLong(value);
-    return 0;
-}
-
-static PyObject *
-ArithmeticBitModel_get_bits_until_update(ArithmeticBitModelObject *self, void *closure)
-{
-    return PyLong_FromUnsignedLong(self->bits_until_update);
-}
-
-static PyObject *
-ArithmeticBitModel_set_bits_until_update(ArithmeticBitModelObject *self, PyObject *value, void *closure)
-{
-    if (!PyLong_Check(value)) {
-        PyErr_SetString(PyExc_TypeError, "The bits_until_update attribute value must be an integer");
-        return NULL;
-    }
-    self->bits_until_update = PyLong_AsUnsignedLong(value);
-    return 0;
-}
-
-
-static PyMethodDef ArithmeticBitModel_methods[] = {
-    {"init",            (PyCFunction)ArithmeticBitModel_init,  METH_NOARGS,
-        PyDoc_STR("init() -> None")},
-    {"update",          (PyCFunction)ArithmeticBitModel_update,  METH_NOARGS,
-        PyDoc_STR("update() -> None")},
-    {NULL,              NULL}           /* sentinel */
-};
-
-PyGetSetDef ArithmeticBitModel_getset[] = {
-    {"bit_0_prob", /* name */
-     (getter)ArithmeticBitModel_get_bit_0_prob, /* getter */
-     (setter)ArithmeticBitModel_set_bit_0_prob, /* setter */
-     NULL, /* doc */
-     NULL}, /* closure */
-    {"bit_0_count",
-     (getter) ArithmeticBitModel_get_bit_0_count,
-     (setter) ArithmeticBitModel_set_bit_0_count,
-     NULL,
-     NULL},
-    {"bits_until_update",
-     (getter) ArithmeticBitModel_get_bits_until_update,
-     (setter) ArithmeticBitModel_set_bits_until_update,
-     NULL,
-     NULL},
+static PyGetSetDef BitModel_getset[] = {
+    {"bit_0_prob", (getter)BitModel_get_bit_0_prob, (setter)BitModel_set_bit_0_prob, NULL, NULL},
+    {"bit_0_count", (getter)BitModel_get_bit_0_count, (setter)BitModel_set_bit_0_count, NULL, NULL},
+    {"bit_count", (getter)BitModel_get_bit_count, (setter)BitModel_set_bit_count, NULL, NULL},
+    {"bits_until_update", (getter)BitModel_get_bits_until_update, (setter)BitModel_set_bits_until_update, NULL, NULL},
+    {"update_cycle", (getter)BitModel_get_update_cycle, (setter)BitModel_set_update_cycle, NULL, NULL},
     {NULL}
 };
 
-
-static PyTypeObject ArithmeticBitModel_Type = {
-    /* The ob_type field must be initialized in the module init function
-     * to be portable to Windows without using C++. */
-    PyVarObject_HEAD_INIT(NULL, 0)
-    "cpylaz.ArithmeticBitModel",             /*tp_name*/
-    sizeof(ArithmeticBitModelObject),          /*tp_basicsize*/
-    0,                          /*tp_itemsize*/
-    /* methods */
-    (destructor)ArithmeticBitModel_dealloc,    /*tp_dealloc*/
-    0,                          /*tp_vectorcall_offset*/
-    (getattrfunc)0,             /*tp_getattr*/
-    0,   /*tp_setattr*/
-    0,                          /*tp_as_async*/
-    0,                          /*tp_repr*/
-    0,                          /*tp_as_number*/
-    0,                          /*tp_as_sequence*/
-    0,                          /*tp_as_mapping*/
-    0,                          /*tp_hash*/
-    0,                          /*tp_call*/
-    0,                          /*tp_str*/
-    0, /*tp_getattro*/
-    0,                          /*tp_setattro*/
-    0,                          /*tp_as_buffer*/
-    Py_TPFLAGS_DEFAULT,         /*tp_flags*/
-    0,                          /*tp_doc*/
-    0,                          /*tp_traverse*/
-    0,                          /*tp_clear*/
-    0,                          /*tp_richcompare*/
-    0,                          /*tp_weaklistoffset*/
-    0,                          /*tp_iter*/
-    0,                          /*tp_iternext*/
-    ArithmeticBitModel_methods,                /*tp_methods*/
-    0,                          /*tp_members*/
-    ArithmeticBitModel_getset,                          /*tp_getset*/
-    0,                          /*tp_base*/
-    0,                          /*tp_dict*/
-    0,                          /*tp_descr_get*/
-    0,                          /*tp_descr_set*/
-    0,                          /*tp_dictoffset*/
-    (initproc)ArithmeticBitModel__init__,                          /*tp_init*/
-    0,                          /*tp_alloc*/
-    PyType_GenericNew,                          /*tp_new*/
-    0,                          /*tp_free*/
-    0,                          /*tp_is_gc*/
+static PyMethodDef BitModel_methods[] = {
+    {"init", (PyCFunction)BitModel_init, METH_NOARGS, "init() -> None"},
+    {"update", (PyCFunction)BitModel_update, METH_NOARGS, "update() -> None"},
+    {NULL}
 };
 
+static PyObject *BitModel_repr(BitModelObject *self)
+{
+    return PyUnicode_FromFormat(
+        "ArithmeticBitModel(update_cycle=%u, bits_until_update=%u, "
+        "bit_0_prob=%u, bit_0_count=%u, bit_count=%u)",
+        self->m.update_cycle, self->m.bits_until_update,
+        self->m.bit_0_prob, self->m.bit_0_count, self->m.bit_count);
+}
+
+static PyTypeObject BitModel_Type = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "cpylaz.ArithmeticBitModel",
+    .tp_basicsize = sizeof(BitModelObject),
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_new = PyType_GenericNew,
+    .tp_init = (initproc)BitModel_tp_init,
+    .tp_methods = BitModel_methods,
+    .tp_getset = BitModel_getset,
+    .tp_repr = (reprfunc)BitModel_repr,
+    .tp_dealloc = (destructor)PyObject_Del,
+};
+
+/* ======================================================= ArithmeticModel == */
+
+/*
+ * Either owns its model (constructed from Python) or borrows one belonging to
+ * an IntegerCompressor, in which case `owner` keeps that object alive.
+ */
 typedef struct {
     PyObject_HEAD
-    uint32_t num_symbols;
-    uint32_t compress;
+    LazSymbolModel *m;
+    LazSymbolModel storage;
+    PyObject *owner;
+} SymbolModelObject;
 
-    uint32_t last_symbol;
-    uint32_t table_shift;
-    uint32_t table_size;
-    uint32_t total_count;
-    uint32_t update_cycle;
-    uint32_t symbols_until_update;
+static PyTypeObject SymbolModel_Type;
 
-    // tables
-    uint32_t *distribution;
-    uint32_t *symbol_count;
-    uint32_t *decoder_table;
-} ArithmeticModelObject;
-
-int
-ArithmeticModel__update(ArithmeticModelObject *self);
-
-static int
-ArithmeticModel__init__(ArithmeticModelObject *self, PyObject *args, PyObject *kwargs)
+static int SymbolModel_tp_init(SymbolModelObject *self, PyObject *args, PyObject *kwds)
 {
-    // get num_symbols and compress from args
-    if (!PyArg_ParseTuple(args, "II", &self->num_symbols, &self->compress)) {
+    unsigned int num_symbols;
+    PyObject *compress_obj = NULL;
+    static char *kwlist[] = {"num_symbols", "compress", NULL};
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "I|O", kwlist, &num_symbols, &compress_obj))
         return -1;
-    }
 
-    self->distribution = NULL;
-    self->symbol_count = NULL;
-    self->decoder_table = NULL;
-
+    self->m = &self->storage;
+    self->owner = NULL;
+    laz_symbol_model_setup(self->m, num_symbols,
+                           (compress_obj && PyObject_IsTrue(compress_obj)) ? LAZ_TRUE : LAZ_FALSE);
     return 0;
 }
 
-static PyObject *
-_ArithmeticModel_init(ArithmeticModelObject *self, PyObject *table)
-{   
-
-    if (self->distribution == NULL){
-        if (self->num_symbols < 2 || self->num_symbols > 2048) {
-            PyErr_SetString(PyExc_ValueError, "The number of symbols must be between 2 and 2048");
-            return NULL;
-        }
-
-        self->last_symbol = self->num_symbols-1;
-
-        if(self->compress==0 && self->num_symbols > 16) {
-            uint32_t table_bits = 3;
-            while(self->num_symbols > (1u << (table_bits+2u))){
-                table_bits++;
-            }
-
-            self->table_shift = DM_LENGTH_SHIFT - table_bits;
-
-            self->table_size = 1 << table_bits;
-
-            uint32_t decoder_table_size = (self->table_size+2)*sizeof(uint32_t);
-            self->decoder_table = (uint32_t *)malloc(decoder_table_size);
-            memset(self->decoder_table, 0, decoder_table_size);
-        } else { // small alphabet; no table needed
-            self->table_shift = 0;
-            self->table_size = 0;
-        }
-
-        self->distribution = (uint32_t *)malloc(self->num_symbols*sizeof(uint32_t));
-        self->symbol_count = (uint32_t *)malloc(self->num_symbols*sizeof(uint32_t));
-
-        memset(self->distribution, 0, self->num_symbols*sizeof(uint32_t));
+static void SymbolModel_dealloc(SymbolModelObject *self)
+{
+    if (self->owner) {
+        Py_CLEAR(self->owner);          /* borrowed model, owner frees it */
+    } else if (self->m) {
+        laz_symbol_model_free(self->m);
     }
+    PyObject_Del(self);
+}
 
-    self->total_count = 0;
-    self->update_cycle = self->num_symbols;
-    if(table != NULL){
-        // check that table is a list of ints
+/* Wraps a model owned by `owner` without copying it. */
+static PyObject *SymbolModel_borrow(LazSymbolModel *m, PyObject *owner)
+{
+    SymbolModelObject *o = PyObject_New(SymbolModelObject, &SymbolModel_Type);
+    if (!o) return NULL;
+    o->m = m;
+    memset(&o->storage, 0, sizeof(o->storage));
+    Py_INCREF(owner);
+    o->owner = owner;
+    return (PyObject *)o;
+}
+
+static PyObject *SymbolModel_init(SymbolModelObject *self, PyObject *args)
+{
+    PyObject *table = NULL;
+    U32 *counts = NULL;
+    BOOL ok;
+
+    if (!PyArg_ParseTuple(args, "|O", &table)) return NULL;
+
+    if (table != NULL && table != Py_None) {
+        Py_ssize_t n, i;
         if (!PyList_Check(table)) {
             PyErr_SetString(PyExc_TypeError, "table must be a list of ints");
             return NULL;
         }
-        // copy table into symbol_count
-        for (uint32_t i = 0; i < self->num_symbols; i++) {
+        n = PyList_Size(table);
+        if ((U32)n != self->m->num_symbols) {
+            PyErr_SetString(PyExc_ValueError,
+                            "table must be the same length as num_symbols");
+            return NULL;
+        }
+        counts = (U32 *)PyMem_Malloc((size_t)n * sizeof(U32));
+        if (!counts) return PyErr_NoMemory();
+        for (i = 0; i < n; i++) {
             PyObject *item = PyList_GetItem(table, i);
+            unsigned long v;
             if (!PyLong_Check(item)) {
+                PyMem_Free(counts);
                 PyErr_SetString(PyExc_TypeError, "table must be a list of ints");
                 return NULL;
             }
-            self->symbol_count[i] = PyLong_AsUnsignedLong(item);
-        }
-    } else {
-        for(uint32_t i = 0; i < self->num_symbols; i++){
-            self->symbol_count[i] = 1;
+            v = PyLong_AsUnsignedLong(item);
+            if (PyErr_Occurred()) { PyMem_Free(counts); return NULL; }
+            counts[i] = (U32)v;
         }
     }
 
-    if (ArithmeticModel__update(self) == 1) {
+    ok = laz_symbol_model_init(self->m, counts);
+    PyMem_Free(counts);
+    if (!ok) {
+        PyErr_SetString(PyExc_ValueError, "number of symbols must be between 2 and 2048");
         return NULL;
     }
-    self->symbols_until_update = (self->num_symbols+6) >> 1;
-    self->update_cycle = self->symbols_until_update;
-
     Py_RETURN_NONE;
 }
 
-static PyObject *
-ArithmeticModel_init(ArithmeticModelObject *self, PyObject *args, PyObject *kwargs)
-{   
-
-    PyObject * table = NULL;
-    if (!PyArg_ParseTuple(args, "|O", &table)) {
-        return NULL;
-    }
-
-    if (table != NULL && !PyList_Check(table)) {
-        PyErr_SetString(PyExc_TypeError, "The table argument must be a list");
-        return NULL;
-    }
-
-    if (table != NULL && PyList_Size(table) != self->num_symbols) {
-        PyErr_SetString(PyExc_ValueError, "The table argument must be the same length as num_symbols");
-        return NULL;
-    }
-
-    return _ArithmeticModel_init(self, table);
-
-}
-
-int
-ArithmeticModel__update(ArithmeticModelObject *self)
+static PyObject *SymbolModel_increment_symbol_count(SymbolModelObject *self, PyObject *args)
 {
-    // halve counts when threshold is reached
-    self->total_count += self->update_cycle;
-    if(self->total_count > DM_MAX_COUNT) {
-        self->total_count = 0;
-        for(uint32_t i = 0; i < self->num_symbols; i++) {
-            self->symbol_count[i] = (self->symbol_count[i]+1) >> 1;
-            self->total_count += self->symbol_count[i];
-        }
-    }
-
-    // compute distribution
-
-    // TODO use of 64 bits is a hack to get the C impl to behave like the 
-    // python impl. The weird thing is, the python impl must have been
-    // behaving differently than the original 32 bit implementation, and yet
-    // the end result worked just fine. After all the unit tests pass, change
-    // this back to 32 bits to see if it still works.
-    uint32_t sum = 0;
-    uint32_t s = 0;
-    uint32_t scale = 0x80000000u / self->total_count;
-
-
-    if(self->compress != 0 || self->table_size == 0){
-        for(uint32_t k = 0; k < self->num_symbols; k++) {
-            self->distribution[k] = (scale*sum) >> (31 - DM_LENGTH_SHIFT);
-            sum += self->symbol_count[k];
-        }
-    } else {
-        for(uint32_t k = 0; k < self->num_symbols; k++) {
-            self->distribution[k] = (scale*sum) >> (31 - DM_LENGTH_SHIFT);
-            sum += self->symbol_count[k];
-            uint32_t w = self->distribution[k] >> self->table_shift;
-            while(s < w){
-                s++;
-                self->decoder_table[s] = k-1;
-            }
-        }
-        self->decoder_table[0] = 0;
-        while( s<=self->table_size){
-            s++;
-            self->decoder_table[s] = self->num_symbols-1;
-        }
-    }
-
-
-
-    // set frequency of model updates
-    self->update_cycle = (5 * self->update_cycle) >> 2;
-    uint32_t max_cycle = (self->num_symbols + 6) << 3;
-    self->update_cycle = MIN(self->update_cycle, max_cycle);
-    self->symbols_until_update = self->update_cycle;
-
-    return 0;
-}
-
-static void
-ArithmeticModel_dealloc(ArithmeticModelObject *self)
-{
-    if (self->distribution != NULL) {
-        free(self->distribution);
-    }
-    if (self->symbol_count != NULL) {
-        free(self->symbol_count);
-    }
-    if (self->decoder_table != NULL) {
-        free(self->decoder_table);
-    }
-
-    PyObject_Del(self);
-}
-
-void
-_ArithmeticModel_increment_symbol_count(ArithmeticModelObject *self, uint32_t symbol)
-{
-    self->symbol_count[symbol]++;
-    self->symbols_until_update--;
-
-    if (self->symbols_until_update == 0) {
-        ArithmeticModel__update(self);
-    }
-}
-
-static PyObject *
-ArithmeticModel_increment_symbol_count(ArithmeticModelObject *self, PyObject *args)
-{
-    if (self->distribution == NULL) {
-        PyErr_SetString(PyExc_ValueError, "Model not initialized");
+    unsigned int sym;
+    if (!self->m->distribution) {
+        PyErr_SetString(PyExc_ValueError, "model not initialized");
         return NULL;
     }
-
-    uint32_t symbol;
-    if (!PyArg_ParseTuple(args, "I", &symbol)) {
+    if (!PyArg_ParseTuple(args, "I", &sym)) return NULL;
+    if (sym >= self->m->num_symbols) {
+        PyErr_SetString(PyExc_IndexError, "symbol out of range");
         return NULL;
     }
-
-    _ArithmeticModel_increment_symbol_count(self, symbol);
-
+    ++self->m->symbol_count[sym];
+    if (--self->m->symbols_until_update == 0) laz_symbol_model_update(self->m);
     Py_RETURN_NONE;
 }
 
-static PyObject *
-ArithmeticModel_decoder_table_lookup(ArithmeticModelObject *self, PyObject *args)
+#define MODEL_LOOKUP(name, array, bound)                                       \
+    static PyObject *SymbolModel_##name(SymbolModelObject *self, PyObject *args)\
+    {                                                                          \
+        unsigned int idx;                                                      \
+        if (self->m->array == NULL) {                                          \
+            PyErr_SetString(PyExc_Exception, "model not initialized");         \
+            return NULL;                                                       \
+        }                                                                      \
+        if (!PyArg_ParseTuple(args, "I", &idx)) return NULL;                   \
+        if (idx >= (bound)) {                                                  \
+            PyErr_SetString(PyExc_IndexError, "index out of range");           \
+            return NULL;                                                       \
+        }                                                                      \
+        return PyLong_FromUnsignedLong(self->m->array[idx]);                   \
+    }
+
+MODEL_LOOKUP(decoder_table_lookup, decoder_table, self->m->table_size + 2)
+MODEL_LOOKUP(distribution_lookup, distribution, self->m->num_symbols)
+MODEL_LOOKUP(symbol_count_lookup, symbol_count, self->m->num_symbols)
+
+static PyObject *SymbolModel_has_decoder_table(SymbolModelObject *self, PyObject *Py_UNUSED(i))
 {
-    if(self->decoder_table == NULL) {
-        PyErr_SetString(PyExc_Exception, "Model not initialized");
-        return NULL;
-    }
-
-    uint32_t index;
-    if (!PyArg_ParseTuple(args, "I", &index)) {
-        return NULL;
-    }
-
-    if(index >= self->table_size+2) {
-        PyErr_SetString(PyExc_IndexError, "index out of range");
-        return NULL;
-    }
-
-    return PyLong_FromUnsignedLong(self->decoder_table[index]);
+    if (self->m->table_size == 0) Py_RETURN_FALSE;
+    Py_RETURN_TRUE;
 }
 
-static PyObject *
-ArithmeticModel_distribution_lookup(ArithmeticModelObject *self, PyObject *args)
-{
-    if(self->distribution == NULL) {
-        PyErr_SetString(PyExc_Exception, "Model not initialized");
-        return NULL;
-    }
+static PyObject *SymbolModel_get_num_symbols(SymbolModelObject *self, void *c)
+{ (void)c; return PyLong_FromUnsignedLong(self->m->num_symbols); }
 
-    uint32_t index;
-    if (!PyArg_ParseTuple(args, "I", &index)) {
-        return NULL;
-    }
+static PyObject *SymbolModel_get_compress(SymbolModelObject *self, void *c)
+{ (void)c; if (self->m->compress) Py_RETURN_TRUE; Py_RETURN_FALSE; }
 
-    if(index >= self->num_symbols) {
-        PyErr_SetString(PyExc_IndexError, "index out of range");
-        return NULL;
-    }
+static PyObject *SymbolModel_get_table_shift(SymbolModelObject *self, void *c)
+{ (void)c; return PyLong_FromUnsignedLong(self->m->table_shift); }
 
-    return PyLong_FromUnsignedLong(self->distribution[index]);
-}
+static PyObject *SymbolModel_get_last_symbol(SymbolModelObject *self, void *c)
+{ (void)c; return PyLong_FromUnsignedLong(self->m->last_symbol); }
 
-static PyObject *
-ArithmeticModel_symbol_count_lookup(ArithmeticModelObject *self, PyObject *args)
-{
-    if(self->symbol_count == NULL) {
-        PyErr_SetString(PyExc_Exception, "Model not initialized");
-        return NULL;
-    }
-
-    uint32_t index;
-    if (!PyArg_ParseTuple(args, "I", &index)) {
-        return NULL;
-    }
-
-    if(index >= self->num_symbols) {
-        PyErr_SetString(PyExc_IndexError, "index out of range");
-        return NULL;
-    }
-
-    return PyLong_FromUnsignedLong(self->symbol_count[index]);
-}
-
-static PyObject *
-ArithmeticModel_has_decoder_table(ArithmeticModelObject *self, PyObject *args)
-{
-    if(self->table_size == 0) {
-        Py_RETURN_FALSE;
-    } else {
-        Py_RETURN_TRUE;
-    }
-}
-
-static PyObject *
-ArithmeticModel_get_num_symbols(ArithmeticModelObject *self, PyObject *args)
-{
-    return PyLong_FromUnsignedLong(self->num_symbols);
-}
-
-static PyObject *
-ArithmeticModel_get_compress(ArithmeticModelObject *self, PyObject *args)
-{
-    if(self->compress == 1) {
-        Py_RETURN_TRUE;
-    } else {
-        Py_RETURN_FALSE;
-    }
-}
-
-static PyObject *
-ArithmeticModel_get_table_shift(ArithmeticModelObject *self, PyObject *args)
-{
-    return PyLong_FromUnsignedLong(self->table_shift);
-}
-
-static PyObject *
-ArithmeticModel_get_last_symbol(ArithmeticModelObject *self, PyObject *args)
-{
-    return PyLong_FromUnsignedLong(self->last_symbol);
-}
-
-
-static PyMethodDef ArithmeticModel_methods[] = {
-    {"init",            (PyCFunction)ArithmeticModel_init,  METH_VARARGS,
-        PyDoc_STR("init() -> None")},
-    {"increment_symbol_count", (PyCFunction)ArithmeticModel_increment_symbol_count, METH_VARARGS,
-        PyDoc_STR("increment_symbol_count(symbol) -> None")},
-    {"decoder_table_lookup", (PyCFunction)ArithmeticModel_decoder_table_lookup, METH_VARARGS,
-        PyDoc_STR("decoder_table_lookup(index) -> symbol")},
-    {"distribution_lookup", (PyCFunction)ArithmeticModel_distribution_lookup, METH_VARARGS,
-        PyDoc_STR("distribution_lookup(index) -> symbol")},
-    {"symbol_count_lookup", (PyCFunction)ArithmeticModel_symbol_count_lookup, METH_VARARGS,
-        PyDoc_STR("symbol_count_lookup(index) -> symbol")},
-    {"has_decoder_table", (PyCFunction)ArithmeticModel_has_decoder_table, METH_VARARGS,
-        PyDoc_STR("has_decoder_table() -> bool")},
-    {NULL,              NULL}           /* sentinel */
-};
-
-PyGetSetDef ArithmeticModel_getset[] = {
-    {"num_symbols", (getter)ArithmeticModel_get_num_symbols, NULL, "number of symbols", NULL},
-    {"compress", (getter)ArithmeticModel_get_compress, NULL, "compress", NULL},
-    {"table_shift", (getter)ArithmeticModel_get_table_shift, NULL, "table_shift", NULL},
-    {"last_symbol", (getter)ArithmeticModel_get_last_symbol, NULL, "last_symbol", NULL},
+static PyMethodDef SymbolModel_methods[] = {
+    {"init", (PyCFunction)SymbolModel_init, METH_VARARGS, "init(table=None) -> None"},
+    {"increment_symbol_count", (PyCFunction)SymbolModel_increment_symbol_count, METH_VARARGS, NULL},
+    {"decoder_table_lookup", (PyCFunction)SymbolModel_decoder_table_lookup, METH_VARARGS, NULL},
+    {"distribution_lookup", (PyCFunction)SymbolModel_distribution_lookup, METH_VARARGS, NULL},
+    {"symbol_count_lookup", (PyCFunction)SymbolModel_symbol_count_lookup, METH_VARARGS, NULL},
+    {"has_decoder_table", (PyCFunction)SymbolModel_has_decoder_table, METH_NOARGS, NULL},
     {NULL}
 };
 
-static PyTypeObject ArithmeticModel_Type = {
-    /* The ob_type field must be initialized in the module init function
-     * to be portable to Windows without using C++. */
-    PyVarObject_HEAD_INIT(NULL, 0)
-    "cpylaz.ArithmeticModel",             /*tp_name*/
-    sizeof(ArithmeticModelObject),          /*tp_basicsize*/
-    0,                          /*tp_itemsize*/
-    /* methods */
-    (destructor)ArithmeticModel_dealloc,    /*tp_dealloc*/
-    0,                          /*tp_vectorcall_offset*/
-    (getattrfunc)0,             /*tp_getattr*/
-    0,   /*tp_setattr*/
-    0,                          /*tp_as_async*/
-    0,                          /*tp_repr*/
-    0,                          /*tp_as_number*/
-    0,                          /*tp_as_sequence*/
-    0,                          /*tp_as_mapping*/
-    0,                          /*tp_hash*/
-    0,                          /*tp_call*/
-    0,                          /*tp_str*/
-    0, /*tp_getattro*/
-    0,                          /*tp_setattro*/
-    0,                          /*tp_as_buffer*/
-    Py_TPFLAGS_DEFAULT,         /*tp_flags*/
-    0,                          /*tp_doc*/
-    0,                          /*tp_traverse*/
-    0,                          /*tp_clear*/
-    0,                          /*tp_richcompare*/
-    0,                          /*tp_weaklistoffset*/
-    0,                          /*tp_iter*/
-    0,                          /*tp_iternext*/
-    ArithmeticModel_methods,                /*tp_methods*/
-    0,                          /*tp_members*/
-    ArithmeticModel_getset,                          /*tp_getset*/
-    0,                          /*tp_base*/
-    0,                          /*tp_dict*/
-    0,                          /*tp_descr_get*/
-    0,                          /*tp_descr_set*/
-    0,                          /*tp_dictoffset*/
-    (initproc)ArithmeticModel__init__,                          /*tp_init*/
-    0,                          /*tp_alloc*/
-    PyType_GenericNew,                          /*tp_new*/
-    0,                          /*tp_free*/
-    0,                          /*tp_is_gc*/
+static PyGetSetDef SymbolModel_getset[] = {
+    {"num_symbols", (getter)SymbolModel_get_num_symbols, NULL, NULL, NULL},
+    {"compress", (getter)SymbolModel_get_compress, NULL, NULL, NULL},
+    {"table_shift", (getter)SymbolModel_get_table_shift, NULL, NULL, NULL},
+    {"last_symbol", (getter)SymbolModel_get_last_symbol, NULL, NULL, NULL},
+    {NULL}
 };
 
+static PyTypeObject SymbolModel_Type = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "cpylaz.ArithmeticModel",
+    .tp_basicsize = sizeof(SymbolModelObject),
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_new = PyType_GenericNew,
+    .tp_init = (initproc)SymbolModel_tp_init,
+    .tp_dealloc = (destructor)SymbolModel_dealloc,
+    .tp_methods = SymbolModel_methods,
+    .tp_getset = SymbolModel_getset,
+};
 
-typedef struct {
-    PyObject_HEAD
-    /* Type-specific fields go here. */
-} ArithmeticEncoderObject;
+/* ===================================================== ArithmeticEncoder == */
 
-static PyObject *
-ArithmeticEncoder_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+static PyObject *Encoder_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
 {
-    PyErr_SetString(PyExc_NotImplementedError, "Not implemented");
+    (void)type; (void)args; (void)kwds;
+    PyErr_SetString(PyExc_NotImplementedError,
+                    "lazpy does not implement compression yet");
     return NULL;
 }
 
-static void
-ArithmeticEncoder_dealloc(ArithmeticEncoderObject *self)
-{
-    PyObject_Del(self);
-}
-
-static PyTypeObject ArithmeticEncoder_Type = {
+static PyTypeObject Encoder_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
-    "cpylaz.ArithmeticEncoder", /*tp_name*/
-    sizeof(ArithmeticEncoderObject), /*tp_basicsize*/
-    0,                          /*tp_itemsize*/
-    /* methods */
-    (destructor)ArithmeticEncoder_dealloc,    /*tp_dealloc*/
-    0,                          /*tp_vectorcall_offset*/
-    (getattrfunc)0,             /*tp_getattr*/
-    0,   /*tp_setattr*/
-    0,                          /*tp_as_async*/
-    0,                          /*tp_repr*/
-    0,                          /*tp_as_number*/
-    0,                          /*tp_as_sequence*/
-    0,                          /*tp_as_mapping*/
-    0,                          /*tp_hash*/
-    0,                          /*tp_call*/
-    0,                          /*tp_str*/
-    0, /*tp_getattro*/
-    0,                          /*tp_setattro*/
-    0,                          /*tp_as_buffer*/
-    Py_TPFLAGS_DEFAULT,         /*tp_flags*/
-    0,                          /*tp_doc*/
-    0,                          /*tp_traverse*/
-    0,                          /*tp_clear*/
-    0,                          /*tp_richcompare*/
-    0,                          /*tp_weaklistoffset*/
-    0,                          /*tp_iter*/
-    0,                          /*tp_iternext*/
-    0,                /*tp_methods*/
-    0,                          /*tp_members*/
-    0,                          /*tp_getset*/
-    0,                          /*tp_base*/
-    0,                          /*tp_dict*/
-    0,                          /*tp_descr_get*/
-    0,                          /*tp_descr_set*/
-    0,                          /*tp_dictoffset*/
-    0,                          /*tp_init*/
-    0,                          /*tp_alloc*/
-    ArithmeticEncoder_new,                          /*tp_new*/
-    0,                          /*tp_free*/
-    0,                          /*tp_is_gc*/
+    .tp_name = "cpylaz.ArithmeticEncoder",
+    .tp_basicsize = sizeof(PyObject),
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_new = Encoder_new,
+    .tp_dealloc = (destructor)PyObject_Del,
 };
 
+/* ===================================================== ArithmeticDecoder == */
 
 typedef struct {
     PyObject_HEAD
-    uint32_t length;
-    uint32_t value;
+    LazDecoder d;
+    LazStream *stream;
     PyObject *fp;
-} ArithmeticDecoderObject;
+} DecoderObject;
 
-PyObject *
-getBytesFromPythonFileLikeObject(PyObject *fp, uint32_t length) {
-    PyObject *read = PyObject_GetAttrString(fp, "read");
-    PyObject *readArgs = PyTuple_New(1);
-    PyTuple_SetItem(readArgs, 0, PyLong_FromLong(length));
-    PyObject *read_result = PyObject_CallObject(read, readArgs);
-    Py_DECREF(read);
-    Py_DECREF(readArgs);
+static PyTypeObject Decoder_Type;
 
-    return read_result;
-}
-
-static int
-ArithmeticDecoder_init(ArithmeticDecoderObject *self, PyObject *args, PyObject *kwds)
+static int Decoder_tp_init(DecoderObject *self, PyObject *args, PyObject *kwds)
 {
     PyObject *fp;
-    if (!PyArg_ParseTuple(args, "O", &fp)) {
-        return -1;
-    }
+    (void)kwds;
+    if (!PyArg_ParseTuple(args, "O", &fp)) return -1;
+
+    self->stream = laz_stream_new_file(fp);
+    if (!self->stream) { PyErr_NoMemory(); return -1; }
     Py_INCREF(fp);
     self->fp = fp;
-    self->length = 0;
-    self->value = 0;
+    laz_decoder_setup(&self->d, self->stream);
     return 0;
 }
 
-static void
-ArithmeticDecoder_dealloc(ArithmeticDecoderObject *self)
+static void Decoder_dealloc(DecoderObject *self)
 {
+    if (self->stream) laz_stream_destroy(self->stream);
     Py_XDECREF(self->fp);
     PyObject_Del(self);
 }
 
-static PyObject *
-ArithmeticDecoder_start(ArithmeticDecoderObject *self, PyObject *args)
+static PyObject *Decoder_start(DecoderObject *self, PyObject *Py_UNUSED(i))
 {
-    PyObject *read_result = getBytesFromPythonFileLikeObject(self->fp, 4);
-    uint8_t *bytes = (uint8_t*)PyBytes_AsString(read_result);
-
-    // read big endian uint32_t
-    self->value = bytes[0] << 24 | bytes[1] << 16 | bytes[2] << 8 | bytes[3];
-    self->length = AC_MAX_LENGTH;
-
-    Py_DECREF(read_result);
-
+    laz_decoder_init(&self->d, self->stream, LAZ_TRUE);
     Py_RETURN_NONE;
 }
 
-void
-ArithmeticDecoder__renorm_dec_interval(ArithmeticDecoderObject *self) {
-    while (self->length < AC_MIN_LENGTH) {
-        PyObject *read_result = getBytesFromPythonFileLikeObject(self->fp, 1);
-        void *bytes = PyBytes_AsString(read_result);
-
-        self->value = (self->value << 8) | *((uint8_t *)bytes);
-        self->length <<= 8;
-
-        Py_DECREF(read_result);
-    }
-}
-
-static uint32_t
-_ArithmeticDecoder_decode_bit(ArithmeticDecoderObject *self, ArithmeticBitModelObject *m)
+static PyObject *Decoder_decode_bit(DecoderObject *self, PyObject *args)
 {
-
-    uint32_t x = m->bit_0_prob * (self->length >> BM_LENGTH_SHIFT);
-    uint32_t sym = (self->value >= x);
-
-    if (sym==0){
-        self->length = x;
-        m->bit_0_count++;
-    } else {
-        self->value -= x;
-        self->length -= x;
-    }
-
-    if(self->length < AC_MIN_LENGTH){
-        ArithmeticDecoder__renorm_dec_interval(self);
-    }
-
-    m->bits_until_update--;
-    if (m->bits_until_update == 0) { 
-        updateArithmeticBitModel(m);
-    }
-
-    return sym;
+    PyObject *m;
+    if (!PyArg_ParseTuple(args, "O!", &BitModel_Type, &m)) return NULL;
+    return PyLong_FromUnsignedLong(laz_decode_bit(&self->d, &((BitModelObject *)m)->m));
 }
 
-static PyObject *
-ArithmeticDecoder_decode_bit(ArithmeticDecoderObject *self, PyObject *args)
+static PyObject *Decoder_decode_symbol(DecoderObject *self, PyObject *args)
 {
-    // get ArithmeticBitModel from args
-    PyObject *argm;
-    if (!PyArg_ParseTuple(args, "O!", &ArithmeticBitModel_Type, &argm)) {
+    PyObject *m;
+    LazSymbolModel *sm;
+    if (!PyArg_ParseTuple(args, "O!", &SymbolModel_Type, &m)) return NULL;
+    sm = ((SymbolModelObject *)m)->m;
+    if (!sm->distribution) {
+        PyErr_SetString(PyExc_ValueError, "model not initialized");
         return NULL;
     }
-    ArithmeticBitModelObject *m = (ArithmeticBitModelObject *)argm;
-
-    uint32_t sym = _ArithmeticDecoder_decode_bit(self, m);
-
-    return PyLong_FromUnsignedLong(sym);
-    
+    return PyLong_FromUnsignedLong(laz_decode_symbol(&self->d, sm));
 }
 
-static uint32_t
-_ArithmeticDecoder_decode_symbol(ArithmeticDecoderObject *self, ArithmeticModelObject *m) {
-    uint32_t y = self->length;
-    uint32_t x;
-    uint32_t sym;
-    uint32_t n;
-    uint32_t k;
-
-    // use table lookup for faster decoding
-    if(m->table_size > 0){
-
-        self->length >>= DM_LENGTH_SHIFT;
-        uint32_t dv = self->value / self->length;
-        uint32_t t = dv >> m->table_shift;
-
-        // use table to get first symbol
-        sym = m->decoder_table[t];
-        n = m->decoder_table[t+1] + 1;
-
-        // finish with bisection search
-        while(n > sym+1) {
-            uint32_t k = (sym + n) >> 1;
-            if(m->distribution[k] > dv) {
-                n = k;
-            } else {
-                sym = k;
-            }
-        }
-
-        // compute products
-        x = m->distribution[sym] * self->length;
-
-        if(sym != m->last_symbol) {
-            y = m->distribution[sym+1] * self->length;
-        }
-    } else {
-        // decode using only multiplications
-        x = sym = 0;
-        self->length >>= DM_LENGTH_SHIFT;
-        n = m->num_symbols;
-        k = n >> 1;
-
-        // decode via bisection search
-        while(k != sym){
-            uint32_t z = self->length * m->distribution[k];
-            if(z > self->value){
-                n = k;
-                y = z;  // value is smaller
-            } else {
-                sym = k;
-                x = z;  // value is larger or equal
-            }
-
-            k = (sym + n) >> 1;
-        }
-    }
-
-
-    // update interval
-    self->value -= x;
-    self->length = y - x;
-
-    if(self->length < AC_MIN_LENGTH){
-        ArithmeticDecoder__renorm_dec_interval(self);
-    }
-
-    _ArithmeticModel_increment_symbol_count(m, sym);
-
-    return sym;
-}
-
-static PyObject *
-ArithmeticDecoder_decode_symbol(ArithmeticDecoderObject *self, PyObject *args) {
-    // get ArithmeticModel from args
-    PyObject *argm;
-    if (!PyArg_ParseTuple(args, "O!", &ArithmeticModel_Type, &argm)) {
+static PyObject *Decoder_read_bits(DecoderObject *self, PyObject *args)
+{
+    unsigned int bits;
+    if (!PyArg_ParseTuple(args, "I", &bits)) return NULL;
+    if (bits == 0 || bits > 32) {
+        PyErr_SetString(PyExc_ValueError, "bits must be in 1..32");
         return NULL;
     }
-    ArithmeticModelObject *m = (ArithmeticModelObject *)argm;
-
-    uint32_t sym = _ArithmeticDecoder_decode_symbol(self, m);
-
-    return PyLong_FromUnsignedLong(sym);
+    return PyLong_FromUnsignedLong(laz_read_bits(&self->d, bits));
 }
 
-uint32_t
-_ArithmeticDecoder_read_bits(ArithmeticDecoderObject *self, uint32_t bits) {
-
-    if(bits > 19) {
-        uint32_t lower = _ArithmeticDecoder_read_bits(self, 16);
-        uint32_t upper = _ArithmeticDecoder_read_bits(self, bits-16);
-        return (upper << 16) | lower;
-    }
-
-    self->length >>= bits;
-    uint32_t sym = self->value / (self->length);
-    self->value = self->value % self->length;
-    
-    if(self->length < AC_MIN_LENGTH){
-       ArithmeticDecoder__renorm_dec_interval(self);
-    }
-
-    return sym;
+static PyObject *Decoder_read_int(DecoderObject *self, PyObject *Py_UNUSED(i))
+{
+    return PyLong_FromUnsignedLong(laz_read_int(&self->d));
 }
 
-static PyObject *
-ArithmeticDecoder_read_bits(ArithmeticDecoderObject *self, PyObject *args) {
-    uint32_t bits;
-    if (!PyArg_ParseTuple(args, "I", &bits)) {
-        return NULL;
-    }
-
-    if(bits > 32) {
-        PyErr_SetString(PyExc_ValueError, "bits must be <= 32");
-        return NULL;
-    }
-
-    uint32_t sym = _ArithmeticDecoder_read_bits(self, bits);
-    return PyLong_FromUnsignedLong(sym);
-}
-
-static PyObject *
-ArithmeticDecoder_read_int(ArithmeticDecoderObject *self, PyObject *args){
-    uint32_t sym = _ArithmeticDecoder_read_bits(self, 32);
-    return PyLong_FromUnsignedLong(sym);
-}
-
-static PyObject *
-_ArithmeticDecoder_create_symbol_model(ArithmeticDecoderObject *self, uint32_t num_symbols) {
-
-    PyObject *newargs = PyTuple_New(2);
-    PyTuple_SetItem(newargs, 0, PyLong_FromUnsignedLong(num_symbols));
-    PyTuple_SetItem(newargs, 1, PyBool_FromLong(0));
-    PyObject *model = PyObject_CallObject((PyObject *)&ArithmeticModel_Type, newargs);
-
+static PyObject *Decoder_create_symbol_model(DecoderObject *self, PyObject *args)
+{
+    unsigned int num_symbols;
+    PyObject *argtuple, *model;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "I", &num_symbols)) return NULL;
+    argtuple = Py_BuildValue("(IO)", num_symbols, Py_False);
+    if (!argtuple) return NULL;
+    model = PyObject_CallObject((PyObject *)&SymbolModel_Type, argtuple);
+    Py_DECREF(argtuple);
     return model;
 }
 
-static PyObject *
-ArithmeticDecoder_create_symbol_model(ArithmeticDecoderObject *self, PyObject *args) {
-    uint32_t num_symbols;
-    if (!PyArg_ParseTuple(args, "I", &num_symbols)) {
-        return NULL;
-    }
-
-    return _ArithmeticDecoder_create_symbol_model(self, num_symbols);
-}
-
-static PyObject *
-ArithmeticDecoder__repr__(ArithmeticDecoderObject *self) {
-    return PyUnicode_FromFormat("ArithmeticDecoder(value=%d, length=%d)", self->value, self->length);
-}
-
-static PyObject *
-ArithmeticDecoder_length(ArithmeticDecoderObject *self, PyObject *args)
+static PyObject *Decoder_repr(DecoderObject *self)
 {
-    return PyLong_FromUnsignedLong(self->length);
+    return PyUnicode_FromFormat("ArithmeticDecoder(value=%u, length=%u)",
+                                self->d.value, self->d.length);
 }
 
-static PyObject *
-ArithmeticDecoder_value(ArithmeticDecoderObject *self, PyObject *args)
-{
-    return PyLong_FromUnsignedLong(self->value);
-}
+static PyObject *Decoder_get_length(DecoderObject *self, void *c)
+{ (void)c; return PyLong_FromUnsignedLong(self->d.length); }
 
-static PyMethodDef ArithmeticDecoder_methods[] = {
-    {"start", (PyCFunction)ArithmeticDecoder_start, METH_VARARGS, "Start decoding"},
-    {"decode_bit", (PyCFunction)ArithmeticDecoder_decode_bit, METH_VARARGS, "Decode a bit"},
-    {"decode_symbol", (PyCFunction)ArithmeticDecoder_decode_symbol, METH_VARARGS, "Decode a symbol"},
-    {"read_bits", (PyCFunction)ArithmeticDecoder_read_bits, METH_VARARGS, "Read bits"},
-    {"read_int", (PyCFunction)ArithmeticDecoder_read_int, METH_VARARGS, "Read int"},
-    {"create_symbol_model", (PyCFunction)ArithmeticDecoder_create_symbol_model, METH_VARARGS, "Create symbol model"},
-    {NULL, NULL}  /* Sentinel */
+static PyObject *Decoder_get_value(DecoderObject *self, void *c)
+{ (void)c; return PyLong_FromUnsignedLong(self->d.value); }
+
+static PyObject *Decoder_get_fp(DecoderObject *self, void *c)
+{ (void)c; Py_INCREF(self->fp); return self->fp; }
+
+static PyMethodDef Decoder_methods[] = {
+    {"start", (PyCFunction)Decoder_start, METH_NOARGS, NULL},
+    {"decode_bit", (PyCFunction)Decoder_decode_bit, METH_VARARGS, NULL},
+    {"decode_symbol", (PyCFunction)Decoder_decode_symbol, METH_VARARGS, NULL},
+    {"read_bits", (PyCFunction)Decoder_read_bits, METH_VARARGS, NULL},
+    {"read_int", (PyCFunction)Decoder_read_int, METH_NOARGS, NULL},
+    {"create_symbol_model", (PyCFunction)Decoder_create_symbol_model, METH_VARARGS, NULL},
+    {NULL}
 };
 
-PyGetSetDef ArithmeticDecoder_getset[] = {
-    {"length", (getter)ArithmeticDecoder_length, NULL, "length", NULL},
-    {"value", (getter)ArithmeticDecoder_value, NULL, "value", NULL},
-    {NULL}  /* Sentinel */
+static PyGetSetDef Decoder_getset[] = {
+    {"length", (getter)Decoder_get_length, NULL, NULL, NULL},
+    {"value", (getter)Decoder_get_value, NULL, NULL, NULL},
+    {"fp", (getter)Decoder_get_fp, NULL, NULL, NULL},
+    {NULL}
 };
 
-static PyTypeObject ArithmeticDecoder_Type = {
+static PyTypeObject Decoder_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
-    "cpylaz.ArithmeticDecoder", /*tp_name*/
-    sizeof(ArithmeticDecoderObject), /*tp_basicsize*/
-    0,                          /*tp_itemsize*/
-    /* methods */
-    (destructor)ArithmeticDecoder_dealloc,    /*tp_dealloc*/
-    0,                          /*tp_vectorcall_offset*/
-    (getattrfunc)0,             /*tp_getattr*/
-    0,   /*tp_setattr*/
-    0,                          /*tp_as_async*/
-    (reprfunc)ArithmeticDecoder__repr__,                          /*tp_repr*/
-    0,                          /*tp_as_number*/
-    0,                          /*tp_as_sequence*/
-    0,                          /*tp_as_mapping*/
-    0,                          /*tp_hash*/
-    0,                          /*tp_call*/
-    0,                          /*tp_str*/
-    0, /*tp_getattro*/
-    0,                          /*tp_setattro*/
-    0,                          /*tp_as_buffer*/
-    Py_TPFLAGS_DEFAULT,         /*tp_flags*/
-    0,                          /*tp_doc*/
-    0,                          /*tp_traverse*/
-    0,                          /*tp_clear*/
-    0,                          /*tp_richcompare*/
-    0,                          /*tp_weaklistoffset*/
-    0,                          /*tp_iter*/
-    0,                          /*tp_iternext*/
-    ArithmeticDecoder_methods,                /*tp_methods*/
-    0,                          /*tp_members*/
-    ArithmeticDecoder_getset,                          /*tp_getset*/
-    0,                          /*tp_base*/
-    0,                          /*tp_dict*/
-    0,                          /*tp_descr_get*/
-    0,                          /*tp_descr_set*/
-    0,                          /*tp_dictoffset*/
-    (initproc)ArithmeticDecoder_init,                          /*tp_init*/
-    0,                          /*tp_alloc*/
-    PyType_GenericNew,                          /*tp_new*/
-    0,                          /*tp_free*/
-    0,                          /*tp_is_gc*/
+    .tp_name = "cpylaz.ArithmeticDecoder",
+    .tp_basicsize = sizeof(DecoderObject),
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_new = PyType_GenericNew,
+    .tp_init = (initproc)Decoder_tp_init,
+    .tp_dealloc = (destructor)Decoder_dealloc,
+    .tp_methods = Decoder_methods,
+    .tp_getset = Decoder_getset,
+    .tp_repr = (reprfunc)Decoder_repr,
 };
+
+/* ==================================================== IntegerCompressor == */
 
 typedef struct {
     PyObject_HEAD
-    PyObject *enc;
+    LazIntCompressor ic;
     PyObject *dec;
-    uint32_t k;
-    uint32_t bits;
-    uint32_t contexts;
-    uint32_t bits_high;
-    uint32_t range;
-    uint32_t corr_bits;
-    uint32_t corr_range;
-    int32_t corr_min;
-    int32_t corr_max;
-    PyObject **m_bits;
-    PyObject **m_corrector;
-} IntegerCompressorObject;
+} IntCompObject;
 
-static PyTypeObject IntegerCompressor_Type;
+static PyTypeObject IntComp_Type;
 
-static int
-_IntegerCompressor__init__(IntegerCompressorObject *self, PyObject *enc, 
-                           PyObject *dec, uint32_t bits, uint32_t contexts, 
-                           uint32_t bits_high, uint32_t range) {
+static int IntComp_tp_init(IntCompObject *self, PyObject *args, PyObject *kwds)
+{
+    PyObject *dec_or_enc;
+    unsigned int bits = 16, contexts = 1, bits_high = 8, range = 0;
+    static char *kwlist[] = {"dec", "bits", "contexts", "bits_high", "range", NULL};
 
-    if(enc) {
-        Py_INCREF(enc);
-        self->enc = enc;
-    } else {
-        self->enc = Py_None;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|IIII", kwlist,
+                                     &dec_or_enc, &bits, &contexts, &bits_high, &range))
+        return -1;
+
+    if (!PyObject_TypeCheck(dec_or_enc, &Decoder_Type)) {
+        PyErr_SetString(PyExc_TypeError, "first argument must be an ArithmeticDecoder");
+        return -1;
     }
-
-    if(dec) {
-        Py_INCREF(dec);
-        self->dec = dec;
-    } else {
-        self->dec = Py_None;
-    }
-
-    self->bits = bits;
-    self->contexts = contexts;
-    self->bits_high = bits_high;
-    self->range = range;
-
-    if(range != 0) {
-        self->corr_bits = 0;
-        self->corr_range = range;
-        while(range != 0) {
-            range >>= 1;
-            self->corr_bits += 1;
-        }
-        if(self->corr_range == (1u << (self->corr_bits - 1u))) {
-            self->corr_bits -= 1;
-        }
-        self->corr_min = -self->corr_range / 2;
-        self->corr_max = self->corr_min+self->corr_range-1;
-    } else if( bits > 0 && bits < 32) {
-        self->corr_bits = bits;
-        self->corr_range = 1 << bits;
-        self->corr_min = -self->corr_range / 2;
-        self->corr_max = self->corr_min+self->corr_range-1;
-    } else {
-        self->corr_bits = 32;
-        self->corr_range = 0;
-        self->corr_min = -0x7FFFFFFF;
-        self->corr_max = 0x7FFFFFFF;
-    }
-
-    self->m_bits = NULL;
-    self->m_corrector = NULL;
-
-    self->k = 0;
-
+    Py_INCREF(dec_or_enc);
+    self->dec = dec_or_enc;
+    laz_ic_setup(&self->ic, &((DecoderObject *)dec_or_enc)->d, bits, contexts, bits_high, range);
     return 0;
 }
 
-static int
-IntegerCompressor__init__(IntegerCompressorObject *self, PyObject *args, PyObject *kwargs) {
-
-    uint32_t bits=16;
-    uint32_t contexts=1;
-    uint32_t bits_high=8;
-    uint32_t range=0;
-    PyObject *enc;
-    PyObject *dec;
-
-    PyObject *enc_or_dec;
-    if (!PyArg_ParseTuple(args, "O|IIII", &enc_or_dec, &bits, &contexts, &bits_high, &range)) {
-        return -1;
-    }
-
-    if (PyObject_IsInstance(enc_or_dec, (PyObject *)&ArithmeticEncoder_Type)) {
-        enc = enc_or_dec;
-        dec = NULL;
-    } else if (PyObject_IsInstance(enc_or_dec, (PyObject *)&ArithmeticDecoder_Type)) {
-        enc = NULL;
-        dec = enc_or_dec;
-    } else {
-        PyErr_SetString(PyExc_TypeError, "Argument must be an encoder or decoder");
-        return -1;
-    }
-
-    return _IntegerCompressor__init__(self, enc, dec, bits, contexts, bits_high, range);
-}
-
-static PyObject *
-_IntegerCompressor_create(ArithmeticDecoderObject *dec, uint32_t bits, uint32_t contexts) {
-
-    PyObject *args = Py_BuildValue("(OII)", dec, bits, contexts);
-    PyObject *ic = PyObject_CallObject((PyObject *)&IntegerCompressor_Type, args);
-
-    return ic;
-}
-
-static void
-IntegerCompressor_dealloc(IntegerCompressorObject *self) {
-    Py_XDECREF(self->enc);
+static void IntComp_dealloc(IntCompObject *self)
+{
+    laz_ic_free(&self->ic);
     Py_XDECREF(self->dec);
-    if(self->m_bits != NULL) {
-        for(uint32_t i=0; i<self->contexts; i++) {
-            Py_XDECREF(self->m_bits[i]);
-        }
-        free(self->m_bits);
-    }
-    if(self->m_corrector != NULL) {
-        for(uint32_t i=0; i<self->contexts; i++) {
-            Py_XDECREF(self->m_corrector[i]);
-        }
-        free(self->m_corrector);
-    }
-    Py_TYPE(self)->tp_free((PyObject *)self);
+    PyObject_Del(self);
 }
 
-static PyObject *
-_IntegerCompressor_init_decompressor(IntegerCompressorObject *self){
-
-    if(self->m_bits == NULL){
-        self->m_bits = malloc(self->contexts * sizeof(PyObject *));
-        self->m_corrector = malloc(self->corr_bits * sizeof(PyObject *));
-        for(uint32_t i=0; i<self->contexts; i++) {
-            PyObject *model = _ArithmeticDecoder_create_symbol_model(
-                (ArithmeticDecoderObject *)self->dec, self->corr_bits+1);
-            Py_INCREF(model);
-            self->m_bits[i] = model;
-        }
-
-        PyObject *bitmodel = PyObject_CallObject((PyObject *)&ArithmeticBitModel_Type, NULL);
-        self->m_corrector[0] = bitmodel;
-
-        for(uint32_t i=1; i<self->corr_bits; i++){
-            uint32_t num_symbols;
-            if(i <= self->bits_high){
-                num_symbols = 1 << i;
-            } else {
-                num_symbols = 1 << self->bits_high;
-            } 
-            PyObject *model = _ArithmeticDecoder_create_symbol_model((ArithmeticDecoderObject *)self->dec, num_symbols);
-            Py_INCREF(model);
-            self->m_corrector[i] = model;
-        }
-    }
-
-    for(uint32_t i=0; i<self->contexts; i++) {
-        _ArithmeticModel_init((ArithmeticModelObject *)self->m_bits[i], NULL);
-    }
-
-    _ArithmeticBitModel_init((ArithmeticBitModelObject *)self->m_corrector[0]);
-
-    for(uint32_t i=1; i<self->corr_bits; i++){
-        _ArithmeticModel_init((ArithmeticModelObject *)self->m_corrector[i], NULL);
-    }
-
+static PyObject *IntComp_init_decompressor(IntCompObject *self, PyObject *Py_UNUSED(i))
+{
+    if (!laz_ic_init_decompressor(&self->ic)) return PyErr_NoMemory();
     Py_RETURN_NONE;
 }
 
-static PyObject *
-IntegerCompressor_init_decompressor(IntegerCompressorObject *self, PyObject *args){
-    return _IntegerCompressor_init_decompressor(self);
-}
-
-static int32_t
-_IntegerCompressor_read_corrector(IntegerCompressorObject *self, ArithmeticModelObject *model){
-    uint32_t k1, c1;
-    int32_t c;
-
-    self->k = _ArithmeticDecoder_decode_symbol((ArithmeticDecoderObject *)self->dec, model);
-
-
-    if(self->k != 0) {
-        if(self->k < 32) {
-            c = _ArithmeticDecoder_decode_symbol((ArithmeticDecoderObject *)self->dec, (ArithmeticModelObject *)self->m_corrector[self->k]);
-            if(self->k > self->bits_high){
-                k1 = self->k - self->bits_high;
-                c1 = _ArithmeticDecoder_read_bits((ArithmeticDecoderObject *)self->dec, k1);
-                c = (c << k1) | c1;
-            }
-
-            // translate c back into its correct interval
-            if(c >= (1 << (self->k-1))) {
-                c += 1;
-            } else {
-                c -= (1u << self->k)-1u;
-            }
-
-        } else { 
-            c = self->corr_min;
-        }
-    } else {
-        c = _ArithmeticDecoder_decode_bit((ArithmeticDecoderObject *)self->dec, (ArithmeticBitModelObject *)self->m_corrector[0]);
-    }
-
-    return c;
-}
-
-static int32_t
-_IntegerCompressor_decompress(IntegerCompressorObject *self, int32_t pred, uint32_t context){
-    int32_t real;
-
-    real = pred + _IntegerCompressor_read_corrector(self, (ArithmeticModelObject *)self->m_bits[context]);
-
-    if(real < 0) {
-        real += self->corr_range;
-    } else if(real >= (int32_t)self->corr_range) {
-        real -= self->corr_range;
-    }
-
-    return real;
-}
-
-static PyObject *
-IntegerCompressor_decompress(IntegerCompressorObject *self, PyObject *args){
-    int32_t pred, real;
-    uint32_t context = 0;
-
-    if(!PyArg_ParseTuple(args, "i|I", &pred, &context)) {
+static PyObject *IntComp_decompress(IntCompObject *self, PyObject *args)
+{
+    int pred;
+    unsigned int context = 0;
+    if (!PyArg_ParseTuple(args, "i|I", &pred, &context)) return NULL;
+    if (!self->ic.models_created) {
+        PyErr_SetString(PyExc_ValueError, "call init_decompressor() first");
         return NULL;
     }
-
-    real = _IntegerCompressor_decompress(self, pred, context);
-
-    return PyLong_FromLong(real);
-}
-
-
-static PyObject *
-IntegerCompressor_get_m_bits(IntegerCompressorObject *self, PyObject *args){
-    // returns the m_bits at the given index
-    uint32_t index;
-    if (!PyArg_ParseTuple(args, "I", &index)) {
+    if (context >= self->ic.contexts) {
+        PyErr_SetString(PyExc_IndexError, "context out of range");
         return NULL;
     }
-    if(index >= self->contexts) {
-        PyErr_SetString(PyExc_IndexError, "Index out of range");
+    return PyLong_FromLong(laz_ic_decompress(&self->ic, pred, context));
+}
+
+static PyObject *IntComp_get_m_bits(IntCompObject *self, PyObject *args)
+{
+    unsigned int idx;
+    if (!PyArg_ParseTuple(args, "I", &idx)) return NULL;
+    if (!self->ic.models_created || idx >= self->ic.contexts) {
+        PyErr_SetString(PyExc_IndexError, "index out of range");
         return NULL;
     }
-    Py_INCREF(self->m_bits[index]);
-    return self->m_bits[index];
+    return SymbolModel_borrow(&self->ic.m_bits[idx], (PyObject *)self);
 }
 
-static PyObject *
-IntegerCompressor_get_corrector(IntegerCompressorObject *self, PyObject *args){
-    // returns the m_corrector at the given index
-    uint32_t index;
-    if (!PyArg_ParseTuple(args, "I", &index)) {
+/* Index 0 is the bit model; 1..corr_bits are symbol models. */
+static PyObject *IntComp_get_corrector(IntCompObject *self, PyObject *args)
+{
+    unsigned int idx;
+    if (!PyArg_ParseTuple(args, "I", &idx)) return NULL;
+    if (!self->ic.models_created || idx > self->ic.corr_bits) {
+        PyErr_SetString(PyExc_IndexError, "index out of range");
         return NULL;
     }
-    if(index >= self->corr_bits) {
-        PyErr_SetString(PyExc_IndexError, "Index out of range");
-        return NULL;
+    if (idx == 0) {
+        BitModelObject *o = PyObject_New(BitModelObject, &BitModel_Type);
+        if (!o) return NULL;
+        o->m = self->ic.m_corrector0;      /* snapshot: the bit model is small */
+        return (PyObject *)o;
     }
-    Py_INCREF(self->m_corrector[index]);
-    return self->m_corrector[index];
+    return SymbolModel_borrow(&self->ic.m_corrector[idx], (PyObject *)self);
 }
 
-static PyObject *
-IntegerCompressor_get_enc(IntegerCompressorObject *self, void *closure) {
-    Py_INCREF(self->enc);
-    return self->enc;
-}
+#define INTCOMP_GETTER(name, expr)                                             \
+    static PyObject *IntComp_get_##name(IntCompObject *self, void *c)          \
+    { (void)c; return (expr); }
 
-static PyObject *
-IntegerCompressor_get_dec(IntegerCompressorObject *self, void *closure) {
-    Py_INCREF(self->dec);
-    return self->dec;
-}
+INTCOMP_GETTER(bits, PyLong_FromUnsignedLong(self->ic.bits))
+INTCOMP_GETTER(contexts, PyLong_FromUnsignedLong(self->ic.contexts))
+INTCOMP_GETTER(bits_high, PyLong_FromUnsignedLong(self->ic.bits_high))
+INTCOMP_GETTER(range, PyLong_FromUnsignedLong(self->ic.range))
+INTCOMP_GETTER(k, PyLong_FromUnsignedLong(self->ic.k))
+INTCOMP_GETTER(corr_bits, PyLong_FromUnsignedLong(self->ic.corr_bits))
 
-static PyObject *
-IntegerCompressor_get_bits(IntegerCompressorObject *self, void *closure) {
-    return PyLong_FromUnsignedLong(self->bits);
-}
+static PyObject *IntComp_get_dec(IntCompObject *self, void *c)
+{ (void)c; Py_INCREF(self->dec); return self->dec; }
 
-static PyObject *
-IntegerCompressor_get_contexts(IntegerCompressorObject *self, void *closure) {
-    return PyLong_FromUnsignedLong(self->contexts);
-}
+static PyObject *IntComp_get_enc(IntCompObject *self, void *c)
+{ (void)self; (void)c; Py_RETURN_NONE; }
 
-static PyObject *
-IntegerCompressor_get_bits_high(IntegerCompressorObject *self, void *closure) {
-    return PyLong_FromUnsignedLong(self->bits_high);
-}
-
-static PyObject *
-IntegerCompressor_get_range(IntegerCompressorObject *self, void *closure) {
-    return PyLong_FromUnsignedLong(self->range);
-}
-
-static PyObject *
-IntegerCompressor_get_k(IntegerCompressorObject *self, void *closure) {
-    return PyLong_FromUnsignedLong(self->k);
-}
-
-static PyMethodDef IntegerCompressor_methods[] = {
-    {"init_decompressor", (PyCFunction)IntegerCompressor_init_decompressor, METH_NOARGS, NULL},
-    {"get_m_bits", (PyCFunction)IntegerCompressor_get_m_bits, METH_VARARGS, NULL},
-    {"get_corrector", (PyCFunction)IntegerCompressor_get_corrector, METH_VARARGS, NULL},
-    {"decompress", (PyCFunction)IntegerCompressor_decompress, METH_VARARGS, NULL},
-    {NULL, NULL}  /* Sentinel */
+static PyMethodDef IntComp_methods[] = {
+    {"init_decompressor", (PyCFunction)IntComp_init_decompressor, METH_NOARGS, NULL},
+    {"decompress", (PyCFunction)IntComp_decompress, METH_VARARGS, NULL},
+    {"get_m_bits", (PyCFunction)IntComp_get_m_bits, METH_VARARGS, NULL},
+    {"get_corrector", (PyCFunction)IntComp_get_corrector, METH_VARARGS, NULL},
+    {NULL}
 };
 
-PyGetSetDef IntegerCompressor_getset[] = {
-    {"enc", (getter)IntegerCompressor_get_enc, NULL, "Encoder", NULL},
-    {"dec", (getter)IntegerCompressor_get_dec, NULL, "Decoder", NULL},
-    {"bits", (getter)IntegerCompressor_get_bits, NULL, "Bits", NULL},
-    {"contexts", (getter)IntegerCompressor_get_contexts, NULL, "Contexts", NULL},
-    {"bits_high", (getter)IntegerCompressor_get_bits_high, NULL, "Bits high", NULL},
-    {"range", (getter)IntegerCompressor_get_range, NULL, "Range", NULL},
-    {"k", (getter)IntegerCompressor_get_k, NULL, "K", NULL},
-    {NULL}  /* Sentinel */
+static PyGetSetDef IntComp_getset[] = {
+    {"dec", (getter)IntComp_get_dec, NULL, NULL, NULL},
+    {"enc", (getter)IntComp_get_enc, NULL, NULL, NULL},
+    {"bits", (getter)IntComp_get_bits, NULL, NULL, NULL},
+    {"contexts", (getter)IntComp_get_contexts, NULL, NULL, NULL},
+    {"bits_high", (getter)IntComp_get_bits_high, NULL, NULL, NULL},
+    {"range", (getter)IntComp_get_range, NULL, NULL, NULL},
+    {"k", (getter)IntComp_get_k, NULL, NULL, NULL},
+    {"corr_bits", (getter)IntComp_get_corr_bits, NULL, NULL, NULL},
+    {NULL}
 };
 
-static PyTypeObject IntegerCompressor_Type = {
+static PyTypeObject IntComp_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
-    "cpylaz.IntegerCompressor", /*tp_name*/
-    sizeof(IntegerCompressorObject), /*tp_basicsize*/
-    0,                          /*tp_itemsize*/
-    /* methods */
-    (destructor)IntegerCompressor_dealloc,    /*tp_dealloc*/
-    0,                          /*tp_vectorcall_offset*/
-    (getattrfunc)0,             /*tp_getattr*/
-    0,   /*tp_setattr*/
-    0,                          /*tp_as_async*/
-    0,                          /*tp_repr*/
-    0,                          /*tp_as_number*/
-    0,                          /*tp_as_sequence*/
-    0,                          /*tp_as_mapping*/
-    0,                          /*tp_hash*/
-    0,                          /*tp_call*/
-    0,                          /*tp_str*/
-    0, /*tp_getattro*/
-    0,                          /*tp_setattro*/
-    0,                          /*tp_as_buffer*/
-    Py_TPFLAGS_DEFAULT,         /*tp_flags*/
-    0,                          /*tp_doc*/
-    0,                          /*tp_traverse*/
-    0,                          /*tp_clear*/
-    0,                          /*tp_richcompare*/
-    0,                          /*tp_weaklistoffset*/
-    0,                          /*tp_iter*/
-    0,                          /*tp_iternext*/
-    IntegerCompressor_methods,                /*tp_methods*/
-    0,                          /*tp_members*/
-    IntegerCompressor_getset,                          /*tp_getset*/
-    0,                          /*tp_base*/
-    0,                          /*tp_dict*/
-    0,                          /*tp_descr_get*/
-    0,                          /*tp_descr_set*/
-    0,                          /*tp_dictoffset*/
-    (initproc)IntegerCompressor__init__,                          /*tp_init*/
-    0,                          /*tp_alloc*/
-    PyType_GenericNew,                          /*tp_new*/
-    0,                          /*tp_free*/
-    0,                          /*tp_is_gc*/
+    .tp_name = "cpylaz.IntegerCompressor",
+    .tp_basicsize = sizeof(IntCompObject),
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_new = PyType_GenericNew,
+    .tp_init = (initproc)IntComp_tp_init,
+    .tp_dealloc = (destructor)IntComp_dealloc,
+    .tp_methods = IntComp_methods,
+    .tp_getset = IntComp_getset,
 };
 
-// StreamingMedian5
+/* ================================================================= Point == */
 
+/*
+ * A view onto a decoded point.
+ *
+ * PointReader.read() hands back the reader's own Point rather than a fresh
+ * object, so reading 40M points does not allocate 40M objects; call copy() to
+ * keep one past the next read().
+ *
+ * Ownership runs one way only: the reader holds a reference to its Point, and
+ * the Point holds no reference back. A Point that is still alive when its
+ * reader is destroyed gets detached first (see Reader_dealloc), copying the
+ * last decoded values into its own storage, so a stale Point is frozen rather
+ * than dangling.
+ */
 typedef struct {
-    int32_t values[5];
-    int32_t high;
-} StreamingMedian5;
+    PyObject_HEAD
+    LazPoint *p;            /* -> storage once detached or copied */
+    LazPoint storage;
+    U8 *extra;              /* -> extra_storage once detached or copied */
+    U32 num_extra;
+    U8 *extra_storage;      /* owned, may be NULL */
+} PointObject;
 
-inline void StreamingMedian5_init(StreamingMedian5 *self) {
-    self->values[0] = 0;
-    self->values[1] = 0;
-    self->values[2] = 0;
-    self->values[3] = 0;
-    self->values[4] = 0;
-    self->high = 1;
+static PyTypeObject Point_Type;
+
+/* A view onto memory owned by `reader`, valid until the reader detaches it. */
+static PyObject *Point_borrow(LazPoint *p, U8 *extra, U32 num_extra)
+{
+    PointObject *o = PyObject_New(PointObject, &Point_Type);
+    if (!o) return NULL;
+    o->p = p;
+    o->extra = extra;
+    o->num_extra = num_extra;
+    o->extra_storage = NULL;
+    memset(&o->storage, 0, sizeof(o->storage));
+    return (PyObject *)o;
 }
 
-inline void StreamingMedian5_add(StreamingMedian5 *self, int32_t v){
-    if (self->high) {
-        if (v < self->values[2]) {
-            self->values[4] = self->values[3];
-            self->values[3] = self->values[2];
-            if (v < self->values[0]) {
-                self->values[2] = self->values[1];
-                self->values[1] = self->values[0];
-                self->values[0] = v;
-            } else if (v < self->values[1]) {
-                self->values[2] = self->values[1];
-                self->values[1] = v;
-            } else {
-                self->values[2] = v;
-            }
+/* Copies the currently-viewed values into this object so it can outlive the
+ * memory it was pointing at. Failure to allocate leaves extra bytes empty
+ * rather than dangling. */
+static void Point_detach(PointObject *self)
+{
+    if (self->p == &self->storage) return;
+    self->storage = *self->p;
+    if (self->num_extra) {
+        self->extra_storage = (U8 *)malloc(self->num_extra);
+        if (self->extra_storage) {
+            memcpy(self->extra_storage, self->extra, self->num_extra);
         } else {
-            if (v < self->values[3]) {
-                self->values[4] = self->values[3];
-                self->values[3] = v;
-            } else {
-                self->values[4] = v;
-            }
-            self->high = 0;
-        }
-    } else {
-        if (self->values[2] < v) {
-            self->values[0] = self->values[1];
-            self->values[1] = self->values[2];
-            if (self->values[4] < v) {
-                self->values[2] = self->values[3];
-                self->values[3] = self->values[4];
-                self->values[4] = v;
-            } else if (self->values[3] < v) {
-                self->values[2] = self->values[3];
-                self->values[3] = v;
-            } else {
-                self->values[2] = v;
-            }
-        } else {
-            if (self->values[1] < v) {
-                self->values[0] = self->values[1];
-                self->values[1] = v;
-            } else {
-                self->values[0] = v;
-            }
-            self->high = 1;
+            self->num_extra = 0;
         }
     }
+    self->p = &self->storage;
+    self->extra = self->extra_storage;
 }
 
-inline int32_t StreamingMedian5_get(StreamingMedian5* self)
+static void Point_dealloc(PointObject *self)
 {
-    return self->values[2];
+    free(self->extra_storage);
+    PyObject_Del(self);
 }
 
-const uint8_t number_return_map[8][8] = 
+static PyObject *Point_copy(PointObject *self, PyObject *Py_UNUSED(i))
 {
-  { 15, 14, 13, 12, 11, 10,  9,  8 },
-  { 14,  0,  1,  3,  6, 10, 10,  9 },
-  { 13,  1,  2,  4,  7, 11, 11, 10 },
-  { 12,  3,  4,  5,  8, 12, 12, 11 },
-  { 11,  6,  7,  8,  9, 13, 13, 12 },
-  { 10, 10, 11, 12, 13, 14, 14, 13 },
-  {  9, 10, 11, 12, 13, 14, 15, 14 },
-  {  8,  9, 10, 11, 12, 13, 14, 15 }
+    PointObject *o = PyObject_New(PointObject, &Point_Type);
+    if (!o) return NULL;
+    o->storage = *self->p;
+    o->p = &o->storage;
+    o->num_extra = self->num_extra;
+    o->extra_storage = NULL;
+    o->extra = NULL;
+    if (self->num_extra) {
+        o->extra_storage = (U8 *)malloc(self->num_extra);
+        if (!o->extra_storage) { PyObject_Del(o); return PyErr_NoMemory(); }
+        memcpy(o->extra_storage, self->extra, self->num_extra);
+        o->extra = o->extra_storage;
+    }
+    return (PyObject *)o;
+}
+
+#define POINT_UGETTER(name, expr)                                              \
+    static PyObject *Point_get_##name(PointObject *self, void *c)              \
+    { (void)c; return PyLong_FromUnsignedLong((unsigned long)(expr)); }
+#define POINT_IGETTER(name, expr)                                              \
+    static PyObject *Point_get_##name(PointObject *self, void *c)              \
+    { (void)c; return PyLong_FromLong((long)(expr)); }
+
+POINT_IGETTER(X, self->p->X)
+POINT_IGETTER(Y, self->p->Y)
+POINT_IGETTER(Z, self->p->Z)
+POINT_UGETTER(intensity, self->p->intensity)
+POINT_UGETTER(return_number, self->p->return_number)
+POINT_UGETTER(number_of_returns, self->p->number_of_returns)
+POINT_UGETTER(scan_direction_flag, self->p->scan_direction_flag)
+POINT_UGETTER(edge_of_flight_line, self->p->edge_of_flight_line)
+POINT_UGETTER(classification, self->p->classification)
+POINT_UGETTER(synthetic_flag, self->p->synthetic_flag)
+POINT_UGETTER(keypoint_flag, self->p->keypoint_flag)
+POINT_UGETTER(withheld_flag, self->p->withheld_flag)
+POINT_IGETTER(scan_angle_rank, self->p->scan_angle_rank)
+POINT_UGETTER(user_data, self->p->user_data)
+POINT_UGETTER(point_source_ID, self->p->point_source_ID)
+POINT_IGETTER(extended_scan_angle, self->p->extended_scan_angle)
+POINT_UGETTER(extended_point_type, self->p->extended_point_type)
+POINT_UGETTER(extended_scanner_channel, self->p->extended_scanner_channel)
+POINT_UGETTER(extended_classification_flags, self->p->extended_classification_flags)
+POINT_UGETTER(extended_classification, self->p->extended_classification)
+POINT_UGETTER(extended_return_number, self->p->extended_return_number)
+POINT_UGETTER(extended_number_of_returns, self->p->extended_number_of_returns)
+
+static PyObject *Point_get_gps_time(PointObject *self, void *c)
+{ (void)c; return PyFloat_FromDouble(self->p->gps_time); }
+
+static PyObject *Point_get_rgb(PointObject *self, void *c)
+{
+    (void)c;
+    return Py_BuildValue("(IIII)", (unsigned)self->p->rgb[0], (unsigned)self->p->rgb[1],
+                         (unsigned)self->p->rgb[2], (unsigned)self->p->rgb[3]);
+}
+
+static PyObject *Point_get_wave_packet(PointObject *self, void *c)
+{ (void)c; return PyBytes_FromStringAndSize((const char *)self->p->wave_packet, 29); }
+
+static PyObject *Point_get_extra_bytes(PointObject *self, void *c)
+{
+    (void)c;
+    if (!self->num_extra) return PyBytes_FromStringAndSize(NULL, 0);
+    return PyBytes_FromStringAndSize((const char *)self->extra, self->num_extra);
+}
+
+static PyGetSetDef Point_getset[] = {
+    {"X", (getter)Point_get_X, NULL, "unscaled x", NULL},
+    {"Y", (getter)Point_get_Y, NULL, "unscaled y", NULL},
+    {"Z", (getter)Point_get_Z, NULL, "unscaled z", NULL},
+    {"intensity", (getter)Point_get_intensity, NULL, NULL, NULL},
+    {"return_number", (getter)Point_get_return_number, NULL, NULL, NULL},
+    {"number_of_returns", (getter)Point_get_number_of_returns, NULL, NULL, NULL},
+    {"scan_direction_flag", (getter)Point_get_scan_direction_flag, NULL, NULL, NULL},
+    {"edge_of_flight_line", (getter)Point_get_edge_of_flight_line, NULL, NULL, NULL},
+    {"classification", (getter)Point_get_classification, NULL, NULL, NULL},
+    {"synthetic_flag", (getter)Point_get_synthetic_flag, NULL, NULL, NULL},
+    {"keypoint_flag", (getter)Point_get_keypoint_flag, NULL, NULL, NULL},
+    {"withheld_flag", (getter)Point_get_withheld_flag, NULL, NULL, NULL},
+    {"scan_angle_rank", (getter)Point_get_scan_angle_rank, NULL, NULL, NULL},
+    {"user_data", (getter)Point_get_user_data, NULL, NULL, NULL},
+    {"point_source_ID", (getter)Point_get_point_source_ID, NULL, NULL, NULL},
+    {"extended_scan_angle", (getter)Point_get_extended_scan_angle, NULL, NULL, NULL},
+    {"extended_point_type", (getter)Point_get_extended_point_type, NULL, NULL, NULL},
+    {"extended_scanner_channel", (getter)Point_get_extended_scanner_channel, NULL, NULL, NULL},
+    {"extended_classification_flags", (getter)Point_get_extended_classification_flags, NULL, NULL, NULL},
+    {"extended_classification", (getter)Point_get_extended_classification, NULL, NULL, NULL},
+    {"extended_return_number", (getter)Point_get_extended_return_number, NULL, NULL, NULL},
+    {"extended_number_of_returns", (getter)Point_get_extended_number_of_returns, NULL, NULL, NULL},
+    {"gps_time", (getter)Point_get_gps_time, NULL, NULL, NULL},
+    {"rgb", (getter)Point_get_rgb, NULL, "(red, green, blue, nir)", NULL},
+    {"wave_packet", (getter)Point_get_wave_packet, NULL, NULL, NULL},
+    {"extra_bytes", (getter)Point_get_extra_bytes, NULL, NULL, NULL},
+    {NULL}
 };
 
-const uint8_t number_return_level[8][8] = 
-{
-  {  0,  1,  2,  3,  4,  5,  6,  7 },
-  {  1,  0,  1,  2,  3,  4,  5,  6 },
-  {  2,  1,  0,  1,  2,  3,  4,  5 },
-  {  3,  2,  1,  0,  1,  2,  3,  4 },
-  {  4,  3,  2,  1,  0,  1,  2,  3 },
-  {  5,  4,  3,  2,  1,  0,  1,  2 },
-  {  6,  5,  4,  3,  2,  1,  0,  1 },
-  {  7,  6,  5,  4,  3,  2,  1,  0 }
+static PyMethodDef Point_methods[] = {
+    {"copy", (PyCFunction)Point_copy, METH_NOARGS,
+     "copy() -> Point  (detached from the reader's buffer)"},
+    {NULL}
 };
 
-typedef struct {
-    uint32_t X;
-    uint32_t Y;
-    uint32_t Z;
-    uint16_t intensity;
-    uint8_t return_number : 3;
-    uint8_t number_of_returns : 3;
-    uint8_t scan_direction_flag : 1;
-    uint8_t edge_of_flight_line : 1;
-    uint8_t classification : 5;
-    uint8_t synthetic_flag : 1;
-    uint8_t keypoint_flag : 1;
-    uint8_t withheld_flag : 1;
-    int8_t scan_angle_rank;
-    uint8_t user_data;
-    uint16_t point_source_ID;
-} LASpoint;
-
-inline uint8_t
-LASpoint_get_bitfield(LASpoint *self){
-    return ((uint8_t *)self)[14];
+static PyObject *Point_repr(PointObject *self)
+{
+    return PyUnicode_FromFormat(
+        "Point(X=%i, Y=%i, Z=%i, intensity=%u, return_number=%u, "
+        "number_of_returns=%u, classification=%u)",
+        self->p->X, self->p->Y, self->p->Z, (unsigned)self->p->intensity,
+        (unsigned)self->p->return_number, (unsigned)self->p->number_of_returns,
+        (unsigned)self->p->classification);
 }
 
-inline void
-LASpoint_set_bitfield(LASpoint *self, uint8_t bitfield){
-    ((uint8_t *)self)[14] = bitfield;
-}
+static PyTypeObject Point_Type = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "cpylaz.Point",
+    .tp_basicsize = sizeof(PointObject),
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_dealloc = (destructor)Point_dealloc,
+    .tp_getset = Point_getset,
+    .tp_methods = Point_methods,
+    .tp_repr = (reprfunc)Point_repr,
+};
 
+/* =========================================================== PointReader == */
 
 typedef struct {
     PyObject_HEAD
-    LASpoint point;
-} LASpointObject;
+    LazReadPoint rp;
+    LazStream *stream;
+    PyObject *fp;
+    LazPoint point;
+    U8 *extra_bytes;
+    U32 num_extra_bytes;
+    PyObject *point_view;
+    BOOL ready;
+    U64 index;              /* number of points read so far */
+} ReaderObject;
 
-static void
-LASpoint_dealloc(LASpointObject* self)
+static PyTypeObject Reader_Type;
+
+static void Reader_dealloc(ReaderObject *self)
 {
-    Py_TYPE(self)->tp_free((PyObject*)self);
+    /* the view points into memory this object is about to free */
+    if (self->point_view) {
+        Point_detach((PointObject *)self->point_view);
+        Py_CLEAR(self->point_view);
+    }
+    laz_readpoint_destroy(&self->rp);
+    if (self->stream) laz_stream_destroy(self->stream);
+    Py_XDECREF(self->fp);
+    free(self->extra_bytes);
+    PyObject_Del(self);
 }
 
-static PyObject *
-LASpoint_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+/* items is a sequence of (type, size, version) triples from the LASzip VLR. */
+static int parse_items(PyObject *seq, LazItem **out, U32 *out_n)
 {
-    LASpointObject *self;
+    Py_ssize_t n, i;
+    LazItem *items;
 
-    self = (LASpointObject *)type->tp_alloc(type, 0);
-    if (self != NULL) {
-        self->point.X = 0;
-        self->point.Y = 0;
-        self->point.Z = 0;
-        self->point.intensity = 0;
-        self->point.return_number = 0;
-        self->point.number_of_returns = 0;
-        self->point.scan_direction_flag = 0;
-        self->point.edge_of_flight_line = 0;
-        self->point.classification = 0;
-        self->point.synthetic_flag = 0;
-        self->point.keypoint_flag = 0;
-        self->point.withheld_flag = 0;
-        self->point.scan_angle_rank = 0;
-        self->point.user_data = 0;
-        self->point.point_source_ID = 0;
-    }
-
-    return (PyObject *)self;
-}
-
-static PyObject *
-LASpoint_getattr(LASpointObject *self, char *name)
-{
-    if (strcmp(name, "X") == 0) {
-        return PyLong_FromUnsignedLong(self->point.X);
-    }
-    if (strcmp(name, "Y") == 0) {
-        return PyLong_FromUnsignedLong(self->point.Y);
-    }
-    if (strcmp(name, "Z") == 0) {
-        return PyLong_FromUnsignedLong(self->point.Z);
-    }
-    if (strcmp(name, "intensity") == 0) {
-        return PyLong_FromUnsignedLong(self->point.intensity);
-    }
-    if (strcmp(name, "return_number") == 0) {
-        return PyLong_FromUnsignedLong(self->point.return_number);
-    }
-    if (strcmp(name, "number_of_returns") == 0) {
-        return PyLong_FromUnsignedLong(self->point.number_of_returns);
-    }
-    if (strcmp(name, "scan_direction_flag") == 0) {
-        return PyLong_FromUnsignedLong(self->point.scan_direction_flag);
-    }
-    if (strcmp(name, "edge_of_flight_line") == 0) {
-        return PyLong_FromUnsignedLong(self->point.edge_of_flight_line);
-    }
-    if (strcmp(name, "classification") == 0) {
-        return PyLong_FromUnsignedLong(self->point.classification);
-    }
-    if (strcmp(name, "synthetic_flag") == 0) {
-        return PyLong_FromUnsignedLong(self->point.synthetic_flag);
-    }
-    if (strcmp(name, "keypoint_flag") == 0) {
-        return PyLong_FromUnsignedLong(self->point.keypoint_flag);
-    }
-    if (strcmp(name, "withheld_flag") == 0) {
-        return PyLong_FromUnsignedLong(self->point.withheld_flag);
-    }
-    if (strcmp(name, "scan_angle_rank") == 0) {
-        return PyLong_FromLong(self->point.scan_angle_rank);
-    }
-    if (strcmp(name, "user_data") == 0) {
-        return PyLong_FromUnsignedLong(self->point.user_data);
-    }
-    if (strcmp(name, "point_source_ID") == 0) {
-        return PyLong_FromUnsignedLong(self->point.point_source_ID);
-    }
-
-    return PyObject_GenericGetAttr((PyObject *)self, PyUnicode_FromString(name));
-}
-
-static int
-LASpoint_setattr(LASpointObject *self, char *name, PyObject *value)
-{
-    if (value == NULL) {
-        PyErr_SetString(PyExc_AttributeError, "Cannot delete attributes");
+    seq = PySequence_Fast(seq, "items must be a sequence");
+    if (!seq) return -1;
+    n = PySequence_Fast_GET_SIZE(seq);
+    if (n <= 0) {
+        Py_DECREF(seq);
+        PyErr_SetString(PyExc_ValueError, "items must not be empty");
         return -1;
     }
+    items = (LazItem *)PyMem_Malloc((size_t)n * sizeof(LazItem));
+    if (!items) { Py_DECREF(seq); PyErr_NoMemory(); return -1; }
 
-    if (strcmp(name, "X") == 0) {
-        self->point.X = PyLong_AsUnsignedLong(value);
-        return 0;
+    for (i = 0; i < n; i++) {
+        PyObject *t = PySequence_Fast_GET_ITEM(seq, i);
+        unsigned int type, size, version;
+        if (!PyArg_ParseTuple(t, "III", &type, &size, &version)) {
+            PyMem_Free(items);
+            Py_DECREF(seq);
+            return -1;
+        }
+        items[i].type = (U16)type;
+        items[i].size = (U16)size;
+        items[i].version = (U16)version;
     }
-    if (strcmp(name, "Y") == 0) {
-        self->point.Y = PyLong_AsUnsignedLong(value);
-        return 0;
-    }
-    if (strcmp(name, "Z") == 0) {
-        self->point.Z = PyLong_AsUnsignedLong(value);
-        return 0;
-    }
-    if (strcmp(name, "intensity") == 0) {
-        self->point.intensity = PyLong_AsUnsignedLong(value);
-        return 0;
-    }
-    if (strcmp(name, "return_number") == 0) {
-        self->point.return_number = PyLong_AsUnsignedLong(value);
-        return 0;
-    }
-    if (strcmp(name, "number_of_returns") == 0) {
-        self->point.number_of_returns = PyLong_AsUnsignedLong(value);
-        return 0;
-    }
-    if (strcmp(name, "scan_direction_flag") == 0) {
-        self->point.scan_direction_flag = PyLong_AsUnsignedLong(value);
-        return 0;
-    }
-    if (strcmp(name, "edge_of_flight_line") == 0) {
-        self->point.edge_of_flight_line = PyLong_AsUnsignedLong(value);
-        return 0;
-    }
-    if (strcmp(name, "classification") == 0) {
-        self->point.classification = PyLong_AsUnsignedLong(value);
-        return 0;
-    }
-    if (strcmp(name, "synthetic_flag") == 0) {
-        self->point.synthetic_flag = PyLong_AsUnsignedLong(value);
-        return 0;
-    }
-    if (strcmp(name, "keypoint_flag") == 0) {
-        self->point.keypoint_flag = PyLong_AsUnsignedLong(value);
-        return 0;
-    }
-    if (strcmp(name, "withheld_flag") == 0) {
-        self->point.withheld_flag = PyLong_AsUnsignedLong(value);
-        return 0;
-    }
-    if (strcmp(name, "scan_angle_rank") == 0) {
-        self->point.scan_angle_rank = PyLong_AsLong(value);
-        return 0;
-    }
-    if (strcmp(name, "user_data") == 0) {
-        self->point.user_data = PyLong_AsUnsignedLong(value);
-        return 0;
-    }
-    if (strcmp(name, "point_source_ID") == 0) {
-        self->point.point_source_ID = PyLong_AsUnsignedLong(value);
-        return 0;
-    }
-
-    PyErr_SetString(PyExc_AttributeError, "Unknown attribute");
-    return -1;
-}
-
-static PyMethodDef LASpoint_methods[] = {
-    {NULL}  /* Sentinel */
-};
-
-PyGetSetDef LASpoint_getset[] = {
-    {NULL}  /* Sentinel */
-};
-
-static PyTypeObject LASpoint_Type = {
-    PyVarObject_HEAD_INIT(NULL, 0)
-    "cpylaz.LASpoint", /*tp_name*/
-    sizeof(LASpointObject), /*tp_basicsize*/
-    0,                          /*tp_itemsize*/
-    /* methods */
-    (destructor)LASpoint_dealloc,    /*tp_dealloc*/
-    0,                          /*tp_vectorcall_offset*/
-    (getattrfunc)LASpoint_getattr,             /*tp_getattr*/
-    (setattrfunc)LASpoint_setattr,   /*tp_setattr*/
-    0,                          /*tp_as_async*/
-    0,                          /*tp_repr*/
-    0,                          /*tp_as_number*/
-    0,                          /*tp_as_sequence*/
-    0,                          /*tp_as_mapping*/
-    0,                          /*tp_hash*/
-    0,                          /*tp_call*/
-    0,                          /*tp_str*/
-    0, /*tp_getattro*/
-    0,                          /*tp_setattro*/
-    0,                          /*tp_as_buffer*/
-    Py_TPFLAGS_DEFAULT,         /*tp_flags*/
-    0,                          /*tp_doc*/
-    0,                          /*tp_traverse*/
-    0,                          /*tp_clear*/
-    0,                          /*tp_richcompare*/
-    0,                          /*tp_weaklistoffset*/
-    0,                          /*tp_iter*/
-    0,                          /*tp_iternext*/
-    LASpoint_methods,                /*tp_methods*/
-    0,                          /*tp_members*/
-    LASpoint_getset,                          /*tp_getset*/
-    0,                          /*tp_base*/
-    0,                          /*tp_dict*/
-    0,                          /*tp_descr_get*/
-    0,                          /*tp_descr_set*/
-    0,                          /*tp_dictoffset*/
-    (initproc)0,                          /*tp_init*/
-    0,                          /*tp_alloc*/
-    LASpoint_new,                          /*tp_new*/
-    0,                          /*tp_free*/
-    0,                          /*tp_is_gc*/
-};
-
-typedef struct {
-    PyObject_HEAD
-    ArithmeticDecoderObject *dec;
-    ArithmeticModelObject *m_changed_values;
-    IntegerCompressorObject *ic_intensity;
-    ArithmeticModelObject *m_scan_rank[2];
-    IntegerCompressorObject *ic_point_source_id;
-    ArithmeticModelObject *m_bit_byte[256];
-    ArithmeticModelObject *m_classification[256];
-    ArithmeticModelObject *m_user_data[256];
-    IntegerCompressorObject *ic_dx;
-    IntegerCompressorObject *ic_dy;
-    IntegerCompressorObject *ic_z;
-    StreamingMedian5 last_x_diff_median5[16];
-    StreamingMedian5 last_y_diff_median5[16];
-
-    uint16_t last_intensity[16];
-    int32_t last_height[8];
-    LASpoint last_item;
-} read_item_compressed_point10_v2Object;
-
-
-static void
-read_item_compressed_point10_v2_dealloc(read_item_compressed_point10_v2Object* self)
-{
-    Py_XDECREF(self->dec);
-    Py_XDECREF(self->m_changed_values);
-    Py_XDECREF(self->ic_intensity);
-    for(int i = 0; i < 2; i++)
-        Py_XDECREF(&self->m_scan_rank[i]);
-    Py_XDECREF(self->ic_point_source_id);
-    for(int i = 0; i < 256; i++)
-        Py_XDECREF(&self->m_bit_byte[i]);
-    for(int i = 0; i < 256; i++)
-        Py_XDECREF(&self->m_classification[i]);
-    for(int i = 0; i < 256; i++)
-        Py_XDECREF(&self->m_user_data[i]);
-    Py_XDECREF(self->ic_dx);
-    Py_XDECREF(self->ic_dy);
-    Py_XDECREF(self->ic_z);
-
-    Py_TYPE(self)->tp_free((PyObject *)self);
-}
-
-static int
-_read_item_compressed_point10_v2__init__(read_item_compressed_point10_v2Object *self, ArithmeticDecoderObject *dec)
-{
-    self->dec = dec;
-    Py_INCREF(dec);
-
-    self->m_changed_values = (ArithmeticModelObject *)_ArithmeticDecoder_create_symbol_model(self->dec, 64);
-    self->ic_intensity = (IntegerCompressorObject *)_IntegerCompressor_create(self->dec, 16, 4);
-    for(int i = 0; i < 2; i++)
-        self->m_scan_rank[i] = (ArithmeticModelObject *)_ArithmeticDecoder_create_symbol_model(self->dec, 256);
-    self->ic_point_source_id = (IntegerCompressorObject *)_IntegerCompressor_create(self->dec, 16, 1);
-    for(int i = 0; i < 256; i++)
-        self->m_bit_byte[i] = NULL;
-    for(int i = 0; i < 256; i++)
-        self->m_classification[i] = NULL;
-    for(int i = 0; i < 256; i++)
-        self->m_user_data[i] = NULL;
-    self->ic_dx = (IntegerCompressorObject *)_IntegerCompressor_create(self->dec, 32, 2);
-    self->ic_dy = (IntegerCompressorObject *)_IntegerCompressor_create(self->dec, 32, 22);
-    self->ic_z = (IntegerCompressorObject *)_IntegerCompressor_create(self->dec, 32, 20);
-
-    for(int i = 0; i < 16; i++) {
-        StreamingMedian5_init(&self->last_x_diff_median5[i]);
-        StreamingMedian5_init(&self->last_y_diff_median5[i]);
-    }
-
-    for(int i = 0; i < 16; i++)
-        self->last_intensity[i] = 0;
-
-    for(int i = 0; i < 8; i++)
-        self->last_height[i] = 0;
-
-    memset(&self->last_item, 0, sizeof(LASpoint));
-    
+    Py_DECREF(seq);
+    *out = items;
+    *out_n = (U32)n;
     return 0;
-
 }
 
-static int
-read_item_compressed_point10_v2__init__(read_item_compressed_point10_v2Object *self, PyObject *args, PyObject *kwds)
+static int Reader_tp_init(ReaderObject *self, PyObject *args, PyObject *kwds)
 {
+    PyObject *fp, *items_obj;
+    unsigned int compressor, coder = 0, chunk_size = 0;
+    unsigned int selective = LAZ_DECOMPRESS_SELECTIVE_ALL;
+    unsigned int num_extra = 0;
+    long long start_offset = -1;
+    LazItem *items = NULL;
+    U32 num_items = 0;
+    static char *kwlist[] = {"fp", "items", "compressor", "coder", "chunk_size",
+                             "start_offset", "num_extra_bytes",
+                             "decompress_selective", NULL};
 
-    PyObject *argdec;
-    if (!PyArg_ParseTuple(args, "O!", &ArithmeticDecoder_Type, &argdec)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "OOI|IILII", kwlist,
+                                     &fp, &items_obj, &compressor, &coder,
+                                     &chunk_size, &start_offset, &num_extra,
+                                     &selective))
+        return -1;
+
+    if (parse_items(items_obj, &items, &num_items) < 0) return -1;
+
+    self->stream = laz_stream_new_file(fp);
+    if (!self->stream) { PyMem_Free(items); PyErr_NoMemory(); return -1; }
+    Py_INCREF(fp);
+    self->fp = fp;
+
+    if (start_offset >= 0 && !laz_stream_seek(self->stream, (I64)start_offset)) {
+        PyMem_Free(items);
+        PyErr_SetString(PyExc_OSError, "could not seek to the start of point data");
         return -1;
     }
-    ArithmeticDecoderObject *dec = (ArithmeticDecoderObject *)argdec;
 
-    return _read_item_compressed_point10_v2__init__(self, (ArithmeticDecoderObject *)dec);
+    self->num_extra_bytes = num_extra;
+    if (num_extra) {
+        self->extra_bytes = (U8 *)calloc(num_extra, 1);
+        if (!self->extra_bytes) { PyMem_Free(items); PyErr_NoMemory(); return -1; }
+    }
+    self->point.num_extra_bytes = (I32)num_extra;
+    self->point.extra_bytes = self->extra_bytes;
+
+    laz_readpoint_init_struct(&self->rp, selective);
+    if (!laz_readpoint_setup(&self->rp, num_items, items, compressor, coder, chunk_size)) {
+        PyMem_Free(items);
+        PyErr_SetString(PyExc_ValueError, self->rp.last_error);
+        return -1;
+    }
+    PyMem_Free(items);
+
+    if (!laz_readpoint_init(&self->rp, self->stream)) {
+        PyErr_SetString(PyExc_ValueError, "could not initialise the point reader");
+        return -1;
+    }
+
+    /* Point formats 6-10 carry extended_point_type=1 for every point; LASzip
+     * stamps it once here rather than on each decode, so nothing in the read
+     * path would ever set it. */
+    if (self->rp.has_point14) self->point.extended_point_type = 1;
+
+    self->point_view = Point_borrow(&self->point, self->extra_bytes,
+                                    self->num_extra_bytes);
+    if (!self->point_view) return -1;
+
+    self->ready = LAZ_TRUE;
+    self->index = 0;
+    return 0;
 }
 
-static PyObject *
-_read_item_compressed_point10_v2_init(read_item_compressed_point10_v2Object *self, LASpoint last_item)
+static PyObject *Reader_read(ReaderObject *self, PyObject *Py_UNUSED(i))
 {
-    //init state
-    for(int i = 0; i < 16; i++) {
-        StreamingMedian5_init(&self->last_x_diff_median5[i]);
-        StreamingMedian5_init(&self->last_y_diff_median5[i]);
+    BOOL ok;
+    if (!self->ready) {
+        PyErr_SetString(PyExc_ValueError, "reader is not initialised");
+        return NULL;
     }
-    for(int i = 0; i < 16; i++)
-        self->last_intensity[i] = 0;
-    for(int i = 0; i < 8; i++)
-        self->last_height[i] = 0;
+    Py_BEGIN_ALLOW_THREADS
+    ok = laz_readpoint_read(&self->rp, &self->point, self->extra_bytes);
+    Py_END_ALLOW_THREADS
 
-    _ArithmeticModel_init(self->m_changed_values, NULL);
-    _IntegerCompressor_init_decompressor(self->ic_intensity);
-    for(int i = 0; i < 2; i++)
-        _ArithmeticModel_init(self->m_scan_rank[i], NULL);
-    _IntegerCompressor_init_decompressor(self->ic_point_source_id);
-
-    for(int i = 0; i < 256; i++) {
-        if(self->m_bit_byte[i] != NULL)
-            _ArithmeticModel_init(self->m_bit_byte[i], NULL);
+    if (!ok) {
+        PyErr_SetString(PyExc_RuntimeError, self->rp.last_error);
+        return NULL;
     }
-    for(int i = 0; i < 256; i++) {
-        if(self->m_classification[i] != NULL)
-            _ArithmeticModel_init(self->m_classification[i], NULL);
-    }
-    for(int i = 0; i < 256; i++) {
-        if(self->m_user_data[i] != NULL)
-            _ArithmeticModel_init(self->m_user_data[i], NULL);
-    }
-
-    _IntegerCompressor_init_decompressor(self->ic_dx);
-    _IntegerCompressor_init_decompressor(self->ic_dy);
-    _IntegerCompressor_init_decompressor(self->ic_z);
-
-    self->last_item = last_item;
-    self->last_item.intensity = 0;
-
-    Py_INCREF(Py_None);
-    return Py_None;
+    self->index++;
+    Py_INCREF(self->point_view);
+    return self->point_view;
 }
 
-static PyObject *
-_read_item_compressed_point10_v2_read(read_item_compressed_point10_v2Object *self, uint32_t context) {
-    uint32_t changed_values = _ArithmeticDecoder_decode_symbol(self->dec, self->m_changed_values);
+/*
+ * Decodes `count` points and returns an FNV-1a hash of every decoded field,
+ * without building a Python object per point. This exists so a whole file can
+ * be checked against a laszip reference (tools/lazdump.c --hash) -- at tens of
+ * millions of points, hashing in Python is the bottleneck, not decoding.
+ * The record layout must match lazdump.c and compare_with_laszip.py exactly.
+ */
+static PyObject *Reader_checksum(ReaderObject *self, PyObject *args)
+{
+    long long count = -1;
+    U64 h = 14695981039346656037ULL;
+    U64 done = 0;
+    BOOL ok = LAZ_TRUE;
 
-    // decompress bit field byte
-    if(changed_values & 0b100000) {
-        uint32_t bitfield = LASpoint_get_bitfield(&self->last_item);
-        if(self->m_bit_byte[bitfield] == NULL) {
-            ArithmeticModelObject *model = (ArithmeticModelObject *)_ArithmeticDecoder_create_symbol_model(self->dec, 256);
-            _ArithmeticModel_init(model, NULL);
-            self->m_bit_byte[bitfield] = model;
+    if (!PyArg_ParseTuple(args, "|L", &count)) return NULL;
+
+    Py_BEGIN_ALLOW_THREADS
+    while (count < 0 || done < (U64)count) {
+        U8 rec[64];
+        LazPoint *p = &self->point;
+        int i;
+
+        if (!laz_readpoint_read(&self->rp, p, self->extra_bytes)) { ok = LAZ_FALSE; break; }
+
+        memset(rec, 0, sizeof(rec));
+        memcpy(rec + 0, &p->X, 4);
+        memcpy(rec + 4, &p->Y, 4);
+        memcpy(rec + 8, &p->Z, 4);
+        memcpy(rec + 12, &p->intensity, 2);
+        rec[14] = ((U8 *)p)[14];
+        rec[15] = ((U8 *)p)[15];
+        rec[16] = (U8)p->scan_angle_rank;
+        rec[17] = p->user_data;
+        memcpy(rec + 18, &p->point_source_ID, 2);
+        memcpy(rec + 20, &p->gps_time, 8);
+        memcpy(rec + 28, p->rgb, 8);
+        memcpy(rec + 36, &p->extended_scan_angle, 2);
+        rec[38] = ((U8 *)p)[22];
+        rec[39] = p->extended_classification;
+        rec[40] = ((U8 *)p)[24];
+        memcpy(rec + 41, p->wave_packet, 23);
+
+        for (i = 0; i < 64; i++) { h ^= rec[i]; h *= 1099511628211ULL; }
+        for (i = 23; i < 29; i++) { h ^= p->wave_packet[i]; h *= 1099511628211ULL; }
+        for (i = 0; i < (int)self->num_extra_bytes; i++) {
+            h ^= self->extra_bytes[i];
+            h *= 1099511628211ULL;
         }
-
-        bitfield = _ArithmeticDecoder_decode_symbol(self->dec, self->m_bit_byte[bitfield]);
-        LASpoint_set_bitfield(&self->last_item, bitfield);
+        done++;
     }
+    Py_END_ALLOW_THREADS
 
-    uint32_t r = self->last_item.return_number;
-    uint32_t n = self->last_item.number_of_returns;
-    uint8_t m = number_return_map[n][r];
-    uint8_t el = number_return_level[n][r];
-
-    // decompress intensity
-    if(changed_values & 0b10000) {
-        context = MIN(m, 3);
-        int32_t intensity = _IntegerCompressor_decompress(self->ic_intensity, self->last_intensity[m], context);
-        self->last_item.intensity = intensity;
-        self->last_intensity[m] = intensity;
-    } else {
-        self->last_item.intensity = self->last_intensity[m];
+    if (!ok) {
+        PyErr_SetString(PyExc_RuntimeError, self->rp.last_error);
+        return NULL;
     }
+    self->index += done;
+    return Py_BuildValue("(KK)", (unsigned long long)h, (unsigned long long)done);
+}
 
-    // decompress classification
-    if(changed_values & 0b1000) {
-        if(self->m_classification[self->last_item.classification] == NULL) {
-            ArithmeticModelObject *model = (ArithmeticModelObject *)_ArithmeticDecoder_create_symbol_model(self->dec, 256);
-            _ArithmeticModel_init(model, NULL);
-            self->m_classification[self->last_item.classification] = model;
-        }
-        uint8_t classification = _ArithmeticDecoder_decode_symbol(self->dec, self->m_classification[self->last_item.classification]);
-        self->last_item.classification = classification;
+static PyObject *Reader_seek(ReaderObject *self, PyObject *args)
+{
+    unsigned long long target;
+    BOOL ok;
+    if (!PyArg_ParseTuple(args, "K", &target)) return NULL;
+
+    Py_BEGIN_ALLOW_THREADS
+    ok = laz_readpoint_seek(&self->rp, self->index, (U64)target);
+    Py_END_ALLOW_THREADS
+
+    if (!ok) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        self->rp.has_error ? self->rp.last_error : "seek failed");
+        return NULL;
     }
-
-    // decompress scan angle rank
-    if(changed_values & 0b100) {
-        uint8_t f = self->last_item.scan_direction_flag;
-        uint32_t val = _ArithmeticDecoder_decode_symbol(self->dec, self->m_scan_rank[f]);
-        self->last_item.scan_angle_rank = U8_FOLD(val + self->last_item.scan_angle_rank);
-    }
-
-
-    // decompress user data
-    if(changed_values & 0b10) {
-        ArithmeticModelObject *model;
-        if(self->m_user_data[self->last_item.user_data] == NULL) {
-            model = (ArithmeticModelObject *)_ArithmeticDecoder_create_symbol_model(self->dec, 256);
-            _ArithmeticModel_init(model, NULL);
-            self->m_user_data[self->last_item.user_data] = model;
-        }
-
-        model = self->m_user_data[self->last_item.user_data];
-        uint8_t user_data = _ArithmeticDecoder_decode_symbol(self->dec, model);
-        self->last_item.user_data = user_data;
-    }
-
-    // decompress point source ID
-    if(changed_values & 0b1) {
-        uint32_t point_source_id = _IntegerCompressor_decompress(self->ic_point_source_id, self->last_item.point_source_ID, 0);
-        self->last_item.point_source_ID = point_source_id;
-    }
-
-    // decompress x
-    int32_t median = StreamingMedian5_get(&self->last_x_diff_median5[m]);
-    int32_t diff = _IntegerCompressor_decompress(self->ic_dx, median, (n==1));
-    self->last_item.X += diff;
-    StreamingMedian5_add(&self->last_x_diff_median5[m], diff);
-
-    // decompress y
-    median = StreamingMedian5_get(&self->last_y_diff_median5[m]);
-    uint32_t k_bits = self->ic_dx->k; //TODO should this be self->ic_dy->k?
-    context = (n==1) + (k_bits < 20 ? U32_ZERO_BIT_0(k_bits) : 20);
-    diff = _IntegerCompressor_decompress(self->ic_dy, median, context);
-    self->last_item.Y += diff;
-    StreamingMedian5_add(&self->last_y_diff_median5[m], diff);
-
-    // decompress z
-    k_bits = (self->ic_dx->k + self->ic_dy->k) / 2;
-    context = (n == 1) + (k_bits < 18 ? U32_ZERO_BIT_0(k_bits) : 18);
-    int32_t z = _IntegerCompressor_decompress(self->ic_z, self->last_height[el], context);
-    self->last_item.Z = z;
-    self->last_height[el] = z;
-
+    self->index = (U64)target;
     Py_RETURN_NONE;
 }
 
-static PyObject *
-read_item_compressed_point10_v2_read(read_item_compressed_point10_v2Object *self, PyObject *args) {
-    uint32_t context;
-    if (!PyArg_ParseTuple(args, "I", &context)) {
-        return NULL;
+static PyObject *Reader_get_point(ReaderObject *self, void *c)
+{ (void)c; Py_INCREF(self->point_view); return self->point_view; }
+
+static PyObject *Reader_get_index(ReaderObject *self, void *c)
+{ (void)c; return PyLong_FromUnsignedLongLong(self->index); }
+
+static PyObject *Reader_get_chunk_starts(ReaderObject *self, void *c)
+{
+    PyObject *list;
+    U32 i;
+    (void)c;
+    if (!self->rp.chunk_starts) Py_RETURN_NONE;
+    list = PyList_New(self->rp.tabled_chunks);
+    if (!list) return NULL;
+    for (i = 0; i < self->rp.tabled_chunks; i++) {
+        PyObject *v = PyLong_FromLongLong((long long)self->rp.chunk_starts[i]);
+        if (!v) { Py_DECREF(list); return NULL; }
+        PyList_SET_ITEM(list, i, v);
     }
-    return _read_item_compressed_point10_v2_read(self, context);
+    return list;
 }
 
-static PyObject *
-read_item_compressed_point10_v2_init(read_item_compressed_point10_v2Object *self, PyObject *args, PyObject *kwds)
+static PyObject *Reader_get_warning(ReaderObject *self, void *c)
 {
-    PyObject *arglast_item;
-    uint32_t context=0; // ignored for now
-    if (!PyArg_ParseTuple(args, "O!|I", &LASpoint_Type, &arglast_item, &context)) {
-        return NULL;
-    }
-    LASpointObject *last_item = (LASpointObject *)arglast_item;
-
-    return _read_item_compressed_point10_v2_init(self, last_item->point);
+    (void)c;
+    if (!self->rp.has_warning) Py_RETURN_NONE;
+    return PyUnicode_FromString(self->rp.last_warning);
 }
 
-
-static PyObject *
-read_item_compressed_point10_v2_get_dec(read_item_compressed_point10_v2Object *self, void *closure)
-{
-    Py_INCREF(self->dec);
-    return (PyObject *)self->dec;
-}
-
-static PyObject *
-read_item_compressed_point10_v2_get_m_changed_values(read_item_compressed_point10_v2Object *self, void *closure)
-{
-    Py_INCREF(self->m_changed_values);
-    return (PyObject *)self->m_changed_values;
-}
-
-static PyObject *
-read_item_compressed_point10_v2_get_ic_intensity(read_item_compressed_point10_v2Object *self, void *closure)
-{
-    Py_INCREF(self->ic_intensity);
-    return (PyObject *)self->ic_intensity;
-}
-
-static PyObject *
-read_item_compressed_point10_v2_get_m_scan_rank(read_item_compressed_point10_v2Object *self, void *closure)
-{
-    PyObject *result = PyTuple_New(2);
-    for(int i = 0; i < 2; i++) {
-        Py_INCREF(self->m_scan_rank[i]);
-        PyTuple_SetItem(result, i, (PyObject *)self->m_scan_rank[i]);
-    }
-    return result;
-}
-
-
-static PyMethodDef read_item_compressed_point10_v2_methods[] = {
-    {"init", (PyCFunction)read_item_compressed_point10_v2_init, METH_VARARGS, "init"},
-    {"read", (PyCFunction)read_item_compressed_point10_v2_read, METH_VARARGS, "read"},
-    {NULL, NULL}  /* Sentinel */
+static PyMethodDef Reader_methods[] = {
+    {"read", (PyCFunction)Reader_read, METH_NOARGS,
+     "read() -> Point  (the reader's shared Point; call copy() to keep it)"},
+    {"seek", (PyCFunction)Reader_seek, METH_VARARGS, "seek(index) -> None"},
+    {"checksum", (PyCFunction)Reader_checksum, METH_VARARGS,
+     "checksum(count=-1) -> (fnv1a_hash, points_read)"},
+    {NULL}
 };
 
-PyGetSetDef read_item_compressed_point10_v2_getset[] = {
-    {"dec", (getter)read_item_compressed_point10_v2_get_dec, NULL, "decoder", NULL},
-    {"m_changed_values", (getter)read_item_compressed_point10_v2_get_m_changed_values, NULL, "m_changed_values", NULL},
-    {"ic_intensity", (getter)read_item_compressed_point10_v2_get_ic_intensity, NULL, "ic_intensity", NULL},
-    {"m_scan_rank", (getter)read_item_compressed_point10_v2_get_m_scan_rank, NULL, "m_scan_rank", NULL},
-    {NULL}  /* Sentinel */
+static PyGetSetDef Reader_getset[] = {
+    {"point", (getter)Reader_get_point, NULL, NULL, NULL},
+    {"index", (getter)Reader_get_index, NULL, NULL, NULL},
+    {"chunk_starts", (getter)Reader_get_chunk_starts, NULL, NULL, NULL},
+    {"warning", (getter)Reader_get_warning, NULL, NULL, NULL},
+    {NULL}
 };
 
-
-static PyTypeObject read_item_compressed_point10_v2_Type = {
+static PyTypeObject Reader_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
-    "cpylaz.read_item_compressed_point10_v2", /*tp_name*/
-    sizeof(read_item_compressed_point10_v2Object), /*tp_basicsize*/
-    0,                          /*tp_itemsize*/
-    /* methods */
-    (destructor)read_item_compressed_point10_v2_dealloc,    /*tp_dealloc*/
-    0,                          /*tp_vectorcall_offset*/
-    (getattrfunc)0,             /*tp_getattr*/
-    0,   /*tp_setattr*/
-    0,                          /*tp_as_async*/
-    0,                          /*tp_repr*/
-    0,                          /*tp_as_number*/
-    0,                          /*tp_as_sequence*/
-    0,                          /*tp_as_mapping*/
-    0,                          /*tp_hash*/
-    0,                          /*tp_call*/
-    0,                          /*tp_str*/
-    0, /*tp_getattro*/
-    0,                          /*tp_setattro*/
-    0,                          /*tp_as_buffer*/
-    Py_TPFLAGS_DEFAULT,         /*tp_flags*/
-    0,                          /*tp_doc*/
-    0,                          /*tp_traverse*/
-    0,                          /*tp_clear*/
-    0,                          /*tp_richcompare*/
-    0,                          /*tp_weaklistoffset*/
-    0,                          /*tp_iter*/
-    0,                          /*tp_iternext*/
-    read_item_compressed_point10_v2_methods,                /*tp_methods*/
-    0,                          /*tp_members*/
-    read_item_compressed_point10_v2_getset,                          /*tp_getset*/
-    0,                          /*tp_base*/
-    0,                          /*tp_dict*/
-    0,                          /*tp_descr_get*/
-    0,                          /*tp_descr_set*/
-    0,                          /*tp_dictoffset*/
-    (initproc)read_item_compressed_point10_v2__init__,                          /*tp_init*/
-    0,                          /*tp_alloc*/
-    PyType_GenericNew,                          /*tp_new*/
-    0,                          /*tp_free*/
-    0,                          /*tp_is_gc*/
-};
-/* List of functions defined in the module */
-
-static PyMethodDef cpylaz_methods[] = {
-    {NULL,              NULL}           /* sentinel */
+    .tp_name = "cpylaz.PointReader",
+    .tp_basicsize = sizeof(ReaderObject),
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_new = PyType_GenericNew,
+    .tp_init = (initproc)Reader_tp_init,
+    .tp_dealloc = (destructor)Reader_dealloc,
+    .tp_methods = Reader_methods,
+    .tp_getset = Reader_getset,
 };
 
-PyDoc_STRVAR(module_doc,
-"C implementation of models.");
+/* ================================================================ module == */
 
+static PyMethodDef cpylaz_methods[] = {{NULL, NULL}};
 
-static int
-cpylaz_exec(PyObject *m)
+PyDoc_STRVAR(module_doc, "C backend for lazpy: LAZ entropy coding and point decoding.");
+
+static int check_layout(void)
 {
-    /* Slot initialization is subject to the rules of initializing globals.
-       C99 requires the initializers to be "address constants".  Function
-       designators like 'PyType_GenericNew', with implicit conversion to
-       a pointer, are valid C99 address constants.
+    /* The item readers write into a LazPoint at hard-coded offsets. */
+    if (offsetof(LazPoint, X) != LAZ_POINT_OFFSET_XYZ) return 0;
+    if (offsetof(LazPoint, gps_time) != LAZ_POINT_OFFSET_GPSTIME) return 0;
+    if (offsetof(LazPoint, rgb) != LAZ_POINT_OFFSET_RGB) return 0;
+    if (offsetof(LazPoint, wave_packet) != LAZ_POINT_OFFSET_WAVEPACKET) return 0;
+    if (offsetof(LazPoint, intensity) != 12) return 0;
+    if (offsetof(LazPoint, scan_angle_rank) != 16) return 0;
+    if (offsetof(LazPoint, point_source_ID) != 18) return 0;
+    if (offsetof(LazPoint, extended_scan_angle) != 20) return 0;
+    if (offsetof(LazPoint, extended_classification) != 23) return 0;
+    return 1;
+}
 
-       However, the unary '&' operator applied to a non-static variable
-       like 'PyBaseObject_Type' is not required to produce an address
-       constant.  Compilers may support this (gcc does), MSVC does not.
+static int cpylaz_exec(PyObject *m)
+{
+    union { U32 i; U8 c[4]; } endian_probe;
+    endian_probe.i = 1;
+    if (endian_probe.c[0] != 1) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "lazpy only supports little-endian hosts");
+        return -1;
+    }
+    if (!check_layout()) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "LazPoint field layout does not match the LAZ item layout");
+        return -1;
+    }
 
-       Both compilers are strictly standard conforming in this particular
-       behavior.
-    */
-    ArithmeticBitModel_Type.tp_base = &PyBaseObject_Type;
-    if (PyType_Ready(&ArithmeticBitModel_Type) < 0)
-        goto fail;
-    PyModule_AddObject(m, "ArithmeticBitModel", (PyObject *)&ArithmeticBitModel_Type);
+#define ADD_TYPE(var, name)                                                    \
+    do {                                                                       \
+        if (PyType_Ready(&var) < 0) return -1;                                 \
+        Py_INCREF(&var);                                                       \
+        if (PyModule_AddObject(m, name, (PyObject *)&var) < 0) {               \
+            Py_DECREF(&var);                                                   \
+            return -1;                                                         \
+        }                                                                      \
+    } while (0)
 
-    ArithmeticModel_Type.tp_base = &PyBaseObject_Type;
-    if (PyType_Ready(&ArithmeticModel_Type) < 0)
-        goto fail;
-    PyModule_AddObject(m, "ArithmeticModel", (PyObject *)&ArithmeticModel_Type);
-
-    ArithmeticEncoder_Type.tp_base = &PyBaseObject_Type;
-    if (PyType_Ready(&ArithmeticEncoder_Type) < 0)
-        goto fail;
-    PyModule_AddObject(m, "ArithmeticEncoder", (PyObject *)&ArithmeticEncoder_Type);
-
-    ArithmeticDecoder_Type.tp_base = &PyBaseObject_Type;
-    if (PyType_Ready(&ArithmeticDecoder_Type) < 0)
-        goto fail;
-    PyModule_AddObject(m, "ArithmeticDecoder", (PyObject *)&ArithmeticDecoder_Type);
-
-    IntegerCompressor_Type.tp_base = &PyBaseObject_Type;
-    if (PyType_Ready(&IntegerCompressor_Type) < 0)
-        goto fail;
-    PyModule_AddObject(m, "IntegerCompressor", (PyObject *)&IntegerCompressor_Type);
-
-    LASpoint_Type.tp_base = &PyBaseObject_Type;
-    if (PyType_Ready(&LASpoint_Type) < 0)
-        goto fail;
-    PyModule_AddObject(m, "LASpoint", (PyObject *)&LASpoint_Type);
-
-    read_item_compressed_point10_v2_Type.tp_base = &PyBaseObject_Type;
-    if (PyType_Ready(&read_item_compressed_point10_v2_Type) < 0)
-        goto fail;
-    PyModule_AddObject(m, "read_item_compressed_point10_v2", (PyObject *)&read_item_compressed_point10_v2_Type);
-
+    ADD_TYPE(BitModel_Type, "ArithmeticBitModel");
+    ADD_TYPE(SymbolModel_Type, "ArithmeticModel");
+    ADD_TYPE(Encoder_Type, "ArithmeticEncoder");
+    ADD_TYPE(Decoder_Type, "ArithmeticDecoder");
+    ADD_TYPE(IntComp_Type, "IntegerCompressor");
+    ADD_TYPE(Point_Type, "Point");
+    ADD_TYPE(Reader_Type, "PointReader");
+#undef ADD_TYPE
 
     PyModule_AddIntConstant(m, "DM_LENGTH_SHIFT", DM_LENGTH_SHIFT);
-
+    PyModule_AddIntConstant(m, "BM_LENGTH_SHIFT", BM_LENGTH_SHIFT);
+    PyModule_AddIntConstant(m, "DECOMPRESS_SELECTIVE_ALL", (long)LAZ_DECOMPRESS_SELECTIVE_ALL);
     return 0;
- fail:
-    Py_XDECREF(m);
-    return -1;
 }
 
 static struct PyModuleDef_Slot cpylaz_slots[] = {
-    {Py_mod_exec, cpylaz_exec},
+    {Py_mod_exec, (void *)cpylaz_exec},
     {0, NULL},
 };
 
@@ -2174,15 +1132,10 @@ static struct PyModuleDef cpylazmodule = {
     0,
     cpylaz_methods,
     cpylaz_slots,
-    NULL,
-    NULL,
-    NULL
+    NULL, NULL, NULL
 };
 
-/* Export function for the module (*must* be called PyInit_cpylaz) */
-
-PyMODINIT_FUNC
-PyInit_cpylaz(void)
+PyMODINIT_FUNC PyInit_cpylaz(void)
 {
     return PyModuleDef_Init(&cpylazmodule);
 }
