@@ -16,6 +16,8 @@
  *     also the only way the encoder is reachable at all until there is a
  *     writer above it.
  */
+/* see laz_stream.c: required before Python.h for "#" formats below CPython 3.13 */
+#define PY_SSIZE_T_CLEAN
 #include "Python.h"
 #include "structmember.h"
 

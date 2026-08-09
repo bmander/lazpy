@@ -7,6 +7,10 @@
  * Modified: translated from C++ to C and restructured.
  */
 
+/* Required before Python.h on CPython below 3.13 for the "y#" format used to
+ * hand a block to the file object; a no-op from 3.13 on, where the Py_ssize_t
+ * lengths it selects became the only behaviour. */
+#define PY_SSIZE_T_CLEAN
 #include "Python.h"
 #include "laz_stream.h"
 
