@@ -1,0 +1,21 @@
+lazpy
+Copyright 2022-2026 Brandon Martin-Anderson
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+--------------------------------------------------------------------------
+
+This product includes software developed by rapidlasso GmbH.
+
+The decompressor in src/ is a port of LASzip (https://github.com/LASzip/LASzip):
+
+    Copyright (c) 2007-2022, rapidlasso GmbH - fast tools to catch reality
+    Licensed under the Apache License, Version 2.0
+
+    Authors: Martin Isenburg, Howard Butler, Michael P. Gerlek
+
+The C++ sources were translated to C and restructured; every file derived from
+LASzip carries a notice to that effect in its header.
+
+LASzip's arithmetic coder in turn derives from the reference implementation of
+Amir Said and William A. Pearlman.

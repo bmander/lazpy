@@ -1,4 +1,12 @@
 /*
+ * Derived from LASzip (https://github.com/LASzip/LASzip).
+ * Copyright (c) 2007-2022, rapidlasso GmbH -- fast tools to catch reality
+ * Licensed under the Apache License, Version 2.0; see LICENSE and NOTICE.
+ *
+ * Modified: translated from C++ to C and restructured.
+ */
+
+/*
  * LAZ v3 and v4 layered item readers for the LAS 1.4 point types.
  *
  * Ported from LASzip's lasreaditemcompressed_v3.cpp and _v4.cpp.

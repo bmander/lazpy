@@ -12,8 +12,7 @@ Exits non-zero and prints the first mismatching field on failure.
 import struct
 import sys
 
-sys.path.insert(0, ".")
-from lazpy import Reader  # noqa: E402
+from lazpy import Reader
 
 # Column layout of a reference dump line, in order.
 SCALAR_FIELDS = [

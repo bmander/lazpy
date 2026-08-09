@@ -4,29 +4,30 @@
  * Two layers are exposed:
  *
  *   - PointReader / Point: the actual reading API. Header and VLR parsing stay
- *     in Python (lazpy.py); everything from the first point onward is C.
+ *     in Python (lazpy/__init__.py); everything from the first point onward is
+ *     C.
  *
  *   - ArithmeticBitModel / ArithmeticModel / ArithmeticDecoder /
  *     IntegerCompressor: thin wrappers over the entropy coder. These are not
- *     needed to read a file, but they let tests.py pin the coder against known
- *     bit-exact vectors and against the pure-Python reference in models.py and
- *     encoder.py, which is what catches a desync at its source rather than
- *     3000 points into a chunk.
+ *     needed to read a file, but they let the test suite pin the coder against
+ *     known bit-exact vectors and against the pure-Python reference in
+ *     tests/models.py and tests/encoder.py, which is what catches a desync at
+ *     its source rather than 3000 points into a chunk.
  */
 #include "Python.h"
 #include "structmember.h"
 
-#include "src/laz_types.h"
-#include "src/laz_stream.h"
-#include "src/laz_arithmetic.h"
-#include "src/laz_intcompressor.h"
-#include "src/laz_readitem.h"
-#include "src/laz_readpoint.h"
+#include "laz_types.h"
+#include "laz_stream.h"
+#include "laz_arithmetic.h"
+#include "laz_intcompressor.h"
+#include "laz_readitem.h"
+#include "laz_readpoint.h"
 
 /*
- * The exception every decode failure raises. lazpy.py re-exports this as
- * LazError, so "this file failed to decode" is one catchable category rather
- * than a mix of RuntimeError, ValueError and OSError.
+ * The exception every decode failure raises. lazpy/__init__.py re-exports this
+ * as LazError, so "this file failed to decode" is one catchable category
+ * rather than a mix of RuntimeError, ValueError and OSError.
  */
 static PyObject *LazErrorType = NULL;
 
@@ -105,7 +106,7 @@ static PyObject *BitModel_repr(BitModelObject *self)
 
 static PyTypeObject BitModel_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "cpylaz.ArithmeticBitModel",
+    .tp_name = "lazpy._cpylaz.ArithmeticBitModel",
     .tp_basicsize = sizeof(BitModelObject),
     .tp_flags = Py_TPFLAGS_DEFAULT,
     .tp_new = PyType_GenericNew,
@@ -289,7 +290,7 @@ static PyGetSetDef SymbolModel_getset[] = {
 
 static PyTypeObject SymbolModel_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "cpylaz.ArithmeticModel",
+    .tp_name = "lazpy._cpylaz.ArithmeticModel",
     .tp_basicsize = sizeof(SymbolModelObject),
     .tp_flags = Py_TPFLAGS_DEFAULT,
     .tp_new = PyType_GenericNew,
@@ -311,7 +312,7 @@ static PyObject *Encoder_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
 
 static PyTypeObject Encoder_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "cpylaz.ArithmeticEncoder",
+    .tp_name = "lazpy._cpylaz.ArithmeticEncoder",
     .tp_basicsize = sizeof(PyObject),
     .tp_flags = Py_TPFLAGS_DEFAULT,
     .tp_new = Encoder_new,
@@ -439,7 +440,7 @@ static PyGetSetDef Decoder_getset[] = {
 
 static PyTypeObject Decoder_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "cpylaz.ArithmeticDecoder",
+    .tp_name = "lazpy._cpylaz.ArithmeticDecoder",
     .tp_basicsize = sizeof(DecoderObject),
     .tp_flags = Py_TPFLAGS_DEFAULT,
     .tp_new = PyType_GenericNew,
@@ -577,7 +578,7 @@ static PyGetSetDef IntComp_getset[] = {
 
 static PyTypeObject IntComp_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "cpylaz.IntegerCompressor",
+    .tp_name = "lazpy._cpylaz.IntegerCompressor",
     .tp_basicsize = sizeof(IntCompObject),
     .tp_flags = Py_TPFLAGS_DEFAULT,
     .tp_new = PyType_GenericNew,
@@ -775,7 +776,7 @@ static PyObject *Point_repr(PointObject *self)
 
 static PyTypeObject Point_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "cpylaz.Point",
+    .tp_name = "lazpy._cpylaz.Point",
     .tp_basicsize = sizeof(PointObject),
     .tp_flags = Py_TPFLAGS_DEFAULT,
     .tp_dealloc = (destructor)Point_dealloc,
@@ -1072,7 +1073,7 @@ static PyGetSetDef Reader_getset[] = {
 
 static PyTypeObject Reader_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "cpylaz.PointReader",
+    .tp_name = "lazpy._cpylaz.PointReader",
     .tp_basicsize = sizeof(ReaderObject),
     .tp_flags = Py_TPFLAGS_DEFAULT,
     .tp_new = PyType_GenericNew,
@@ -1113,7 +1114,7 @@ static int cpylaz_exec(PyObject *m)
 #undef ADD_TYPE
 
     LazErrorType = PyErr_NewExceptionWithDoc(
-        "cpylaz.LazError", "A LAS/LAZ file could not be read or decoded.",
+        "lazpy.LazError", "A LAS/LAZ file could not be read or decoded.",
         NULL, NULL);
     if (LazErrorType == NULL) return -1;
     Py_INCREF(LazErrorType);
@@ -1135,7 +1136,7 @@ static struct PyModuleDef_Slot cpylaz_slots[] = {
 
 static struct PyModuleDef cpylazmodule = {
     PyModuleDef_HEAD_INIT,
-    "cpylaz",
+    "lazpy._cpylaz",
     module_doc,
     0,
     cpylaz_methods,
@@ -1143,7 +1144,7 @@ static struct PyModuleDef cpylazmodule = {
     NULL, NULL, NULL
 };
 
-PyMODINIT_FUNC PyInit_cpylaz(void)
+PyMODINIT_FUNC PyInit__cpylaz(void)
 {
     return PyModuleDef_Init(&cpylazmodule);
 }

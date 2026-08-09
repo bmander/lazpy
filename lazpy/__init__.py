@@ -1,8 +1,8 @@
 """Read LAS and LAZ point cloud files.
 
 Header and variable-length-record parsing happen here; everything from the
-first point onward is handled by the ``cpylaz`` C extension, which is a port of
-LASzip's decompressor.
+first point onward is handled by the ``lazpy._cpylaz`` C extension, which is a
+port of LASzip's decompressor.
 
     >>> reader = Reader("cloud.laz")
     >>> reader.num_points
@@ -18,8 +18,9 @@ LAS file specification
 from enum import IntEnum
 import sys
 
-from cpylaz import PointReader, Point, LazError  # noqa: F401 (re-exported)
-from utils import unsigned_int, signed_int, u32_array, u64_array, double, cstr
+from ._cpylaz import PointReader, Point, LazError  # noqa: F401 (re-exported)
+from ._utils import (unsigned_int, signed_int, u32_array, u64_array, double,
+                     cstr)
 
 __all__ = ["Reader", "Point", "Compressor", "Coder", "ItemType",
            "Selective", "LazError", "UnsupportedFileError"]
