@@ -8,6 +8,10 @@ version = "0.3"
 description = "A reader for LAS and LAZ point clouds"
 readme = "README.md"
 requires-python = ">=3.10"
+# Apache-2.0 because src/ is a port of LASzip, which is Apache-2.0; matching it
+# keeps one license over the whole tree. NOTICE carries rapidlasso's copyright.
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{name = "Brandon Martin-Anderson", email = "badhill@gmail.com"}]
 keywords = ["las", "laz", "lidar", "point cloud", "laszip"]
 classifiers = [

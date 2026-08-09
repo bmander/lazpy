@@ -1,3 +1,11 @@
+/*
+ * Derived from LASzip (https://github.com/LASzip/LASzip), lasreadpoint.cpp.
+ * Copyright (c) 2007-2022, rapidlasso GmbH -- fast tools to catch reality
+ * Licensed under the Apache License, Version 2.0; see LICENSE and NOTICE.
+ *
+ * Modified: translated from C++ to C and restructured.
+ */
+
 #include <stdio.h>
 #include <stdarg.h>
 #include "laz_readpoint.h"

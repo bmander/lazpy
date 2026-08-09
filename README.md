@@ -155,6 +155,15 @@ with Reader("cloud.laz", decompress_selective=mask) as reader:
 | `tests/models.py`, `tests/encoder.py`, `tests/compressor.py` | pure-Python reference implementations, used as a test oracle — not installed |
 | `pyproject.toml` | package metadata, the extension build, and the wheel matrix |
 
+## License
+
+Apache License 2.0 — see `LICENSE`.
+
+Everything in `src/` is a port of [LASzip](https://github.com/LASzip/LASzip),
+which is itself Apache 2.0 and copyright rapidlasso GmbH; matching its license
+keeps one set of terms over the whole tree. `NOTICE` carries the attribution,
+and every derived file says so in its header.
+
 ## References
 
 - [LAS 1.2 specification](https://www.asprs.org/a/society/committees/standards/asprs_las_format_v12.pdf)

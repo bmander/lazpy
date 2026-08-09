@@ -1,4 +1,12 @@
 /*
+ * Derived from LASzip (https://github.com/LASzip/LASzip).
+ * Copyright (c) 2007-2022, rapidlasso GmbH -- fast tools to catch reality
+ * Licensed under the Apache License, Version 2.0; see LICENSE and NOTICE.
+ *
+ * Modified: translated from C++ to C and restructured.
+ */
+
+/*
  * laz_types.h -- fixed-width types, bit-twiddling macros and the canonical
  * decoded-point layout shared by every part of the lazpy C core.
  *

@@ -1,4 +1,12 @@
 /*
+ * Derived from LASzip (https://github.com/LASzip/LASzip).
+ * Copyright (c) 2007-2022, rapidlasso GmbH -- fast tools to catch reality
+ * Licensed under the Apache License, Version 2.0; see LICENSE and NOTICE.
+ *
+ * Modified: translated from C++ to C and restructured.
+ */
+
+/*
  * laz_arithmetic.h -- arithmetic coder models and decoder.
  *
  * Ported from LASzip's arithmeticmodel.{hpp,cpp} and arithmeticdecoder.cpp,

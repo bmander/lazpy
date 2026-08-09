@@ -1,3 +1,11 @@
+/*
+ * Derived from LASzip (https://github.com/LASzip/LASzip), integercompressor.cpp.
+ * Copyright (c) 2007-2022, rapidlasso GmbH -- fast tools to catch reality
+ * Licensed under the Apache License, Version 2.0; see LICENSE and NOTICE.
+ *
+ * Modified: translated from C++ to C and restructured.
+ */
+
 #include "laz_intcompressor.h"
 
 void laz_ic_setup(LazIntCompressor *ic, LazDecoder *dec, U32 bits, U32 contexts,
