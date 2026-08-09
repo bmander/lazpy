@@ -9,58 +9,15 @@
  */
 #include "laz_readitem.h"
 
-/* Shared 256-model bank, same lazy-creation semantics as the v2 readers. */
-typedef struct {
-    LazSymbolModel models[256];
-    U8 created[256];
-} ModelBank1;
-
-static void bank1_setup(ModelBank1 *b)
-{
-    U32 i;
-    for (i = 0; i < 256; i++) {
-        laz_symbol_model_setup(&b->models[i], 256, LAZ_FALSE);
-        b->created[i] = 0;
-    }
-}
-
-static void bank1_reinit(ModelBank1 *b)
-{
-    U32 i;
-    for (i = 0; i < 256; i++) {
-        if (b->created[i]) laz_symbol_model_init(&b->models[i], NULL);
-    }
-}
-
-static LazSymbolModel *bank1_get(ModelBank1 *b, U8 idx)
-{
-    if (!b->created[idx]) {
-        laz_symbol_model_init(&b->models[idx], NULL);
-        b->created[idx] = 1;
-    }
-    return &b->models[idx];
-}
-
-static void bank1_free(ModelBank1 *b)
-{
-    U32 i;
-    for (i = 0; i < 256; i++) laz_symbol_model_free(&b->models[i]);
-}
-
 /* ======================================================== POINT10 v1 ===== */
-
-#define P10_X(li) (*(I32 *)((li) + 0))
-#define P10_Y(li) (*(I32 *)((li) + 4))
-#define P10_Z(li) (*(I32 *)((li) + 8))
-#define P10_INTENSITY(li) (*(U16 *)((li) + 12))
-#define P10_POINT_SOURCE_ID(li) (*(U16 *)((li) + 18))
 
 typedef struct {
     LazReadItem base;
     LazIntCompressor ic_dx, ic_dy, ic_z;
     LazIntCompressor ic_intensity, ic_scan_angle_rank, ic_point_source_ID;
     LazSymbolModel m_changed_values;
-    ModelBank1 m_bit_byte, m_classification, m_user_data;
+    LazSymbolModel m_bit_byte[256], m_classification[256], m_user_data[256];
+    U8 created_bit_byte[256], created_classification[256], created_user_data[256];
     I32 last_x_diff[3];
     I32 last_y_diff[3];
     I32 last_incr;
@@ -97,9 +54,9 @@ static BOOL p10v1_init(LazReadItem *self, const U8 *item, U32 *context)
     laz_ic_init_decompressor(&r->ic_scan_angle_rank);
     laz_ic_init_decompressor(&r->ic_point_source_ID);
     laz_symbol_model_init(&r->m_changed_values, NULL);
-    bank1_reinit(&r->m_bit_byte);
-    bank1_reinit(&r->m_classification);
-    bank1_reinit(&r->m_user_data);
+    laz_bank_reinit(r->m_bit_byte, r->created_bit_byte, 256);
+    laz_bank_reinit(r->m_classification, r->created_classification, 256);
+    laz_bank_reinit(r->m_user_data, r->created_user_data, 256);
 
     memcpy(r->last_item, item, 20);
     return LAZ_TRUE;
@@ -132,16 +89,16 @@ static void p10v1_read(LazReadItem *self, U8 *item, U32 *context)
             P10_INTENSITY(li) = (U16)laz_ic_decompress(&r->ic_intensity, P10_INTENSITY(li), 0);
         }
         if (changed_values & 16) {
-            li[14] = (U8)laz_decode_symbol(self->dec, bank1_get(&r->m_bit_byte, li[14]));
+            li[14] = (U8)laz_decode_symbol(self->dec, laz_bank_get(r->m_bit_byte, r->created_bit_byte, li[14]));
         }
         if (changed_values & 8) {
-            li[15] = (U8)laz_decode_symbol(self->dec, bank1_get(&r->m_classification, li[15]));
+            li[15] = (U8)laz_decode_symbol(self->dec, laz_bank_get(r->m_classification, r->created_classification, li[15]));
         }
         if (changed_values & 4) {
             li[16] = (U8)laz_ic_decompress(&r->ic_scan_angle_rank, li[16], k_bits < 3);
         }
         if (changed_values & 2) {
-            li[17] = (U8)laz_decode_symbol(self->dec, bank1_get(&r->m_user_data, li[17]));
+            li[17] = (U8)laz_decode_symbol(self->dec, laz_bank_get(r->m_user_data, r->created_user_data, li[17]));
         }
         if (changed_values & 1) {
             P10_POINT_SOURCE_ID(li) =
@@ -167,9 +124,9 @@ static void p10v1_destroy(LazReadItem *self)
     laz_ic_free(&r->ic_scan_angle_rank);
     laz_ic_free(&r->ic_point_source_ID);
     laz_symbol_model_free(&r->m_changed_values);
-    bank1_free(&r->m_bit_byte);
-    bank1_free(&r->m_classification);
-    bank1_free(&r->m_user_data);
+    laz_bank_free(r->m_bit_byte, 256);
+    laz_bank_free(r->m_classification, 256);
+    laz_bank_free(r->m_user_data, 256);
 }
 
 LazReadItem *laz_readitem_v1_point10(LazDecoder *dec)
@@ -188,9 +145,9 @@ LazReadItem *laz_readitem_v1_point10(LazDecoder *dec)
     laz_ic_setup(&r->ic_scan_angle_rank, dec, 8, 2, 8, 0);
     laz_ic_setup(&r->ic_point_source_ID, dec, 16, 1, 8, 0);
     laz_symbol_model_setup(&r->m_changed_values, 64, LAZ_FALSE);
-    bank1_setup(&r->m_bit_byte);
-    bank1_setup(&r->m_classification);
-    bank1_setup(&r->m_user_data);
+    laz_bank_setup(r->m_bit_byte, r->created_bit_byte, 256, 256);
+    laz_bank_setup(r->m_classification, r->created_classification, 256, 256);
+    laz_bank_setup(r->m_user_data, r->created_user_data, 256, 256);
     return (LazReadItem *)r;
 }
 
@@ -427,40 +384,27 @@ typedef struct {
     I32 x, y, z;
 } Wavepacket13;
 
-static U32 wp_get32(const U8 *p)
-{
-    return (U32)p[0] | ((U32)p[1] << 8) | ((U32)p[2] << 16) | ((U32)p[3] << 24);
-}
-
-static void wp_put32(U32 v, U8 *p)
-{
-    p[0] = (U8)(v & 0xFF);
-    p[1] = (U8)((v >> 8) & 0xFF);
-    p[2] = (U8)((v >> 16) & 0xFF);
-    p[3] = (U8)((v >> 24) & 0xFF);
-}
-
 static Wavepacket13 wp_unpack(const U8 *item)
 {
     Wavepacket13 w;
-    w.offset = (U64)wp_get32(item) | ((U64)wp_get32(item + 4) << 32);
-    w.packet_size = wp_get32(item + 8);
-    w.return_point = (I32)wp_get32(item + 12);
-    w.x = (I32)wp_get32(item + 16);
-    w.y = (I32)wp_get32(item + 20);
-    w.z = (I32)wp_get32(item + 24);
+    w.offset = (U64)laz_wp_get32(item) | ((U64)laz_wp_get32(item + 4) << 32);
+    w.packet_size = laz_wp_get32(item + 8);
+    w.return_point = (I32)laz_wp_get32(item + 12);
+    w.x = (I32)laz_wp_get32(item + 16);
+    w.y = (I32)laz_wp_get32(item + 20);
+    w.z = (I32)laz_wp_get32(item + 24);
     return w;
 }
 
 static void wp_pack(const Wavepacket13 *w, U8 *item)
 {
-    wp_put32((U32)(w->offset & 0xFFFFFFFF), item);
-    wp_put32((U32)(w->offset >> 32), item + 4);
-    wp_put32(w->packet_size, item + 8);
-    wp_put32((U32)w->return_point, item + 12);
-    wp_put32((U32)w->x, item + 16);
-    wp_put32((U32)w->y, item + 20);
-    wp_put32((U32)w->z, item + 24);
+    laz_wp_put32((U32)(w->offset & 0xFFFFFFFF), item);
+    laz_wp_put32((U32)(w->offset >> 32), item + 4);
+    laz_wp_put32(w->packet_size, item + 8);
+    laz_wp_put32((U32)w->return_point, item + 12);
+    laz_wp_put32((U32)w->x, item + 16);
+    laz_wp_put32((U32)w->y, item + 20);
+    laz_wp_put32((U32)w->z, item + 24);
 }
 
 typedef struct {

@@ -18,7 +18,7 @@ LAS file specification
 from enum import IntEnum
 import sys
 
-from cpylaz import PointReader, Point  # noqa: F401  (Point re-exported)
+from cpylaz import PointReader, Point, LazError  # noqa: F401 (re-exported)
 from utils import unsigned_int, signed_int, u32_array, u64_array, double, cstr
 
 __all__ = ["Reader", "Point", "Compressor", "Coder", "ItemType",
@@ -28,8 +28,8 @@ LASZIP_VLR_RECORD_ID = 22204
 LASZIP_VLR_USER_ID = b"laszip encoded"
 
 
-class LazError(Exception):
-    """Raised when a file cannot be read or decoded."""
+# LazError is defined in the C extension so decode failures raised from C and
+# header failures raised from Python are one catchable category.
 
 
 class UnsupportedFileError(LazError):
@@ -267,11 +267,6 @@ class Reader:
                 chunk_size = 0xFFFFFFFF
 
         self.items = items
-        # extra bytes live in the trailing BYTE/BYTE14 item, if there is one
-        self.num_extra_bytes = sum(
-            size for type_, size, _ in items
-            if type_ in (ItemType.BYTE, ItemType.BYTE14))
-
         self._reader = PointReader(
             self.fp,
             items,
@@ -279,9 +274,15 @@ class Reader:
             coder=int(coder),
             chunk_size=int(chunk_size),
             start_offset=self.header['offset_to_point_data'],
-            num_extra_bytes=self.num_extra_bytes,
             decompress_selective=self.decompress_selective,
         )
+        # sized by the C core from the item layout, not recomputed here
+        self.num_extra_bytes = self._reader.num_extra_bytes
+        # cached so scale() does not do six dict lookups per point
+        h = self.header
+        self._scale_offset = (h['x_scale_factor'], h['y_scale_factor'],
+                              h['z_scale_factor'], h['x_offset'],
+                              h['y_offset'], h['z_offset'])
 
     def close(self):
         self._reader = None
@@ -421,6 +422,16 @@ class Reader:
         """Index of the next point to be read."""
         return self._reader.index
 
+    @property
+    def warning(self):
+        """A non-fatal problem found while reading, or None.
+
+        Set when the chunk table is missing or corrupt, which is recoverable
+        but costs random access: seeking then has to decode forward instead of
+        jumping to a chunk.
+        """
+        return self._reader.warning
+
     # -- reading ---------------------------------------------------------
 
     def read(self):
@@ -451,10 +462,8 @@ class Reader:
 
     def scale(self, point):
         """Return the georeferenced (x, y, z) of *point* as floats."""
-        h = self.header
-        return (point.X * h['x_scale_factor'] + h['x_offset'],
-                point.Y * h['y_scale_factor'] + h['y_offset'],
-                point.Z * h['z_scale_factor'] + h['z_offset'])
+        sx, sy, sz, ox, oy, oz = self._scale_offset
+        return (point.X * sx + ox, point.Y * sy + oy, point.Z * sz + oz)
 
     def points(self, start=0, count=None):
         """Yield points, one at a time, without copying.
@@ -465,8 +474,9 @@ class Reader:
         if start:
             self.seek(start)
         remaining = self.num_points - start if count is None else count
+        read = self._reader.read      # hoisted: this loop runs per point
         for _ in range(remaining):
-            yield self._reader.read()
+            yield read()
 
     def __iter__(self):
         return self.points(self.index)

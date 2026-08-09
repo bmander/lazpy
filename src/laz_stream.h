@@ -32,6 +32,9 @@ struct LazStream {
 
     BOOL seekable;
     BOOL eof;          /* set once a read ran past the end of the stream */
+    BOOL failed;       /* set when the underlying stream itself errored, as
+                        * opposed to simply running out; the binding then
+                        * propagates the original exception */
 
     void *impl;
 };

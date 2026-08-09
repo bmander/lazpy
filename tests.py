@@ -749,7 +749,7 @@ class TestErrors:
         with Reader(fixture("pt0_v2.laz")) as reader:
             for _ in range(reader.num_points):
                 reader.read()
-            with pytest.raises(RuntimeError):
+            with pytest.raises(LazError):
                 for _ in range(200):
                     reader.read()
 
@@ -757,7 +757,46 @@ class TestErrors:
         whole = open(fixture("pt6_v3.laz"), "rb").read()
         path = tmp_path / "truncated.laz"
         path.write_bytes(whole[:len(whole) // 2])
-        with pytest.raises(Exception):
+        with pytest.raises(LazError):
             with Reader(str(path)) as reader:
                 for _ in range(reader.num_points):
                     reader.read()
+
+    def test_every_failure_is_one_catchable_category(self):
+        """Header, setup and decode failures all raise LazError."""
+        assert issubclass(UnsupportedFileError, LazError)
+        with Reader(fixture("pt0_v2.laz")) as reader:
+            with pytest.raises(LazError):
+                for _ in range(reader.num_points + 200):
+                    reader.read()
+
+    def test_underlying_file_errors_are_not_swallowed(self):
+        """An I/O error from the file object propagates as itself.
+
+        Without this, a genuine read failure is indistinguishable from a
+        truncated file, because both would surface as "end-of-file".
+        """
+        class Exploding:
+            """Reads normally until armed, then fails."""
+
+            def __init__(self, path):
+                self._fh = open(path, "rb")
+                self.armed = False
+
+            def read(self, n=-1):
+                if self.armed:
+                    raise PermissionError("device on fire")
+                return self._fh.read(n)
+
+            def seek(self, *a):
+                return self._fh.seek(*a)
+
+            def tell(self):
+                return self._fh.tell()
+
+        fh = Exploding(fixture("pt1_v2.laz"))
+        reader = Reader(fh)          # header parsing must succeed
+        fh.armed = True              # now break the decoder's refill
+        with pytest.raises(PermissionError):
+            for _ in range(reader.num_points):
+                reader.read()

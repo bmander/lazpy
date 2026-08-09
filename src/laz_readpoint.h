@@ -20,6 +20,10 @@
 #include "laz_arithmetic.h"
 #include "laz_readitem.h"
 
+/* Upper bound on items in a LASzip VLR. The real layouts use at most five;
+ * this only exists so the per-point destination table can be a fixed array. */
+#define LAZ_MAX_ITEMS 32
+
 typedef struct {
     LazStream *instream;        /* borrowed */
     U32 num_readers;
@@ -32,10 +36,15 @@ typedef struct {
 
     U32 point_size;
     LazItem *items;             /* owned copy */
-    /* True for point formats 6-10. LASzip stamps extended_point_type once when
-     * the reader is opened rather than per point, so callers must seed their
-     * point buffer with it; nothing in the decode path writes that field. */
+    /* Byte offset within a LazPoint that each item decodes into, or -1 for
+     * items routed to the caller's extra-bytes buffer. Resolved once at setup
+     * rather than per point. */
+    I32 item_offsets[LAZ_MAX_ITEMS];
+    /* True for point formats 6-10; see laz_readpoint_init_point. */
     BOOL has_point14;
+    /* Total size of the BYTE/BYTE14 items, i.e. how large the caller's
+     * extra-bytes buffer must be. */
+    U32 num_extra_bytes;
 
     /* chunking */
     U32 chunk_size;             /* U32_MAX means adaptive (variable) chunks */
@@ -67,6 +76,12 @@ BOOL laz_readpoint_setup(LazReadPoint *rp, U32 num_items, const LazItem *items,
                          U32 compressor, U32 coder, U32 chunk_size);
 
 BOOL laz_readpoint_init(LazReadPoint *rp, LazStream *instream);
+
+/* Prepares a caller-owned point buffer for use with this reader. Point formats
+ * 6-10 carry extended_point_type=1 on every point, and LASzip stamps it once
+ * at open rather than per point, so nothing in the decode path would set it.
+ * Every point buffer passed to laz_readpoint_read must go through this first. */
+void laz_readpoint_init_point(const LazReadPoint *rp, LazPoint *point);
 
 /* Decodes the next point. `extra_bytes` may be NULL when the layout has none. */
 BOOL laz_readpoint_read(LazReadPoint *rp, LazPoint *point, U8 *extra_bytes);

@@ -131,6 +131,10 @@ BOOL laz_readpoint_setup(LazReadPoint *rp, U32 num_items, const LazItem *items,
         set_error(rp, "no items to read");
         return LAZ_FALSE;
     }
+    if (num_items > LAZ_MAX_ITEMS) {
+        set_error(rp, "too many items (%u, maximum %u)", num_items, LAZ_MAX_ITEMS);
+        return LAZ_FALSE;
+    }
 
     rp->items = (LazItem *)malloc(num_items * sizeof(LazItem));
     if (!rp->items) { set_error(rp, "out of memory"); return LAZ_FALSE; }
@@ -155,10 +159,12 @@ BOOL laz_readpoint_setup(LazReadPoint *rp, U32 num_items, const LazItem *items,
     rp->readers_raw = (LazReadItem **)calloc(num_items, sizeof(LazReadItem *));
     if (!rp->readers_raw) { set_error(rp, "out of memory"); return LAZ_FALSE; }
     for (i = 0; i < num_items; i++) {
-        if (item_offset(items[i].type) == -2) {
+        rp->item_offsets[i] = item_offset(items[i].type);
+        if (rp->item_offsets[i] == -2) {
             set_error(rp, "item type %u is not supported", items[i].type);
             return LAZ_FALSE;
         }
+        if (rp->item_offsets[i] == -1) rp->num_extra_bytes += items[i].size;
         rp->readers_raw[i] = make_raw_reader(&items[i], NULL);
         if (!rp->readers_raw[i]) {
             set_error(rp, "item type %u is not supported", items[i].type);
@@ -187,13 +193,15 @@ BOOL laz_readpoint_setup(LazReadPoint *rp, U32 num_items, const LazItem *items,
         /* a point buffer for skipping over points while seeking */
         rp->seek_extra_bytes = (U8 *)calloc(rp->point_size + 1, 1);
         if (!rp->seek_extra_bytes) { set_error(rp, "out of memory"); return LAZ_FALSE; }
-        if (rp->layered_las14_compression) {
-            /* the v3/v4 readers require extended_point_type to be set */
-            rp->seek_point.extended_point_type = 1;
-        }
+        laz_readpoint_init_point(rp, &rp->seek_point);
     }
 
     return LAZ_TRUE;
+}
+
+void laz_readpoint_init_point(const LazReadPoint *rp, LazPoint *point)
+{
+    if (rp->has_point14) point->extended_point_type = 1;
 }
 
 BOOL laz_readpoint_init(LazReadPoint *rp, LazStream *instream)
@@ -343,30 +351,17 @@ static BOOL init_dec(LazReadPoint *rp)
     return LAZ_TRUE;
 }
 
-/* Points each item reader at its slice of `point` / `extra_bytes`. */
-static void bind_items(LazReadPoint *rp, LazPoint *point, U8 *extra_bytes, U8 **dst)
-{
-    U32 i;
-    U8 *base = (U8 *)point;
-    for (i = 0; i < rp->num_readers; i++) {
-        I32 off = item_offset(rp->items[i].type);
-        dst[i] = (off < 0) ? extra_bytes : (base + off);
-    }
-}
-
-#define MAX_ITEMS 32
-
 BOOL laz_readpoint_read(LazReadPoint *rp, LazPoint *point, U8 *extra_bytes)
 {
     U32 i;
     U32 context = 0;
-    U8 *dst[MAX_ITEMS];
+    U8 *dst[LAZ_MAX_ITEMS];
+    U8 *base = (U8 *)point;
 
-    if (rp->num_readers > MAX_ITEMS) {
-        set_error(rp, "too many items (%u)", rp->num_readers);
-        return LAZ_FALSE;
+    /* offsets were resolved at setup; this is just the per-call rebase */
+    for (i = 0; i < rp->num_readers; i++) {
+        dst[i] = (rp->item_offsets[i] < 0) ? extra_bytes : (base + rp->item_offsets[i]);
     }
-    bind_items(rp, point, extra_bytes, dst);
 
     if (rp->have_dec) {
         if (rp->chunk_count == rp->chunk_size) {

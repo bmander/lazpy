@@ -35,8 +35,10 @@ pointwise-chunked and layered-chunked containers, fixed and adaptive chunk
 tables, files whose chunk table is missing because the compressor was
 interrupted, and selective decompression of LAS 1.4 attribute layers.
 
-Little-endian hosts only; the module refuses to import elsewhere rather than
-mis-decode.
+Little-endian hosts only; the build fails there rather than mis-decode.
+
+Anything that goes wrong reading a file raises `lazpy.LazError`, except an error
+from the underlying file object, which propagates as itself.
 
 ## Building
 
@@ -95,10 +97,12 @@ Decoding the 43M-point file above:
 | laszip (its own C++ reader) | 51 s |
 | lazpy | 38 s |
 
-Per-point iteration through the Python API runs at roughly 0.9M points/sec; the
-in-C `checksum()` path is about twice that. `Reader.read()` returns the reader's
-own `Point` object, refilled in place, so iterating a large file does not
-allocate an object per point — call `point.copy()` to keep one.
+Per-point iteration through the Python API runs at roughly 1.3M points/sec; the
+in-C `checksum()` path is faster still. `Reader.read()` returns the reader's own
+`Point` object, refilled in place, so iterating a large file does not allocate
+an object per point — call `point.copy()` to keep one. It also holds the GIL:
+decoding a single point costs less than releasing and reacquiring it. The bulk
+paths, `checksum()` and `seek()`, do release it.
 
 For LAS 1.4 files, `decompress_selective` skips whole attribute layers:
 

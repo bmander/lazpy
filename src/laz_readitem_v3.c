@@ -29,10 +29,10 @@
  */
 #include "laz_readitem.h"
 
-#define U8_CLAMP(n) (((n) <= 0) ? U8_MIN : (((n) >= 255) ? U8_MAX : ((U8)(n))))
-
-/* LASzip's combined LASpoint14 struct; the item buffer is this layout. */
-#define LASPOINT14_SIZE 48
+/* LASzip's combined LASpoint14 struct; the item buffer is this layout. The
+ * write extent is declared in laz_types.h, which asserts it cannot reach the
+ * next item's slot. */
+#define LASPOINT14_SIZE LAZ_POINT14_WRITE_EXTENT
 
 #define P14_X(p)  (*(I32 *)((p) + 0))
 #define P14_Y(p)  (*(I32 *)((p) + 4))
@@ -184,40 +184,6 @@ static BOOL ensure_bytes(U8 **buf, U64 *allocated, U64 need)
     return LAZ_TRUE;
 }
 
-/* A bank of lazily-created symbol models, as in the v1/v2 readers. */
-#define DECLARE_BANK(name, count)                                              \
-    typedef struct { LazSymbolModel m[count]; U8 created[count]; } name;
-
-static void bank_setup_n(LazSymbolModel *m, U8 *created, U32 n, U32 num_symbols)
-{
-    U32 i;
-    for (i = 0; i < n; i++) {
-        laz_symbol_model_setup(&m[i], num_symbols, LAZ_FALSE);
-        created[i] = 0;
-    }
-}
-
-static void bank_reinit_n(LazSymbolModel *m, const U8 *created, U32 n)
-{
-    U32 i;
-    for (i = 0; i < n; i++) if (created[i]) laz_symbol_model_init(&m[i], NULL);
-}
-
-static LazSymbolModel *bank_get_n(LazSymbolModel *m, U8 *created, U32 idx)
-{
-    if (!created[idx]) {
-        laz_symbol_model_init(&m[idx], NULL);
-        created[idx] = 1;
-    }
-    return &m[idx];
-}
-
-static void bank_free_n(LazSymbolModel *m, U32 n)
-{
-    U32 i;
-    for (i = 0; i < n; i++) laz_symbol_model_free(&m[i]);
-}
-
 /* ======================================================== POINT14 v3/v4 == */
 
 typedef struct {
@@ -269,7 +235,7 @@ typedef struct {
 
 static void p14_read_gps_time(Point14v3 *r);
 
-static BOOL p14_create_and_init(Point14v3 *r, U32 context, const U8 *item)
+static void p14_create_and_init(Point14v3 *r, U32 context, const U8 *item)
 {
     Point14Context *c = &r->contexts[context];
     U32 i;
@@ -278,17 +244,17 @@ static BOOL p14_create_and_init(Point14v3 *r, U32 context, const U8 *item)
         for (i = 0; i < 8; i++)
             laz_symbol_model_setup(&c->m_changed_values[i], 128, LAZ_FALSE);
         laz_symbol_model_setup(&c->m_scanner_channel, 3, LAZ_FALSE);
-        bank_setup_n(c->m_number_of_returns, c->created_nor, 16, 16);
-        bank_setup_n(c->m_return_number, c->created_rn, 16, 16);
+        laz_bank_setup(c->m_number_of_returns, c->created_nor, 16, 16);
+        laz_bank_setup(c->m_return_number, c->created_rn, 16, 16);
         laz_symbol_model_setup(&c->m_return_number_gps_same, 13, LAZ_FALSE);
 
         laz_ic_setup(&c->ic_dX, &r->channel_returns_XY.dec, 32, 2, 8, 0);
         laz_ic_setup(&c->ic_dY, &r->channel_returns_XY.dec, 32, 22, 8, 0);
         laz_ic_setup(&c->ic_Z, &r->Z.dec, 32, 20, 8, 0);
 
-        bank_setup_n(c->m_classification, c->created_cls, 64, 256);
-        bank_setup_n(c->m_flags, c->created_flg, 64, 64);
-        bank_setup_n(c->m_user_data, c->created_usr, 64, 256);
+        laz_bank_setup(c->m_classification, c->created_cls, 64, 256);
+        laz_bank_setup(c->m_flags, c->created_flg, 64, 64);
+        laz_bank_setup(c->m_user_data, c->created_usr, 64, 256);
 
         laz_ic_setup(&c->ic_intensity, &r->intensity.dec, 16, 4, 8, 0);
         laz_ic_setup(&c->ic_scan_angle, &r->scan_angle.dec, 16, 2, 8, 0);
@@ -304,8 +270,8 @@ static BOOL p14_create_and_init(Point14v3 *r, U32 context, const U8 *item)
     /* channel_returns_XY layer */
     for (i = 0; i < 8; i++) laz_symbol_model_init(&c->m_changed_values[i], NULL);
     laz_symbol_model_init(&c->m_scanner_channel, NULL);
-    bank_reinit_n(c->m_number_of_returns, c->created_nor, 16);
-    bank_reinit_n(c->m_return_number, c->created_rn, 16);
+    laz_bank_reinit(c->m_number_of_returns, c->created_nor, 16);
+    laz_bank_reinit(c->m_return_number, c->created_rn, 16);
     laz_symbol_model_init(&c->m_return_number_gps_same, NULL);
     laz_ic_init_decompressor(&c->ic_dX);
     laz_ic_init_decompressor(&c->ic_dY);
@@ -319,9 +285,9 @@ static BOOL p14_create_and_init(Point14v3 *r, U32 context, const U8 *item)
     for (i = 0; i < 8; i++) c->last_Z[i] = P14_Z(item);
 
     /* classification / flags / user_data layers */
-    bank_reinit_n(c->m_classification, c->created_cls, 64);
-    bank_reinit_n(c->m_flags, c->created_flg, 64);
-    bank_reinit_n(c->m_user_data, c->created_usr, 64);
+    laz_bank_reinit(c->m_classification, c->created_cls, 64);
+    laz_bank_reinit(c->m_flags, c->created_flg, 64);
+    laz_bank_reinit(c->m_user_data, c->created_usr, 64);
 
     /* intensity layer */
     laz_ic_init_decompressor(&c->ic_intensity);
@@ -345,7 +311,6 @@ static BOOL p14_create_and_init(Point14v3 *r, U32 context, const U8 *item)
     P14_GPS_TIME_CHANGE(c->last_item) = LAZ_FALSE;
 
     c->unused = LAZ_FALSE;
-    return LAZ_TRUE;
 }
 
 static BOOL p14_chunk_sizes(LazReadItem *self)
@@ -392,12 +357,7 @@ static BOOL p14_init(LazReadItem *self, const U8 *item, U32 *context)
     if (!ensure_bytes(&r->bytes, &r->num_bytes_allocated, num_bytes)) return LAZ_FALSE;
 
     offset = 0;
-    laz_stream_get_bytes(in, r->bytes, r->channel_returns_XY.num_bytes);
-    laz_stream_array_reset(r->channel_returns_XY.stream, r->bytes,
-                           r->channel_returns_XY.num_bytes);
-    laz_decoder_init(&r->channel_returns_XY.dec, r->channel_returns_XY.stream, LAZ_TRUE);
-    offset += r->channel_returns_XY.num_bytes;
-
+    layer_load(&r->channel_returns_XY, in, r->bytes, &offset);
     layer_load(&r->Z, in, r->bytes, &offset);
     layer_load(&r->classification, in, r->bytes, &offset);
     layer_load(&r->flags, in, r->bytes, &offset);
@@ -412,7 +372,8 @@ static BOOL p14_init(LazReadItem *self, const U8 *item, U32 *context)
     r->current_context = P14_SCANNER_CHANNEL(item);
     *context = r->current_context;   /* POINT14 sets the context for all items */
 
-    return p14_create_and_init(r, r->current_context, item);
+    p14_create_and_init(r, r->current_context, item);
+    return LAZ_TRUE;
 }
 
 static void p14_read(LazReadItem *self, U8 *item, U32 *context)
@@ -458,7 +419,7 @@ static void p14_read(LazReadItem *self, U8 *item, U32 *context)
 
     if (changed_values & (1 << 2)) {
         n = laz_decode_symbol(&r->channel_returns_XY.dec,
-                              bank_get_n(cx->m_number_of_returns, cx->created_nor, last_n));
+                              laz_bank_get(cx->m_number_of_returns, cx->created_nor, last_n));
         P14_SET_NUMBER_OF_RETURNS(last_item, n);
     } else {
         n = last_n;
@@ -476,7 +437,7 @@ static void p14_read(LazReadItem *self, U8 *item, U32 *context)
         /* difference bigger than +/-1, so decode how it differs */
         if (gps_time_change) {
             rn = laz_decode_symbol(&r->channel_returns_XY.dec,
-                                   bank_get_n(cx->m_return_number, cx->created_rn, last_r));
+                                   laz_bank_get(cx->m_return_number, cx->created_rn, last_r));
         } else {
             I32 sym = (I32)laz_decode_symbol(&r->channel_returns_XY.dec,
                                              &cx->m_return_number_gps_same);
@@ -529,7 +490,7 @@ static void p14_read(LazReadItem *self, U8 *item, U32 *context)
         U32 last_classification = P14_CLASSIFICATION(last_item);
         I32 ccc = (I32)(((last_classification & 0x1F) << 1) + (cpr == 3 ? 1 : 0));
         U32 cls = laz_decode_symbol(&r->classification.dec,
-                                    bank_get_n(cx->m_classification, cx->created_cls, (U32)ccc));
+                                    laz_bank_get(cx->m_classification, cx->created_cls, (U32)ccc));
         P14_CLASSIFICATION(last_item) = (U8)cls;
         P14_SET_LEGACY_CLASSIFICATION(last_item, (cls < 32) ? cls : 0);
     }
@@ -539,7 +500,7 @@ static void p14_read(LazReadItem *self, U8 *item, U32 *context)
                                (P14_SCAN_DIRECTION_FLAG(last_item) << 4) |
                                P14_CLASSIFICATION_FLAGS(last_item));
         U32 fl = laz_decode_symbol(&r->flags.dec,
-                                   bank_get_n(cx->m_flags, cx->created_flg, last_flags));
+                                   laz_bank_get(cx->m_flags, cx->created_flg, last_flags));
         P14_SET_EDGE_OF_FLIGHT_LINE(last_item, !!(fl & (1 << 5)));
         P14_SET_SCAN_DIRECTION_FLAG(last_item, !!(fl & (1 << 4)));
         P14_SET_CLASSIFICATION_FLAGS(last_item, fl & 0x0F);
@@ -563,7 +524,7 @@ static void p14_read(LazReadItem *self, U8 *item, U32 *context)
     if (r->user_data.changed) {
         U32 idx = P14_USER_DATA(last_item) / 4;
         P14_USER_DATA(last_item) = (U8)laz_decode_symbol(&r->user_data.dec,
-            bank_get_n(cx->m_user_data, cx->created_usr, idx));
+            laz_bank_get(cx->m_user_data, cx->created_usr, idx));
     }
 
     if (r->point_source.changed && point_source_change) {
@@ -683,15 +644,15 @@ static void p14_destroy(LazReadItem *self)
         if (!c->created) continue;
         for (i = 0; i < 8; i++) laz_symbol_model_free(&c->m_changed_values[i]);
         laz_symbol_model_free(&c->m_scanner_channel);
-        bank_free_n(c->m_number_of_returns, 16);
-        bank_free_n(c->m_return_number, 16);
+        laz_bank_free(c->m_number_of_returns, 16);
+        laz_bank_free(c->m_return_number, 16);
         laz_symbol_model_free(&c->m_return_number_gps_same);
         laz_ic_free(&c->ic_dX);
         laz_ic_free(&c->ic_dY);
         laz_ic_free(&c->ic_Z);
-        bank_free_n(c->m_classification, 64);
-        bank_free_n(c->m_flags, 64);
-        bank_free_n(c->m_user_data, 64);
+        laz_bank_free(c->m_classification, 64);
+        laz_bank_free(c->m_flags, 64);
+        laz_bank_free(c->m_user_data, 64);
         laz_ic_free(&c->ic_intensity);
         laz_ic_free(&c->ic_scan_angle);
         laz_ic_free(&c->ic_point_source_ID);
@@ -1114,19 +1075,6 @@ typedef struct {
     Wave14Context contexts[4];
 } Wave14v3;
 
-static U32 wp_get32(const U8 *p)
-{
-    return (U32)p[0] | ((U32)p[1] << 8) | ((U32)p[2] << 16) | ((U32)p[3] << 24);
-}
-
-static void wp_put32(U32 v, U8 *p)
-{
-    p[0] = (U8)(v & 0xFF);
-    p[1] = (U8)((v >> 8) & 0xFF);
-    p[2] = (U8)((v >> 16) & 0xFF);
-    p[3] = (U8)((v >> 24) & 0xFF);
-}
-
 static void wave14_create_and_init(Wave14v3 *r, U32 context, const U8 *item)
 {
     Wave14Context *c = &r->contexts[context];
@@ -1207,12 +1155,12 @@ static void wave14_read(LazReadItem *self, U8 *item, U32 *context)
     /* the 28 predicted bytes follow the packet index */
     {
         const U8 *lw = last_item + 1;
-        U64 last_offset = (U64)wp_get32(lw) | ((U64)wp_get32(lw + 4) << 32);
-        U32 last_packet_size = wp_get32(lw + 8);
-        I32 last_return_point = (I32)wp_get32(lw + 12);
-        I32 last_x = (I32)wp_get32(lw + 16);
-        I32 last_y = (I32)wp_get32(lw + 20);
-        I32 last_z = (I32)wp_get32(lw + 24);
+        U64 last_offset = (U64)laz_wp_get32(lw) | ((U64)laz_wp_get32(lw + 4) << 32);
+        U32 last_packet_size = laz_wp_get32(lw + 8);
+        I32 last_return_point = (I32)laz_wp_get32(lw + 12);
+        I32 last_x = (I32)laz_wp_get32(lw + 16);
+        I32 last_y = (I32)laz_wp_get32(lw + 20);
+        I32 last_z = (I32)laz_wp_get32(lw + 24);
 
         c->sym_last_offset_diff = laz_decode_symbol(&r->wavepacket.dec,
             &c->m_offset_diff[c->sym_last_offset_diff]);
@@ -1235,13 +1183,13 @@ static void wave14_read(LazReadItem *self, U8 *item, U32 *context)
         z = laz_ic_decompress(&c->ic_xyz, last_z, 2);
     }
 
-    wp_put32((U32)(offset & 0xFFFFFFFF), item + 1);
-    wp_put32((U32)(offset >> 32), item + 5);
-    wp_put32(packet_size, item + 9);
-    wp_put32((U32)return_point, item + 13);
-    wp_put32((U32)x, item + 17);
-    wp_put32((U32)y, item + 21);
-    wp_put32((U32)z, item + 25);
+    laz_wp_put32((U32)(offset & 0xFFFFFFFF), item + 1);
+    laz_wp_put32((U32)(offset >> 32), item + 5);
+    laz_wp_put32(packet_size, item + 9);
+    laz_wp_put32((U32)return_point, item + 13);
+    laz_wp_put32((U32)x, item + 17);
+    laz_wp_put32((U32)y, item + 21);
+    laz_wp_put32((U32)z, item + 25);
 
     memcpy(last_item, item, 29);
 }

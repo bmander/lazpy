@@ -5,8 +5,6 @@
  */
 #include "laz_readitem.h"
 
-#define U8_CLAMP(n) (((n) <= 0) ? U8_MIN : (((n) >= 255) ? U8_MAX : ((U8)(n))))
-
 const U8 laz_number_return_map[8][8] = {
     { 15, 14, 13, 12, 11, 10,  9,  8 },
     { 14,  0,  1,  3,  6, 10, 10,  9 },
@@ -29,63 +27,12 @@ const U8 laz_number_return_level[8][8] = {
     {  7,  6,  5,  4,  3,  2,  1,  0 }
 };
 
-/*
- * A bank of 256 symbol models created on demand.
- *
- * LASzip allocates these lazily (`if (m_bit_byte[i] == 0) create`) and, on
- * chunk init, re-initialises only the ones that exist. Doing the same matters
- * for more than memory: a model that has never been created must start fresh
- * the first time it is used mid-chunk, which is not the same as having been
- * initialised at chunk start.
- */
-typedef struct {
-    LazSymbolModel models[256];
-    U8 created[256];
-} ModelBank;
-
-static void bank_setup(ModelBank *b)
-{
-    U32 i;
-    for (i = 0; i < 256; i++) {
-        laz_symbol_model_setup(&b->models[i], 256, LAZ_FALSE);
-        b->created[i] = 0;
-    }
-}
-
-static void bank_reinit(ModelBank *b)
-{
-    U32 i;
-    for (i = 0; i < 256; i++) {
-        if (b->created[i]) laz_symbol_model_init(&b->models[i], NULL);
-    }
-}
-
-static LazSymbolModel *bank_get(ModelBank *b, U8 idx)
-{
-    if (!b->created[idx]) {
-        laz_symbol_model_init(&b->models[idx], NULL);
-        b->created[idx] = 1;
-    }
-    return &b->models[idx];
-}
-
-static void bank_free(ModelBank *b)
-{
-    U32 i;
-    for (i = 0; i < 256; i++) laz_symbol_model_free(&b->models[i]);
-}
-
 /* ======================================================== POINT10 v2 ===== */
 
 /* Field accessors for the 20-byte legacy point record held in last_item. */
-#define P10_X(li)  (*(I32 *)((li) + 0))
-#define P10_Y(li)  (*(I32 *)((li) + 4))
-#define P10_Z(li)  (*(I32 *)((li) + 8))
-#define P10_INTENSITY(li) (*(U16 *)((li) + 12))
 #define P10_RETURN_NUMBER(li)    ((li)[14] & 0x07)
 #define P10_NUMBER_OF_RETURNS(li) (((li)[14] >> 3) & 0x07)
 #define P10_SCAN_DIR_FLAG(li)    (((li)[14] >> 6) & 0x01)
-#define P10_POINT_SOURCE_ID(li)  (*(U16 *)((li) + 18))
 
 typedef struct {
     LazReadItem base;
@@ -93,9 +40,8 @@ typedef struct {
     LazIntCompressor ic_intensity;
     LazSymbolModel m_scan_angle_rank[2];
     LazIntCompressor ic_point_source_ID;
-    ModelBank m_bit_byte;
-    ModelBank m_classification;
-    ModelBank m_user_data;
+    LazSymbolModel m_bit_byte[256], m_classification[256], m_user_data[256];
+    U8 created_bit_byte[256], created_classification[256], created_user_data[256];
     LazIntCompressor ic_dx;
     LazIntCompressor ic_dy;
     LazIntCompressor ic_z;
@@ -124,9 +70,9 @@ static BOOL p10v2_init(LazReadItem *self, const U8 *item, U32 *context)
     laz_symbol_model_init(&r->m_scan_angle_rank[0], NULL);
     laz_symbol_model_init(&r->m_scan_angle_rank[1], NULL);
     laz_ic_init_decompressor(&r->ic_point_source_ID);
-    bank_reinit(&r->m_bit_byte);
-    bank_reinit(&r->m_classification);
-    bank_reinit(&r->m_user_data);
+    laz_bank_reinit(r->m_bit_byte, r->created_bit_byte, 256);
+    laz_bank_reinit(r->m_classification, r->created_classification, 256);
+    laz_bank_reinit(r->m_user_data, r->created_user_data, 256);
     laz_ic_init_decompressor(&r->ic_dx);
     laz_ic_init_decompressor(&r->ic_dy);
     laz_ic_init_decompressor(&r->ic_z);
@@ -151,7 +97,7 @@ static void p10v2_read(LazReadItem *self, U8 *item, U32 *context)
 
     if (changed_values) {
         if (changed_values & 32) {
-            li[14] = (U8)laz_decode_symbol(self->dec, bank_get(&r->m_bit_byte, li[14]));
+            li[14] = (U8)laz_decode_symbol(self->dec, laz_bank_get(r->m_bit_byte, r->created_bit_byte, li[14]));
         }
 
         n = P10_NUMBER_OF_RETURNS(li);
@@ -168,7 +114,7 @@ static void p10v2_read(LazReadItem *self, U8 *item, U32 *context)
         }
 
         if (changed_values & 8) {
-            li[15] = (U8)laz_decode_symbol(self->dec, bank_get(&r->m_classification, li[15]));
+            li[15] = (U8)laz_decode_symbol(self->dec, laz_bank_get(r->m_classification, r->created_classification, li[15]));
         }
 
         if (changed_values & 4) {
@@ -178,7 +124,7 @@ static void p10v2_read(LazReadItem *self, U8 *item, U32 *context)
         }
 
         if (changed_values & 2) {
-            li[17] = (U8)laz_decode_symbol(self->dec, bank_get(&r->m_user_data, li[17]));
+            li[17] = (U8)laz_decode_symbol(self->dec, laz_bank_get(r->m_user_data, r->created_user_data, li[17]));
         }
 
         if (changed_values & 1) {
@@ -222,9 +168,9 @@ static void p10v2_destroy(LazReadItem *self)
     laz_symbol_model_free(&r->m_scan_angle_rank[0]);
     laz_symbol_model_free(&r->m_scan_angle_rank[1]);
     laz_ic_free(&r->ic_point_source_ID);
-    bank_free(&r->m_bit_byte);
-    bank_free(&r->m_classification);
-    bank_free(&r->m_user_data);
+    laz_bank_free(r->m_bit_byte, 256);
+    laz_bank_free(r->m_classification, 256);
+    laz_bank_free(r->m_user_data, 256);
     laz_ic_free(&r->ic_dx);
     laz_ic_free(&r->ic_dy);
     laz_ic_free(&r->ic_z);
@@ -244,9 +190,9 @@ LazReadItem *laz_readitem_v2_point10(LazDecoder *dec)
     laz_symbol_model_setup(&r->m_scan_angle_rank[0], 256, LAZ_FALSE);
     laz_symbol_model_setup(&r->m_scan_angle_rank[1], 256, LAZ_FALSE);
     laz_ic_setup(&r->ic_point_source_ID, dec, 16, 1, 8, 0);
-    bank_setup(&r->m_bit_byte);
-    bank_setup(&r->m_classification);
-    bank_setup(&r->m_user_data);
+    laz_bank_setup(r->m_bit_byte, r->created_bit_byte, 256, 256);
+    laz_bank_setup(r->m_classification, r->created_classification, 256, 256);
+    laz_bank_setup(r->m_user_data, r->created_user_data, 256, 256);
     laz_ic_setup(&r->ic_dx, dec, 32, 2, 8, 0);
     laz_ic_setup(&r->ic_dy, dec, 32, 22, 8, 0);
     laz_ic_setup(&r->ic_z, dec, 32, 20, 8, 0);

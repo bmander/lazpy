@@ -8,6 +8,7 @@
 #ifndef LAZ_TYPES_H
 #define LAZ_TYPES_H
 
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,28 +31,18 @@ typedef int      BOOL;
 #define U8_MIN  ((U8)0x0)
 #define U8_MAX  ((U8)0xFF)
 #define U8_MAX_PLUS_ONE 0x0100
-#define U16_MAX ((U16)0xFFFF)
 #define U32_MAX ((U32)0xFFFFFFFF)
 #define I8_MIN  ((I8)0x80)
 #define I8_MAX  ((I8)0x7F)
-#define I16_MIN ((I16)0x8000)
-#define I16_MAX ((I16)0x7FFF)
 #define I32_MIN ((I32)0x80000000)
 #define I32_MAX ((I32)0x7FFFFFFF)
 
 #define U8_FOLD(n) (((n) < U8_MIN) ? ((n) + U8_MAX_PLUS_ONE) \
                                    : (((n) > U8_MAX) ? ((n) - U8_MAX_PLUS_ONE) : (n)))
+#define U8_CLAMP(n) (((n) <= 0) ? U8_MIN : (((n) >= 255) ? U8_MAX : ((U8)(n))))
 #define I8_CLAMP(n) (((n) <= I8_MIN) ? I8_MIN : (((n) >= I8_MAX) ? I8_MAX : ((I8)(n))))
 #define I16_QUANTIZE(n) (((n) >= 0) ? (I16)((n) + 0.5) : (I16)((n) - 0.5))
-#define I32_QUANTIZE(n) (((n) >= 0) ? (I32)((n) + 0.5) : (I32)((n) - 0.5))
 #define U32_ZERO_BIT_0(n) ((n) & (U32)0xFFFFFFFE)
-
-#ifndef LAZ_MIN
-#define LAZ_MIN(a, b) ((a) < (b) ? (a) : (b))
-#endif
-#ifndef LAZ_MAX
-#define LAZ_MAX(a, b) ((a) > (b) ? (a) : (b))
-#endif
 
 /* LASzip item types, as stored in the LASzip VLR. */
 typedef enum {
@@ -130,10 +121,54 @@ typedef struct {
     U8 *extra_bytes;
 } LazPoint;
 
-/* Offsets the item readers write to. Asserted at module init. */
+/* Offsets the item readers write to. */
 #define LAZ_POINT_OFFSET_XYZ         0
 #define LAZ_POINT_OFFSET_GPSTIME    32
 #define LAZ_POINT_OFFSET_RGB        40
 #define LAZ_POINT_OFFSET_WAVEPACKET 48
+
+/*
+ * The POINT14 v3/v4 readers do not write only the LAS 1.4 fields: they finish
+ * with a 48-byte copy from offset 0, which covers the scratch area at 25-31
+ * and the rgb slots at 40-47. That is faithful to LASzip, and safe only
+ * because POINT14 is always item 0, so any RGB item decodes afterwards and
+ * overwrites 40-47. A VLR listing RGB14 before POINT14 would break this.
+ */
+#define LAZ_POINT14_WRITE_EXTENT    48
+
+/*
+ * The layout is load-bearing, not incidental: item readers write through casts
+ * at the offsets above rather than through field accessors, so a compiler that
+ * packed this struct differently would corrupt every decoded point. Checked
+ * here, where the struct is defined, so any consumer of src/ gets the check
+ * and not just the Python extension.
+ */
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#define LAZ_ASSERT_OFFSET(field, want) \
+    _Static_assert(offsetof(LazPoint, field) == (want), \
+                   "LazPoint." #field " must live at offset " #want)
+LAZ_ASSERT_OFFSET(X, LAZ_POINT_OFFSET_XYZ);
+LAZ_ASSERT_OFFSET(Y, 4);
+LAZ_ASSERT_OFFSET(Z, 8);
+LAZ_ASSERT_OFFSET(intensity, 12);
+LAZ_ASSERT_OFFSET(scan_angle_rank, 16);
+LAZ_ASSERT_OFFSET(user_data, 17);
+LAZ_ASSERT_OFFSET(point_source_ID, 18);
+LAZ_ASSERT_OFFSET(extended_scan_angle, 20);
+LAZ_ASSERT_OFFSET(extended_classification, 23);
+LAZ_ASSERT_OFFSET(gps_time, LAZ_POINT_OFFSET_GPSTIME);
+LAZ_ASSERT_OFFSET(rgb, LAZ_POINT_OFFSET_RGB);
+LAZ_ASSERT_OFFSET(wave_packet, LAZ_POINT_OFFSET_WAVEPACKET);
+/* the POINT14 copy must not reach into the wavepacket slot */
+_Static_assert(LAZ_POINT14_WRITE_EXTENT <= LAZ_POINT_OFFSET_WAVEPACKET,
+               "POINT14 write extent overlaps the wavepacket item");
+#undef LAZ_ASSERT_OFFSET
+#endif
+
+/* Little-endian hosts only: the readers reinterpret bytes in place. */
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && \
+    __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#error "lazpy only supports little-endian hosts"
+#endif
 
 #endif /* LAZ_TYPES_H */

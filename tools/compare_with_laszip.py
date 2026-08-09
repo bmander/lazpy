@@ -98,50 +98,6 @@ def compare(laz_path, dump_path, max_points=None):
     return n, mismatches
 
 
-FNV_OFFSET = 14695981039346656037
-FNV_PRIME = 1099511628211
-MASK64 = (1 << 64) - 1
-
-
-def point_record(point):
-    """The canonical 64-byte record hashed in --hash mode.
-
-    Must stay byte-identical to the one lazdump.c builds, since a single
-    mismatched byte anywhere shows up only as a differing final hash.
-    """
-    rec = bytearray(64)
-    rec[0:4] = struct.pack("<i", point.X)
-    rec[4:8] = struct.pack("<i", point.Y)
-    rec[8:12] = struct.pack("<i", point.Z)
-    rec[12:14] = struct.pack("<H", point.intensity)
-    rec[14] = (point.return_number
-               | (point.number_of_returns << 3)
-               | (point.scan_direction_flag << 6)
-               | (point.edge_of_flight_line << 7))
-    rec[15] = (point.classification
-               | (point.synthetic_flag << 5)
-               | (point.keypoint_flag << 6)
-               | (point.withheld_flag << 7))
-    rec[16] = point.scan_angle_rank & 0xFF
-    rec[17] = point.user_data
-    rec[18:20] = struct.pack("<H", point.point_source_ID)
-    rec[20:28] = struct.pack("<Q", gps_bits(point.gps_time))
-    rgb = point.rgb
-    rec[28:30] = struct.pack("<H", rgb[0])
-    rec[30:32] = struct.pack("<H", rgb[1])
-    rec[32:34] = struct.pack("<H", rgb[2])
-    rec[34:36] = struct.pack("<H", rgb[3])
-    rec[36:38] = struct.pack("<H", point.extended_scan_angle & 0xFFFF)
-    rec[38] = (point.extended_point_type
-               | (point.extended_scanner_channel << 2)
-               | (point.extended_classification_flags << 4))
-    rec[39] = point.extended_classification
-    rec[40] = (point.extended_return_number
-               | (point.extended_number_of_returns << 4))
-    rec[41:64] = point.wave_packet[:23]
-    return bytes(rec) + point.wave_packet[23:29] + point.extra_bytes
-
-
 def hash_file(laz_path, max_points=None):
     """Whole-file hash, computed in C so 40M-point files stay practical."""
     reader = Reader(laz_path)
@@ -153,14 +109,12 @@ def main():
     if len(sys.argv) < 3:
         raise SystemExit(__doc__)
     laz_path, dump_path = sys.argv[1], sys.argv[2]
+    max_points = int(sys.argv[3]) if len(sys.argv) > 3 else None
 
     if dump_path == "--hash":
-        max_points = int(sys.argv[3]) if len(sys.argv) > 3 else None
         h, n = hash_file(laz_path, max_points)
         print(f"{h} {n}")
         return 0
-
-    max_points = int(sys.argv[3]) if len(sys.argv) > 3 else None
 
     n, mismatches = compare(laz_path, dump_path, max_points)
 

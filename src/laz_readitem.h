@@ -96,6 +96,72 @@ LazReadItem *laz_readitem_v4_wavepacket14(LazDecoder *dec, U32 decompress_select
 #define LAZ_DECOMPRESS_SELECTIVE_BYTE0              0x00010000u
 #define LAZ_DECOMPRESS_SELECTIVE_EXTRA_BYTES        0xFFFF0000u
 
+/* --- shared field accessors and helpers ---------------------------------- */
+
+/* Fields of the 20-byte legacy point record, as held in a reader's last_item.
+ * The v2 reader adds bitfield accessors of its own on top of these. */
+#define P10_X(li)               (*(I32 *)((li) + 0))
+#define P10_Y(li)               (*(I32 *)((li) + 4))
+#define P10_Z(li)               (*(I32 *)((li) + 8))
+#define P10_INTENSITY(li)       (*(U16 *)((li) + 12))
+#define P10_POINT_SOURCE_ID(li) (*(U16 *)((li) + 18))
+
+/* Little-endian 32-bit access inside a packed wavepacket record. Shared by the
+ * WAVEPACKET13 v1 and WAVEPACKET14 v3/v4 readers, which pack identically. */
+static inline U32 laz_wp_get32(const U8 *p)
+{
+    return (U32)p[0] | ((U32)p[1] << 8) | ((U32)p[2] << 16) | ((U32)p[3] << 24);
+}
+
+static inline void laz_wp_put32(U32 v, U8 *p)
+{
+    p[0] = (U8)(v & 0xFF);
+    p[1] = (U8)((v >> 8) & 0xFF);
+    p[2] = (U8)((v >> 16) & 0xFF);
+    p[3] = (U8)((v >> 24) & 0xFF);
+}
+
+/*
+ * A bank of symbol models created on demand.
+ *
+ * LASzip allocates these lazily and, on chunk init, re-initialises only the
+ * ones that exist. Doing the same matters for more than memory: a model that
+ * has never been created must start fresh the first time it is used mid-chunk,
+ * which is not the same as having been initialised at chunk start.
+ *
+ * `created` parallels `m` and records which entries have been through
+ * laz_symbol_model_init at least once.
+ */
+static inline void laz_bank_setup(LazSymbolModel *m, U8 *created, U32 n, U32 num_symbols)
+{
+    U32 i;
+    for (i = 0; i < n; i++) {
+        laz_symbol_model_setup(&m[i], num_symbols, LAZ_FALSE);
+        created[i] = 0;
+    }
+}
+
+static inline void laz_bank_reinit(LazSymbolModel *m, const U8 *created, U32 n)
+{
+    U32 i;
+    for (i = 0; i < n; i++) if (created[i]) laz_symbol_model_init(&m[i], NULL);
+}
+
+static inline LazSymbolModel *laz_bank_get(LazSymbolModel *m, U8 *created, U32 idx)
+{
+    if (!created[idx]) {
+        laz_symbol_model_init(&m[idx], NULL);
+        created[idx] = 1;
+    }
+    return &m[idx];
+}
+
+static inline void laz_bank_free(LazSymbolModel *m, U32 n)
+{
+    U32 i;
+    for (i = 0; i < n; i++) laz_symbol_model_free(&m[i]);
+}
+
 /* Streaming median of the last five values, used to predict dx/dy in the
  * POINT10 v2 and POINT14 v3/v4 readers. Ported from laszip_common_v2.hpp. */
 typedef struct {

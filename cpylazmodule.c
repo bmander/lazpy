@@ -23,6 +23,13 @@
 #include "src/laz_readitem.h"
 #include "src/laz_readpoint.h"
 
+/*
+ * The exception every decode failure raises. lazpy.py re-exports this as
+ * LazError, so "this file failed to decode" is one catchable category rather
+ * than a mix of RuntimeError, ValueError and OSError.
+ */
+static PyObject *LazErrorType = NULL;
+
 /* ==================================================== ArithmeticBitModel == */
 
 typedef struct {
@@ -697,9 +704,17 @@ static PyObject *Point_get_gps_time(PointObject *self, void *c)
 
 static PyObject *Point_get_rgb(PointObject *self, void *c)
 {
+    PyObject *t;
+    int i;
     (void)c;
-    return Py_BuildValue("(IIII)", (unsigned)self->p->rgb[0], (unsigned)self->p->rgb[1],
-                         (unsigned)self->p->rgb[2], (unsigned)self->p->rgb[3]);
+    t = PyTuple_New(4);
+    if (!t) return NULL;
+    for (i = 0; i < 4; i++) {
+        PyObject *v = PyLong_FromUnsignedLong(self->p->rgb[i]);
+        if (!v) { Py_DECREF(t); return NULL; }
+        PyTuple_SET_ITEM(t, i, v);
+    }
+    return t;
 }
 
 static PyObject *Point_get_wave_packet(PointObject *self, void *c)
@@ -840,58 +855,54 @@ static int Reader_tp_init(ReaderObject *self, PyObject *args, PyObject *kwds)
     PyObject *fp, *items_obj;
     unsigned int compressor, coder = 0, chunk_size = 0;
     unsigned int selective = LAZ_DECOMPRESS_SELECTIVE_ALL;
-    unsigned int num_extra = 0;
     long long start_offset = -1;
     LazItem *items = NULL;
     U32 num_items = 0;
     static char *kwlist[] = {"fp", "items", "compressor", "coder", "chunk_size",
-                             "start_offset", "num_extra_bytes",
-                             "decompress_selective", NULL};
+                             "start_offset", "decompress_selective", NULL};
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "OOI|IILII", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "OOI|IILI", kwlist,
                                      &fp, &items_obj, &compressor, &coder,
-                                     &chunk_size, &start_offset, &num_extra,
-                                     &selective))
+                                     &chunk_size, &start_offset, &selective))
         return -1;
 
     if (parse_items(items_obj, &items, &num_items) < 0) return -1;
 
-    self->stream = laz_stream_new_file(fp);
-    if (!self->stream) { PyMem_Free(items); PyErr_NoMemory(); return -1; }
-    Py_INCREF(fp);
-    self->fp = fp;
-
-    if (start_offset >= 0 && !laz_stream_seek(self->stream, (I64)start_offset)) {
-        PyMem_Free(items);
-        PyErr_SetString(PyExc_OSError, "could not seek to the start of point data");
-        return -1;
-    }
-
-    self->num_extra_bytes = num_extra;
-    if (num_extra) {
-        self->extra_bytes = (U8 *)calloc(num_extra, 1);
-        if (!self->extra_bytes) { PyMem_Free(items); PyErr_NoMemory(); return -1; }
-    }
-    self->point.num_extra_bytes = (I32)num_extra;
-    self->point.extra_bytes = self->extra_bytes;
-
+    /* Setup first: it decides how many extra bytes the items imply, so the
+     * buffer the readers write into is sized by the core rather than trusted
+     * from the caller. */
     laz_readpoint_init_struct(&self->rp, selective);
     if (!laz_readpoint_setup(&self->rp, num_items, items, compressor, coder, chunk_size)) {
         PyMem_Free(items);
-        PyErr_SetString(PyExc_ValueError, self->rp.last_error);
+        PyErr_SetString(LazErrorType, self->rp.last_error);
         return -1;
     }
     PyMem_Free(items);
 
-    if (!laz_readpoint_init(&self->rp, self->stream)) {
-        PyErr_SetString(PyExc_ValueError, "could not initialise the point reader");
+    self->num_extra_bytes = self->rp.num_extra_bytes;
+    if (self->num_extra_bytes) {
+        self->extra_bytes = (U8 *)calloc(self->num_extra_bytes, 1);
+        if (!self->extra_bytes) { PyErr_NoMemory(); return -1; }
+    }
+    self->point.num_extra_bytes = (I32)self->num_extra_bytes;
+    self->point.extra_bytes = self->extra_bytes;
+
+    self->stream = laz_stream_new_file(fp);
+    if (!self->stream) { PyErr_NoMemory(); return -1; }
+    Py_INCREF(fp);
+    self->fp = fp;
+
+    if (start_offset >= 0 && !laz_stream_seek(self->stream, (I64)start_offset)) {
+        PyErr_SetString(LazErrorType, "could not seek to the start of point data");
         return -1;
     }
 
-    /* Point formats 6-10 carry extended_point_type=1 for every point; LASzip
-     * stamps it once here rather than on each decode, so nothing in the read
-     * path would ever set it. */
-    if (self->rp.has_point14) self->point.extended_point_type = 1;
+    if (!laz_readpoint_init(&self->rp, self->stream)) {
+        PyErr_SetString(LazErrorType, "could not initialise the point reader");
+        return -1;
+    }
+
+    laz_readpoint_init_point(&self->rp, &self->point);
 
     self->point_view = Point_borrow(&self->point, self->extra_bytes,
                                     self->num_extra_bytes);
@@ -902,6 +913,23 @@ static int Reader_tp_init(ReaderObject *self, PyObject *args, PyObject *kwds)
     return 0;
 }
 
+/*
+ * Raises for a failed core operation, preferring the most specific cause:
+ * an exception the underlying file object already raised, then the core's own
+ * message, then a generic fallback.
+ */
+static PyObject *reader_error(ReaderObject *self)
+{
+    if (PyErr_Occurred()) return NULL;            /* propagate the original */
+    if (self->stream && self->stream->failed) {
+        PyErr_SetString(LazErrorType, "error reading from the underlying file");
+        return NULL;
+    }
+    PyErr_SetString(LazErrorType,
+                    self->rp.has_error ? self->rp.last_error : "read failed");
+    return NULL;
+}
+
 static PyObject *Reader_read(ReaderObject *self, PyObject *Py_UNUSED(i))
 {
     BOOL ok;
@@ -909,14 +937,12 @@ static PyObject *Reader_read(ReaderObject *self, PyObject *Py_UNUSED(i))
         PyErr_SetString(PyExc_ValueError, "reader is not initialised");
         return NULL;
     }
-    Py_BEGIN_ALLOW_THREADS
+    /* The GIL is deliberately held. Decoding one point costs less than a
+     * release/reacquire pair, and the only Python re-entry underneath is the
+     * stream refill roughly once per 64 KB. */
     ok = laz_readpoint_read(&self->rp, &self->point, self->extra_bytes);
-    Py_END_ALLOW_THREADS
 
-    if (!ok) {
-        PyErr_SetString(PyExc_RuntimeError, self->rp.last_error);
-        return NULL;
-    }
+    if (!ok) return reader_error(self);
     self->index++;
     Py_INCREF(self->point_view);
     return self->point_view;
@@ -946,7 +972,6 @@ static PyObject *Reader_checksum(ReaderObject *self, PyObject *args)
 
         if (!laz_readpoint_read(&self->rp, p, self->extra_bytes)) { ok = LAZ_FALSE; break; }
 
-        memset(rec, 0, sizeof(rec));
         memcpy(rec + 0, &p->X, 4);
         memcpy(rec + 4, &p->Y, 4);
         memcpy(rec + 8, &p->Z, 4);
@@ -974,10 +999,7 @@ static PyObject *Reader_checksum(ReaderObject *self, PyObject *args)
     }
     Py_END_ALLOW_THREADS
 
-    if (!ok) {
-        PyErr_SetString(PyExc_RuntimeError, self->rp.last_error);
-        return NULL;
-    }
+    if (!ok) return reader_error(self);
     self->index += done;
     return Py_BuildValue("(KK)", (unsigned long long)h, (unsigned long long)done);
 }
@@ -992,11 +1014,7 @@ static PyObject *Reader_seek(ReaderObject *self, PyObject *args)
     ok = laz_readpoint_seek(&self->rp, self->index, (U64)target);
     Py_END_ALLOW_THREADS
 
-    if (!ok) {
-        PyErr_SetString(PyExc_RuntimeError,
-                        self->rp.has_error ? self->rp.last_error : "seek failed");
-        return NULL;
-    }
+    if (!ok) return reader_error(self);
     self->index = (U64)target;
     Py_RETURN_NONE;
 }
@@ -1023,6 +1041,9 @@ static PyObject *Reader_get_chunk_starts(ReaderObject *self, void *c)
     return list;
 }
 
+static PyObject *Reader_get_num_extra_bytes(ReaderObject *self, void *c)
+{ (void)c; return PyLong_FromUnsignedLong(self->num_extra_bytes); }
+
 static PyObject *Reader_get_warning(ReaderObject *self, void *c)
 {
     (void)c;
@@ -1043,6 +1064,8 @@ static PyGetSetDef Reader_getset[] = {
     {"point", (getter)Reader_get_point, NULL, NULL, NULL},
     {"index", (getter)Reader_get_index, NULL, NULL, NULL},
     {"chunk_starts", (getter)Reader_get_chunk_starts, NULL, NULL, NULL},
+    {"num_extra_bytes", (getter)Reader_get_num_extra_bytes, NULL,
+     "size of the extra-bytes buffer implied by the item layout", NULL},
     {"warning", (getter)Reader_get_warning, NULL, NULL, NULL},
     {NULL}
 };
@@ -1065,35 +1088,10 @@ static PyMethodDef cpylaz_methods[] = {{NULL, NULL}};
 
 PyDoc_STRVAR(module_doc, "C backend for lazpy: LAZ entropy coding and point decoding.");
 
-static int check_layout(void)
-{
-    /* The item readers write into a LazPoint at hard-coded offsets. */
-    if (offsetof(LazPoint, X) != LAZ_POINT_OFFSET_XYZ) return 0;
-    if (offsetof(LazPoint, gps_time) != LAZ_POINT_OFFSET_GPSTIME) return 0;
-    if (offsetof(LazPoint, rgb) != LAZ_POINT_OFFSET_RGB) return 0;
-    if (offsetof(LazPoint, wave_packet) != LAZ_POINT_OFFSET_WAVEPACKET) return 0;
-    if (offsetof(LazPoint, intensity) != 12) return 0;
-    if (offsetof(LazPoint, scan_angle_rank) != 16) return 0;
-    if (offsetof(LazPoint, point_source_ID) != 18) return 0;
-    if (offsetof(LazPoint, extended_scan_angle) != 20) return 0;
-    if (offsetof(LazPoint, extended_classification) != 23) return 0;
-    return 1;
-}
-
 static int cpylaz_exec(PyObject *m)
 {
-    union { U32 i; U8 c[4]; } endian_probe;
-    endian_probe.i = 1;
-    if (endian_probe.c[0] != 1) {
-        PyErr_SetString(PyExc_RuntimeError,
-                        "lazpy only supports little-endian hosts");
-        return -1;
-    }
-    if (!check_layout()) {
-        PyErr_SetString(PyExc_RuntimeError,
-                        "LazPoint field layout does not match the LAZ item layout");
-        return -1;
-    }
+    /* The point layout and host endianness are enforced at compile time by
+     * static assertions in src/laz_types.h, next to the struct they constrain. */
 
 #define ADD_TYPE(var, name)                                                    \
     do {                                                                       \
@@ -1113,6 +1111,16 @@ static int cpylaz_exec(PyObject *m)
     ADD_TYPE(Point_Type, "Point");
     ADD_TYPE(Reader_Type, "PointReader");
 #undef ADD_TYPE
+
+    LazErrorType = PyErr_NewExceptionWithDoc(
+        "cpylaz.LazError", "A LAS/LAZ file could not be read or decoded.",
+        NULL, NULL);
+    if (LazErrorType == NULL) return -1;
+    Py_INCREF(LazErrorType);
+    if (PyModule_AddObject(m, "LazError", LazErrorType) < 0) {
+        Py_DECREF(LazErrorType);
+        return -1;
+    }
 
     PyModule_AddIntConstant(m, "DM_LENGTH_SHIFT", DM_LENGTH_SHIFT);
     PyModule_AddIntConstant(m, "BM_LENGTH_SHIFT", BM_LENGTH_SHIFT);

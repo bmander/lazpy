@@ -109,23 +109,34 @@ static I64 file_refill(LazStream *s)
     PyObject *res;
     Py_ssize_t n;
     char *data;
-    PyGILState_STATE gil = PyGILState_Ensure();
+    PyGILState_STATE gil;
+
+    /* Once failed the stream is inert: an exception is pending, so calling
+     * back into Python again would be illegal. Decoding continues on zeros
+     * until the caller notices and propagates. */
+    if (s->failed) return 0;
+
+    gil = PyGILState_Ensure();
 
     f->base += f->pos;
     f->pos = 0;
     f->fill = 0;
 
+    /* On failure the Python exception is deliberately left set: the binding
+     * propagates it rather than reporting a generic end-of-file, so a
+     * PermissionError or a file object returning a non-bytes value is
+     * distinguishable from a genuinely truncated file. */
     res = PyObject_CallMethod(f->fp, "read", "n", (Py_ssize_t)FILE_BUF_SIZE);
     if (res == NULL) {
-        PyErr_Clear();
         PyGILState_Release(gil);
+        s->failed = LAZ_TRUE;
         s->eof = LAZ_TRUE;
         return 0;
     }
     if (PyBytes_AsStringAndSize(res, &data, &n) < 0) {
-        PyErr_Clear();
         Py_DECREF(res);
         PyGILState_Release(gil);
+        s->failed = LAZ_TRUE;
         s->eof = LAZ_TRUE;
         return 0;
     }
@@ -177,17 +188,21 @@ static BOOL file_seek_raw(LazStream *s, I64 offset, int whence)
     FileImpl *f = (FileImpl *)s->impl;
     PyObject *res;
     I64 newpos;
-    PyGILState_STATE gil = PyGILState_Ensure();
+    PyGILState_STATE gil;
+
+    if (s->failed) return LAZ_FALSE;      /* see file_refill */
+
+    gil = PyGILState_Ensure();
 
     res = PyObject_CallMethod(f->fp, "seek", "Li", (long long)offset, whence);
-    if (res == NULL) { PyErr_Clear(); PyGILState_Release(gil); return LAZ_FALSE; }
+    if (res == NULL) { s->failed = LAZ_TRUE; PyGILState_Release(gil); return LAZ_FALSE; }
     Py_DECREF(res);
 
     res = PyObject_CallMethod(f->fp, "tell", NULL);
-    if (res == NULL) { PyErr_Clear(); PyGILState_Release(gil); return LAZ_FALSE; }
+    if (res == NULL) { s->failed = LAZ_TRUE; PyGILState_Release(gil); return LAZ_FALSE; }
     newpos = (I64)PyLong_AsLongLong(res);
     Py_DECREF(res);
-    if (PyErr_Occurred()) { PyErr_Clear(); PyGILState_Release(gil); return LAZ_FALSE; }
+    if (PyErr_Occurred()) { s->failed = LAZ_TRUE; PyGILState_Release(gil); return LAZ_FALSE; }
     PyGILState_Release(gil);
 
     f->base = newpos;
@@ -238,6 +253,8 @@ LazStream *laz_stream_new_file(void *py_fp)
     f->fp = (PyObject *)py_fp;
     Py_INCREF(f->fp);
 
+    /* A file object without a usable tell() is fine; positions are then
+     * relative to wherever it happened to be. Cleared deliberately. */
     res = PyObject_CallMethod(f->fp, "tell", NULL);
     if (res == NULL) {
         PyErr_Clear();
