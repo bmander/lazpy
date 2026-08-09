@@ -1002,6 +1002,26 @@ def rebuilt(name, block, count):
     return io.BytesIO(rebuilt_header(name, count) + block)
 
 
+def compress(fp, records, items, compressor, chunk_size=0, breaks=(),
+             start_offset=-1):
+    """Drive a PointWriter over `records`, and hand it back once it is closed.
+
+    `breaks` are the indices to close the open chunk in front of, which only
+    adaptive chunking allows; an index appearing twice closes a chunk twice
+    over. The chunk size is masked because the VLR declares it signed, and -1
+    there -- adaptive -- is U32_MAX to the writer.
+    """
+    writer = cpylaz.PointWriter(fp, items, compressor,
+                                chunk_size=chunk_size & 0xFFFFFFFF,
+                                start_offset=start_offset)
+    for index, record in enumerate(records):
+        for _ in range(breaks.count(index)):
+            writer.chunk()
+        writer.write(record)
+    writer.done()
+    return writer
+
+
 def written_block(name, records):
     """The point block `records` compress to, in the container `name` declares.
 
@@ -1013,11 +1033,7 @@ def written_block(name, records):
     start = f.header["offset_to_point_data"]
     fp = io.BytesIO(f.data[:start])
     fp.seek(0, io.SEEK_END)
-    writer = cpylaz.PointWriter(fp, f.items, f.compressor,
-                                chunk_size=f.chunk_size & 0xFFFFFFFF)
-    for record in records:
-        writer.write(record)
-    writer.done()
+    compress(fp, records, f.items, f.compressor, f.chunk_size)
     return fp.getvalue()[start:]
 
 
@@ -1047,10 +1063,7 @@ def test_raw_output_is_byte_identical(point_format):
     records = las_records(f"pt{point_format}_v0.las")
     items = [(t, size, 0) for t, size, _ in load(f"pt{point_format}_v2.laz").items]
     fp = io.BytesIO()
-    writer = cpylaz.PointWriter(fp, items, Compressor.NONE)
-    for record in records:
-        writer.write(record)
-    writer.done()
+    compress(fp, records, items, Compressor.NONE)
     assert fp.getvalue() == b"".join(records)
 
 
@@ -1348,22 +1361,16 @@ class TestChunking:
     def written(self, records, chunk_size, breaks=(), seekable=True):
         """`records` written at `chunk_size`, as a file a Reader can open.
 
-        `breaks` are the indices to close the open chunk in front of, which
-        only adaptive chunking (a declared chunk size of -1) allows. An index
-        appearing twice closes a chunk twice over.
+        The header has to declare that chunk size, so it is rebuilt rather than
+        taken from the fixture; the writer is told where it ends, since a
+        write-only sink cannot say where it is.
         """
         header = rebuilt_header(self.NAME, len(records), chunk_size)
         buffer = io.BytesIO(header)
         buffer.seek(0, io.SEEK_END)
-        writer = cpylaz.PointWriter(
-            buffer if seekable else WriteOnly(buffer), load(self.NAME).items,
-            Compressor.POINTWISE_CHUNKED, chunk_size=chunk_size & 0xFFFFFFFF,
-            start_offset=len(header))
-        for index, record in enumerate(records):
-            for _ in range(breaks.count(index)):
-                writer.chunk()
-            writer.write(record)
-        writer.done()
+        writer = compress(buffer if seekable else WriteOnly(buffer), records,
+                          load(self.NAME).items, Compressor.POINTWISE_CHUNKED,
+                          chunk_size, breaks, start_offset=len(header))
         return WrittenFile(buffer.getvalue(), writer.number_chunks)
 
     @pytest.mark.parametrize("chunk_size", (1, 137, 400, 1000))
@@ -1480,15 +1487,20 @@ class TestPointWriterErrors:
 
     def test_a_failing_sink_propagates_its_own_exception(self):
         """Neither swallowed nor relabelled a LazError: the file object's own
-        error is what the caller has to see."""
+        error is what the caller has to see.
+
+        The sink buffers, so a file this short only reaches it when the writer
+        is closed -- which is exactly why done() has to be able to fail.
+        """
         class Broken(io.BytesIO):
             def write(self, data):
                 raise OSError("disk is on fire")
 
         items = [(t, size, 0) for t, size, _ in self.items()]
         writer = cpylaz.PointWriter(Broken(), items, Compressor.NONE)
+        writer.write(las_records("pt1_v0.las")[0])
         with pytest.raises(OSError, match="disk is on fire"):
-            writer.write(las_records("pt1_v0.las")[0])
+            writer.done()
 
 
 POINTWISE_FIXTURES = [n for n in FIXTURES if n.endswith("_pointwise.laz")]

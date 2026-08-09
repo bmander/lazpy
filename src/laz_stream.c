@@ -251,11 +251,47 @@ static void file_destroy(LazStream *s)
     free(f);
 }
 
+/* The file offset a freshly wrapped object is already at. An object without a
+ * usable tell() is fine: positions are then relative to wherever it happened
+ * to be, so the exception is cleared deliberately. */
+static I64 file_start_position(PyObject *fp)
+{
+    PyObject *res;
+    I64 position;
+
+    res = PyObject_CallMethod(fp, "tell", NULL);
+    if (res == NULL) { PyErr_Clear(); return 0; }
+    position = (I64)PyLong_AsLongLong(res);
+    Py_DECREF(res);
+    if (PyErr_Occurred()) { PyErr_Clear(); return 0; }
+    return position;
+}
+
+/* Whether seeks on `fp` can be expected to work. An object that answers
+ * seekable() is taken at its word -- a pipe has a seek method that raises --
+ * and anything else is judged by whether it has one at all. Both directions
+ * branch on the answer: the reader falls back to walking chunks in order, the
+ * writer to the -1 chunk-table offset. */
+static BOOL file_is_seekable(PyObject *fp)
+{
+    PyObject *res;
+    int ok;
+
+    if (!PyObject_HasAttrString(fp, "seek")) return LAZ_FALSE;
+    if (!PyObject_HasAttrString(fp, "seekable")) return LAZ_TRUE;
+
+    res = PyObject_CallMethod(fp, "seekable", NULL);
+    if (res == NULL) { PyErr_Clear(); return LAZ_FALSE; }
+    ok = PyObject_IsTrue(res);
+    Py_DECREF(res);
+    if (ok < 0) { PyErr_Clear(); return LAZ_FALSE; }
+    return ok ? LAZ_TRUE : LAZ_FALSE;
+}
+
 LazStream *laz_stream_new_file(void *py_fp)
 {
     LazStream *s = (LazStream *)calloc(1, sizeof(LazStream));
     FileImpl *f;
-    PyObject *res;
 
     if (!s) return NULL;
     f = (FileImpl *)calloc(1, sizeof(FileImpl));
@@ -266,17 +302,7 @@ LazStream *laz_stream_new_file(void *py_fp)
     f->fp = (PyObject *)py_fp;
     Py_INCREF(f->fp);
 
-    /* A file object without a usable tell() is fine; positions are then
-     * relative to wherever it happened to be. Cleared deliberately. */
-    res = PyObject_CallMethod(f->fp, "tell", NULL);
-    if (res == NULL) {
-        PyErr_Clear();
-        f->base = 0;
-    } else {
-        f->base = (I64)PyLong_AsLongLong(res);
-        Py_DECREF(res);
-        if (PyErr_Occurred()) { PyErr_Clear(); f->base = 0; }
-    }
+    f->base = file_start_position(f->fp);
     f->pos = 0;
     f->fill = 0;
 
@@ -287,19 +313,32 @@ LazStream *laz_stream_new_file(void *py_fp)
     s->seek = file_seek;
     s->seek_end = file_seek_end;
     s->destroy = file_destroy;
-    s->seekable = PyObject_HasAttrString(f->fp, "seek") ? LAZ_TRUE : LAZ_FALSE;
+    s->seekable = file_is_seekable(f->fp);
     s->eof = LAZ_FALSE;
     return s;
 }
 
 /* -------------------------------------------------------------- file out */
 
+/*
+ * Buffered, like its input-side twin and for the same reason: the arithmetic
+ * encoder hands over AC_BUFFER_SIZE blocks, but the raw item writers -- which
+ * write every point of an uncompressed file and the first point of every
+ * compressed chunk -- put one item at a time, a dozen bytes at a go. A Python
+ * call per item costs more than the encoding does.
+ *
+ * `pos` counts bytes handed to put_bytes, buffered or not, so tell() never
+ * has to flush and never has to ask the file object.
+ */
 typedef struct {
     PyObject *fp;
-    I64 pos;        /* write position, counted here rather than asked of fp */
+    U8 *buf;
+    I64 fill;       /* bytes staged in buf */
+    I64 pos;        /* logical write position, ahead of the file object by fill */
 } FileOutImpl;
 
-static void fileout_put_bytes(LazOutStream *s, const U8 *bytes, I64 num_bytes)
+/* The one place this stream calls Python. */
+static void fileout_emit(LazOutStream *s, const U8 *bytes, I64 num_bytes)
 {
     FileOutImpl *f = (FileOutImpl *)s->impl;
     PyObject *res;
@@ -317,9 +356,32 @@ static void fileout_put_bytes(LazOutStream *s, const U8 *bytes, I64 num_bytes)
         s->failed = LAZ_TRUE;         /* exception left set for the binding */
     } else {
         Py_DECREF(res);
-        f->pos += num_bytes;
     }
     PyGILState_Release(gil);
+}
+
+static void fileout_flush(LazOutStream *s)
+{
+    FileOutImpl *f = (FileOutImpl *)s->impl;
+    if (f->fill == 0) return;
+    fileout_emit(s, f->buf, f->fill);
+    f->fill = 0;                      /* dropped either way; see fileout_emit */
+}
+
+static void fileout_put_bytes(LazOutStream *s, const U8 *bytes, I64 num_bytes)
+{
+    FileOutImpl *f = (FileOutImpl *)s->impl;
+
+    if (s->failed || num_bytes <= 0) return;
+
+    if (f->fill + num_bytes > FILE_BUF_SIZE) fileout_flush(s);
+    if (num_bytes > FILE_BUF_SIZE) {
+        fileout_emit(s, bytes, num_bytes);    /* too big to stage; straight out */
+    } else {
+        memcpy(f->buf + f->fill, bytes, (size_t)num_bytes);
+        f->fill += num_bytes;
+    }
+    f->pos += num_bytes;
 }
 
 static I64 fileout_tell(LazOutStream *s) { return ((FileOutImpl *)s->impl)->pos; }
@@ -330,8 +392,12 @@ static BOOL fileout_seek(LazOutStream *s, I64 position)
     PyObject *res;
     PyGILState_STATE gil;
 
-    if (s->failed || !s->seekable) return LAZ_FALSE;   /* see fileout_put_bytes */
+    if (s->failed || !s->seekable) return LAZ_FALSE;   /* see fileout_emit */
     if (position == f->pos) return LAZ_TRUE;
+
+    /* the buffer belongs where it was written, not where we are going */
+    fileout_flush(s);
+    if (s->failed) return LAZ_FALSE;
 
     gil = PyGILState_Ensure();
     res = PyObject_CallMethod(f->fp, "seek", "L", (long long)position);
@@ -343,35 +409,30 @@ static BOOL fileout_seek(LazOutStream *s, I64 position)
     return LAZ_TRUE;
 }
 
-/* Whether seeks on `fp` can be expected to work. A file object that answers
- * seekable() is taken at its word -- a pipe has a seek method that raises --
- * and anything else is judged by whether it has one at all. */
-static BOOL fileout_is_seekable(PyObject *fp)
-{
-    PyObject *res;
-    int ok;
-
-    if (!PyObject_HasAttrString(fp, "seek")) return LAZ_FALSE;
-    if (!PyObject_HasAttrString(fp, "seekable")) return LAZ_TRUE;
-
-    res = PyObject_CallMethod(fp, "seekable", NULL);
-    if (res == NULL) { PyErr_Clear(); return LAZ_FALSE; }
-    ok = PyObject_IsTrue(res);
-    Py_DECREF(res);
-    if (ok < 0) { PyErr_Clear(); return LAZ_FALSE; }
-    return ok ? LAZ_TRUE : LAZ_FALSE;
-}
-
 static void fileout_destroy(LazOutStream *s)
 {
     FileOutImpl *f = (FileOutImpl *)s->impl;
     PyGILState_STATE gil = PyGILState_Ensure();
+
+    /* A last-resort flush, for a stream dropped without being closed. There is
+     * nobody left to report a failure to, and an exception left pending here
+     * would surface in whatever ran next -- including the failure path that is
+     * already unwinding with one of its own -- so it is discarded. */
+    if (!s->failed) {
+        PyObject *type, *value, *traceback;
+        PyErr_Fetch(&type, &value, &traceback);
+        fileout_flush(s);
+        if (s->failed) PyErr_Clear();
+        PyErr_Restore(type, value, traceback);
+    }
+
     Py_XDECREF(f->fp);
     PyGILState_Release(gil);
+    free(f->buf);
     free(f);
 }
 
-LazOutStream *laz_outstream_new_file(void *py_fp, I64 start_offset)
+LazOutStream *laz_outstream_new_file(void *py_fp)
 {
     LazOutStream *s = (LazOutStream *)calloc(1, sizeof(LazOutStream));
     FileOutImpl *f;
@@ -379,35 +440,28 @@ LazOutStream *laz_outstream_new_file(void *py_fp, I64 start_offset)
     if (!s) return NULL;
     f = (FileOutImpl *)calloc(1, sizeof(FileOutImpl));
     if (!f) { free(s); return NULL; }
+    f->buf = (U8 *)malloc(FILE_BUF_SIZE);
+    if (!f->buf) { free(f); free(s); return NULL; }
 
     f->fp = (PyObject *)py_fp;
     Py_INCREF(f->fp);
+    f->pos = file_start_position(f->fp);
+    f->fill = 0;
 
     s->impl = f;
     s->put_bytes = fileout_put_bytes;
+    s->flush = fileout_flush;
     s->tell = fileout_tell;
     s->seek = fileout_seek;
     s->destroy = fileout_destroy;
-    s->seekable = fileout_is_seekable(f->fp);
+    s->seekable = file_is_seekable(f->fp);
     s->failed = LAZ_FALSE;
-    /* Positions are absolute file offsets, because that is what the chunk
-     * table records: a writer appending behind a header starts counting at the
-     * end of that header. An object with no usable tell() and no offset from
-     * the caller starts at zero, and then positions are relative to wherever
-     * it happened to be. */
-    if (start_offset >= 0) {
-        f->pos = start_offset;
-    } else if (PyObject_HasAttrString(f->fp, "tell")) {
-        PyObject *res = PyObject_CallMethod(f->fp, "tell", NULL);
-        if (res == NULL) {
-            PyErr_Clear();
-        } else {
-            f->pos = (I64)PyLong_AsLongLong(res);
-            Py_DECREF(res);
-            if (PyErr_Occurred()) { PyErr_Clear(); f->pos = 0; }
-        }
-    }
     return s;
+}
+
+void laz_outstream_file_set_position(LazOutStream *s, I64 position)
+{
+    ((FileOutImpl *)s->impl)->pos = position;
 }
 
 /* ------------------------------------------------------------- array out */
@@ -441,8 +495,14 @@ static void arrayout_put_bytes(LazOutStream *s, const U8 *bytes, I64 num_bytes)
 
 static I64 arrayout_tell(LazOutStream *s) { return ((ArrayOutImpl *)s->impl)->pos; }
 
-/* Only backwards over what is already there: an array sink is a buffer, not a
- * file, so there is no seeking past the end and no hole to fill. */
+/*
+ * Only backwards over what is already there: an array sink is a buffer, not a
+ * file, so there is no seeking past the end and no hole to fill.
+ *
+ * Nothing seeks an array sink today -- the layered writers only append and
+ * rewind. It exists so that pointing a chunked writer at one works, rather
+ * than finding a NULL where the vtable promised a method.
+ */
 static BOOL arrayout_seek(LazOutStream *s, I64 position)
 {
     ArrayOutImpl *a = (ArrayOutImpl *)s->impl;

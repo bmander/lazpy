@@ -40,10 +40,6 @@ BOOL laz_writepoint_setup(LazWritePoint *wp, U32 num_items, const LazItem *items
         return LAZ_FALSE;
     }
 
-    wp->items = (LazItem *)malloc(num_items * sizeof(LazItem));
-    if (!wp->items) { set_error(wp, "out of memory"); return LAZ_FALSE; }
-    memcpy(wp->items, items, num_items * sizeof(LazItem));
-
     wp->num_writers = num_items;
     wp->have_enc = LAZ_FALSE;
     wp->layered_las14_compression = LAZ_FALSE;
@@ -166,6 +162,18 @@ static BOOL add_chunk_to_table(LazWritePoint *wp)
     return LAZ_TRUE;
 }
 
+/* Ends the open chunk and records it, leaving the writer at a chunk head:
+ * `writers` NULL, so the next point goes out raw and seeds the compressed
+ * writers again. */
+static BOOL close_and_record(LazWritePoint *wp)
+{
+    close_chunk(wp);
+    if (!add_chunk_to_table(wp)) return LAZ_FALSE;
+    wp->writers = NULL;
+    wp->chunk_count = 0;
+    return LAZ_TRUE;
+}
+
 /*
  * The chunk table itself: a version, the chunk count, and then the two columns
  * -- point counts, for adaptive chunking only, and byte lengths -- entropy
@@ -235,17 +243,12 @@ BOOL laz_writepoint_write(LazWritePoint *wp, const LazPoint *point,
         src[i] = (wp->item_offsets[i] < 0) ? extra_bytes : (base + wp->item_offsets[i]);
     }
 
-    if (wp->chunk_count == wp->chunk_size) {
-        if (wp->have_enc) {
-            close_chunk(wp);
-            if (!add_chunk_to_table(wp)) return LAZ_FALSE;
-            wp->writers = NULL;
-        }
-        /* An uncompressed stream reaching this point has simply written
-         * U32_MAX points; there is nothing to close and the count wraps. */
-        wp->chunk_count = 0;
+    /* Only a compressed stream is chunked, and only it counts points: an
+     * uncompressed one has no boundaries to reach and nothing to close. */
+    if (wp->have_enc) {
+        if (wp->chunk_count == wp->chunk_size && !close_and_record(wp)) return LAZ_FALSE;
+        wp->chunk_count++;
     }
-    wp->chunk_count++;
 
     if (wp->writers) {
         for (i = 0; i < wp->num_writers; i++) {
@@ -286,11 +289,7 @@ BOOL laz_writepoint_chunk(LazWritePoint *wp)
      * an empty one is not something a reader could make sense of */
     if (wp->writers != wp->writers_compressed) return LAZ_TRUE;
 
-    close_chunk(wp);
-    if (!add_chunk_to_table(wp)) return LAZ_FALSE;
-    wp->writers = NULL;
-    wp->chunk_count = 0;
-    return LAZ_TRUE;
+    return close_and_record(wp);
 }
 
 BOOL laz_writepoint_done(LazWritePoint *wp)
@@ -301,9 +300,10 @@ BOOL laz_writepoint_done(LazWritePoint *wp)
     }
 
     if (wp->writers == wp->writers_compressed) {
+        /* a chunk is open, and it has at least the point that opened it */
         close_chunk(wp);
         if (wp->chunked) {
-            if (wp->chunk_count && !add_chunk_to_table(wp)) return LAZ_FALSE;
+            if (!add_chunk_to_table(wp)) return LAZ_FALSE;
             if (!write_chunk_table(wp)) return LAZ_FALSE;
         }
     } else if (wp->writers == NULL) {
@@ -311,7 +311,10 @@ BOOL laz_writepoint_done(LazWritePoint *wp)
         if (wp->chunked && !write_chunk_table(wp)) return LAZ_FALSE;
     }
 
-    if (wp->outstream && wp->outstream->failed) {
+    /* the file is finished, so nothing may sit in the sink's buffer */
+    laz_outstream_flush(wp->outstream);
+
+    if (wp->outstream->failed) {
         set_error(wp, "error writing to the underlying file");
         return LAZ_FALSE;
     }
@@ -333,7 +336,6 @@ void laz_writepoint_destroy(LazWritePoint *wp)
     }
     wp->writers = NULL;
     laz_encoder_free(&wp->enc);
-    free(wp->items); wp->items = NULL;
     free(wp->chunk_sizes); wp->chunk_sizes = NULL;
     free(wp->chunk_bytes); wp->chunk_bytes = NULL;
 }

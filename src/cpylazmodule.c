@@ -23,8 +23,6 @@
 #include "laz_stream.h"
 #include "laz_arithmetic.h"
 #include "laz_intcompressor.h"
-#include "laz_readitem.h"
-#include "laz_writeitem.h"
 #include "laz_readpoint.h"
 #include "laz_writepoint.h"
 
@@ -331,7 +329,7 @@ static int Encoder_tp_init(EncoderObject *self, PyObject *args, PyObject *kwds)
     if (!PyArg_ParseTuple(args, "O", &fp)) return -1;
 
     if (!laz_encoder_setup(&self->e)) { PyErr_NoMemory(); return -1; }
-    self->stream = laz_outstream_new_file(fp, -1);
+    self->stream = laz_outstream_new_file(fp);
     if (!self->stream) { laz_encoder_free(&self->e); PyErr_NoMemory(); return -1; }
     Py_INCREF(fp);
     self->fp = fp;
@@ -392,6 +390,9 @@ static PyObject *Encoder_done(EncoderObject *self, PyObject *Py_UNUSED(i))
 {
     if (encoder_ready(self) < 0) return NULL;
     laz_encoder_done(&self->e);
+    /* done() means the stream is complete, so the sink's buffer goes out with
+     * it -- the caller's next move is to read back what was written */
+    laz_outstream_flush(self->stream);
     return encoder_result(self);
 }
 
@@ -1339,11 +1340,15 @@ static PyTypeObject Reader_Type = {
  * Points arrive as records -- the bytes as they sit in an uncompressed file --
  * rather than as Point objects, because a record is what a caller converting a
  * file already has and it is the layout the items describe. Each record is
- * scattered into a LazPoint by the raw *readers* before any writer sees it,
- * because an item coder is handed a pointer into the point rather than into
- * the record, and for the LAS 1.4 point types the two are not the same:
- * POINT14's 30-byte record splits across both the legacy and the extended
- * fields of a point. For point formats 0-5 the scatter is the identity.
+ * scattered into a LazPoint before any writer sees it, because an item coder
+ * is handed a pointer into the point rather than into the record, and for the
+ * LAS 1.4 point types the two are not the same: POINT14's 30-byte record
+ * splits across both the legacy and the extended fields of a point.
+ *
+ * That scatter is not written here: taking apart uncompressed records is what
+ * a LazReadPoint over an uncompressed stream does, so the writer keeps one,
+ * pointed at each record in turn. It also settles the extra-bytes buffer and
+ * the extended_point_type stamp, which are its business either way.
  *
  * Writing starts wherever the file object already is, which is what makes the
  * chunk table hold absolute file positions: the caller writes the LAS header
@@ -1356,27 +1361,19 @@ typedef struct {
     LazWritePoint wp;
     LazOutStream *stream;
     PyObject *fp;
-    /* the raw readers that take a record apart, the stream they read it from,
-     * and where each of them lands inside `point` */
-    LazReadItem **scatter;
+    /* the record being written, and the reader that takes it apart */
     LazStream *record;
-    U8 *at[LAZ_MAX_ITEMS];
-    U32 num_items;
+    LazReadPoint scatter;
     Py_ssize_t record_size;
     LazPoint point;
     U8 *extra_bytes;
-    U32 num_extra_bytes;
     BOOL ready;             /* clear before init finishes and after done() */
     U64 index;              /* number of points written so far */
 } WriterObject;
 
 static void Writer_dealloc(WriterObject *self)
 {
-    U32 i;
-    if (self->scatter) {
-        for (i = 0; i < self->num_items; i++) laz_readitem_destroy(self->scatter[i]);
-        PyMem_Free(self->scatter);
-    }
+    laz_readpoint_destroy(&self->scatter);
     laz_writepoint_destroy(&self->wp);
     if (self->record) laz_stream_destroy(self->record);
     if (self->stream) laz_outstream_destroy(self->stream);
@@ -1391,8 +1388,8 @@ static int Writer_tp_init(WriterObject *self, PyObject *args, PyObject *kwds)
     unsigned int compressor, coder = 0, chunk_size = 0;
     long long start_offset = -1;
     LazItem *items = NULL;
-    U32 num_items = 0, i;
-    I32 offsets[LAZ_MAX_ITEMS];
+    U32 num_items = 0;
+    int failed;
     static char *kwlist[] = {"fp", "items", "compressor", "coder", "chunk_size",
                              "start_offset", NULL};
 
@@ -1402,58 +1399,38 @@ static int Writer_tp_init(WriterObject *self, PyObject *args, PyObject *kwds)
         return -1;
 
     if (parse_items(items_obj, &items, &num_items) < 0) return -1;
-    if (num_items > LAZ_MAX_ITEMS) {
-        PyErr_Format(PyExc_ValueError, "too many items (%u, maximum %u)",
-                     num_items, LAZ_MAX_ITEMS);
-        PyMem_Free(items);
-        return -1;
-    }
 
     laz_writepoint_init_struct(&self->wp);
-    if (!laz_writepoint_setup(&self->wp, num_items, items, compressor, coder,
-                              chunk_size)) {
-        PyErr_SetString(LazErrorType, self->wp.last_error);
-        PyMem_Free(items);
-        return -1;
-    }
-
-    self->num_items = num_items;
-    self->record_size = (Py_ssize_t)self->wp.point_size;
-    self->num_extra_bytes = self->wp.num_extra_bytes;
-    if (self->num_extra_bytes) {
-        self->extra_bytes = (U8 *)calloc(self->num_extra_bytes, 1);
-        if (!self->extra_bytes) { PyErr_NoMemory(); PyMem_Free(items); return -1; }
-    }
-
-    /* the scatter: one raw reader per item, all reading the record the next
-     * write() points this stream at */
-    self->record = laz_stream_new_array(NULL, 0);
-    self->scatter = (LazReadItem **)PyMem_Calloc(num_items, sizeof(LazReadItem *));
-    if (!self->record || !self->scatter) {
-        PyErr_NoMemory();
-        PyMem_Free(items);
-        return -1;
-    }
-    for (i = 0; i < num_items; i++) {
-        offsets[i] = laz_item_offset(items[i].type);
-        if (items[i].type == LAZ_ITEM_POINT14) self->point.extended_point_type = 1;
-        self->scatter[i] = laz_readitem_new_raw(&items[i], self->record);
-        if (!self->scatter[i]) {
-            PyErr_Format(PyExc_ValueError, "item type %u is not supported",
-                         items[i].type);
-            PyMem_Free(items);
-            return -1;
-        }
-    }
+    laz_readpoint_init_struct(&self->scatter, LAZ_DECOMPRESS_SELECTIVE_ALL);
+    /* the same items, read back uncompressed: that is what a record is */
+    failed = (!laz_writepoint_setup(&self->wp, num_items, items, compressor,
+                                    coder, chunk_size) ||
+              !laz_readpoint_setup(&self->scatter, num_items, items, 0, 0, 0));
     PyMem_Free(items);
-    for (i = 0; i < num_items; i++)
-        self->at[i] = (offsets[i] < 0) ? self->extra_bytes
-                                       : (U8 *)&self->point + offsets[i];
+    if (failed) {
+        PyErr_SetString(LazErrorType, self->wp.has_error ? self->wp.last_error
+                                                         : self->scatter.last_error);
+        return -1;
+    }
 
-    self->stream = laz_outstream_new_file(fp, (I64)start_offset);
+    self->record_size = (Py_ssize_t)self->wp.point_size;
+    if (self->wp.num_extra_bytes) {
+        self->extra_bytes = (U8 *)calloc(self->wp.num_extra_bytes, 1);
+        if (!self->extra_bytes) { PyErr_NoMemory(); return -1; }
+    }
+
+    /* one array stream, repointed at each record as it arrives */
+    self->record = laz_stream_new_array(NULL, 0);
+    if (!self->record) { PyErr_NoMemory(); return -1; }
+    laz_readpoint_init(&self->scatter, self->record);
+    laz_readpoint_init_point(&self->scatter, &self->point);
+
+    self->stream = laz_outstream_new_file(fp);
     if (!self->stream) { PyErr_NoMemory(); return -1; }
     Py_INCREF(fp);
     self->fp = fp;
+    if (start_offset >= 0)
+        laz_outstream_file_set_position(self->stream, (I64)start_offset);
 
     if (!laz_writepoint_init(&self->wp, self->stream)) {
         PyErr_SetString(LazErrorType, "could not initialise the point writer");
@@ -1489,7 +1466,6 @@ static PyObject *Writer_write(WriterObject *self, PyObject *arg)
 {
     char *data;
     Py_ssize_t len;
-    U32 i, context = 0;
 
     if (!self->ready) {
         PyErr_SetString(PyExc_ValueError, "writer is closed");
@@ -1503,8 +1479,11 @@ static PyObject *Writer_write(WriterObject *self, PyObject *arg)
     }
 
     laz_stream_array_reset(self->record, (const U8 *)data, len);
-    for (i = 0; i < self->num_items; i++)
-        self->scatter[i]->read(self->scatter[i], self->at[i], &context);
+    if (!laz_readpoint_read(&self->scatter, &self->point, self->extra_bytes)) {
+        if (PyErr_Occurred()) return NULL;
+        PyErr_SetString(LazErrorType, self->scatter.last_error);
+        return NULL;
+    }
 
     if (!laz_writepoint_write(&self->wp, &self->point, self->extra_bytes))
         return writer_error(self);

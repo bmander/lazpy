@@ -75,10 +75,10 @@ U64 laz_stream_get64(LazStream *s);
 /*
  * The write-side counterpart, ported from ByteStreamOut.
  *
- * The file sink is deliberately unbuffered, unlike its input-side twin: the
- * arithmetic encoder keeps its own ring buffer, because carry propagation has
- * to be able to reach back into already-produced bytes, so it hands over whole
- * AC_BUFFER_SIZE blocks and a second buffer underneath would earn nothing.
+ * The file sink buffers, like its input-side twin: the arithmetic encoder does
+ * hand over whole AC_BUFFER_SIZE blocks, but the raw item writers underneath
+ * it -- which write every point of an uncompressed file, and the first point
+ * of every compressed chunk -- put one item at a time, a dozen bytes at a go.
  *
  * The vtable mirrors LazStream because the layered v3/v4 writers need an
  * in-memory sink for the same reason the layered readers need an in-memory
@@ -97,6 +97,7 @@ typedef struct LazOutStream LazOutStream;
 
 struct LazOutStream {
     void (*put_bytes)(LazOutStream *s, const U8 *bytes, I64 num_bytes);
+    void (*flush)(LazOutStream *s);   /* NULL when the sink holds nothing back */
     I64  (*tell)(LazOutStream *s);
     BOOL (*seek)(LazOutStream *s, I64 position);
     void (*destroy)(LazOutStream *s);
@@ -110,14 +111,14 @@ struct LazOutStream {
 
 /* Wraps a Python file-like object (must supply write; seeking additionally
  * needs seek, and is offered only when the object says it is seekable).
- * Borrows a reference to fp for the lifetime of the stream.
- *
- * `start_offset` is where in the file the object is already positioned, which
- * matters because a chunk table records absolute positions: pass a negative
- * value to have the object asked, which is right whenever it can answer, and
- * the true offset for an appending sink that cannot -- a pipe knows neither
- * where it is nor that anything came before it. */
-LazOutStream *laz_outstream_new_file(void *py_fp, I64 start_offset);
+ * Borrows a reference to fp for the lifetime of the stream. */
+LazOutStream *laz_outstream_new_file(void *py_fp);
+
+/* Declares where in the file the object is already positioned, overriding the
+ * tell() the stream asked it for. Only a sink that cannot answer tell() needs
+ * this -- a pipe knows neither where it is nor that a header came before it --
+ * and it matters because a chunk table records absolute file positions. */
+void laz_outstream_file_set_position(LazOutStream *s, I64 position);
 
 /* Collects everything written into one growable buffer the stream owns.
  * laz_outstream_array_data hands back that buffer, valid until the next write
@@ -136,6 +137,9 @@ static inline void laz_outstream_put_bytes(LazOutStream *s, const U8 *b, I64 n)
 { s->put_bytes(s, b, n); }
 static inline I64 laz_outstream_tell(LazOutStream *s) { return s->tell(s); }
 static inline BOOL laz_outstream_seek(LazOutStream *s, I64 p) { return s->seek(s, p); }
+/* Hands anything still staged to the underlying object. A writer that has
+ * finished a file owes its caller this; seeking does it on its own. */
+static inline void laz_outstream_flush(LazOutStream *s) { if (s->flush) s->flush(s); }
 
 /* The multi-byte fields a writer emits outside the entropy coder: a layered
  * chunk's per-layer byte counts, and the chunk table's own offset. */

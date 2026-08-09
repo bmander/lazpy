@@ -33,7 +33,6 @@
 #include "laz_stream.h"
 #include "laz_arithmetic.h"
 #include "laz_writeitem.h"
-#include "laz_readpoint.h"     /* for LAZ_MAX_ITEMS, shared with the reader */
 
 typedef struct {
     LazOutStream *outstream;    /* borrowed */
@@ -48,7 +47,6 @@ typedef struct {
     BOOL layered_las14_compression;
 
     U32 point_size;
-    LazItem *items;             /* owned copy */
     /* Byte offset within a LazPoint that each item encodes from, or -1 for
      * items taken from the caller's extra-bytes buffer. As on the read side,
      * resolved once at setup rather than per point. */
@@ -87,7 +85,12 @@ BOOL laz_writepoint_setup(LazWritePoint *wp, U32 num_items, const LazItem *items
  * placeholder. Everything written from here on belongs to the point block. */
 BOOL laz_writepoint_init(LazWritePoint *wp, LazOutStream *outstream);
 
-/* Encodes one point. `extra_bytes` may be NULL when the layout has none. */
+/* Encodes one point. `extra_bytes` may be NULL when the layout has none.
+ *
+ * A point of format 6-10 must carry extended_point_type, exactly as one that
+ * came out of a reader does -- see laz_readpoint_init_point, which is where a
+ * point buffer gets it. The raw POINT14 writer branches on that flag, and a
+ * point built from scratch without it silently loses its extended fields. */
 BOOL laz_writepoint_write(LazWritePoint *wp, const LazPoint *point,
                           const U8 *extra_bytes);
 
@@ -97,9 +100,10 @@ BOOL laz_writepoint_write(LazWritePoint *wp, const LazPoint *point,
  * without having to special-case the end of the input. */
 BOOL laz_writepoint_chunk(LazWritePoint *wp);
 
-/* Closes the last chunk and writes the chunk table. Must be called before the
- * output is closed, or the file has no chunk table and a reader has to
- * reconstruct one. */
+/* Closes the last chunk, writes the chunk table and flushes the output. Must
+ * be called exactly once, before the output is closed: a writer dropped
+ * without it leaves a file whose last bytes never reached the sink and which
+ * has no chunk table, so a reader has to reconstruct one. */
 BOOL laz_writepoint_done(LazWritePoint *wp);
 
 void laz_writepoint_destroy(LazWritePoint *wp);
