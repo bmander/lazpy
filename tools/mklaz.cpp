@@ -6,6 +6,8 @@
  *   mklaz <point_type 0-10> <version 0-4> <npoints> <chunk_size> <out>
  *
  * version 0 writes an uncompressed LAS file; 1..4 request that item version.
+ * A chunk_size of 0 selects the original POINTWISE container -- the whole file
+ * as one stream with no chunk table -- which only exists for point types 0-5.
  *
  * The synthetic points are deliberately awkward: return numbers and counts
  * sweep their full range, intensities alternate between smooth ramps and
@@ -60,10 +62,21 @@ int main(int argc, char** argv)
     unsigned short point_size = base_size[point_type] + extra_bytes;
 
     bool compressed = (version > 0);
+    bool pointwise = compressed && chunk_size == 0;
+    if (pointwise && point_type >= 6) {
+        fprintf(stderr, "POINTWISE (chunk_size 0) predates point types 6-10\n");
+        return 1;
+    }
+
+    unsigned short compressor = LASZIP_COMPRESSOR_NONE;
+    if (compressed) {
+        if (pointwise)              compressor = LASZIP_COMPRESSOR_POINTWISE;
+        else if (point_type >= 6)   compressor = LASZIP_COMPRESSOR_LAYERED_CHUNKED;
+        else                        compressor = LASZIP_COMPRESSOR_CHUNKED;
+    }
 
     LASzip laszip;
-    if (!laszip.setup(point_type, point_size,
-                      compressed ? (point_type >= 6 ? LASZIP_COMPRESSOR_LAYERED_CHUNKED : LASZIP_COMPRESSOR_CHUNKED) : LASZIP_COMPRESSOR_NONE)) {
+    if (!laszip.setup(point_type, point_size, compressor)) {
         fprintf(stderr, "laszip setup failed: %s\n", laszip.get_error());
         return 1;
     }
@@ -72,7 +85,8 @@ int main(int argc, char** argv)
             fprintf(stderr, "request_version(%u) failed: %s\n", version, laszip.get_error());
             return 1;
         }
-        if (chunk_size && !laszip.set_chunk_size(chunk_size)) {
+        /* set_chunk_size refuses POINTWISE, which has no chunks to size */
+        if (!pointwise && !laszip.set_chunk_size(chunk_size)) {
             fprintf(stderr, "set_chunk_size failed: %s\n", laszip.get_error());
             return 1;
         }
