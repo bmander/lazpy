@@ -74,13 +74,12 @@ class IntegerCompressor:
                     self.m_corrector.append(
                         coder.create_symbol_model(1 << self.bits_high))
 
-        for i in range(self.contexts):
-            self.m_bits[i].init()
+        for model in self.m_bits:
+            model.init()
 
-        self.m_corrector[0].init()
-
-        for i in range(1, self.corr_bits+1):
-            self.m_corrector[i].init()
+        # entry 0 is the bit model, entries 1..corr_bits the symbol models
+        for model in self.m_corrector:
+            model.init()
 
     def init_decompressor(self):
         assert self.dec

@@ -290,6 +290,15 @@ static PyGetSetDef SymbolModel_getset[] = {
     {NULL}
 };
 
+/* Shared by ArithmeticDecoder.create_symbol_model and the encoder's. */
+static PyObject *coder_create_symbol_model(PyObject *args, PyObject *compress)
+{
+    unsigned int num_symbols;
+    if (!PyArg_ParseTuple(args, "I", &num_symbols)) return NULL;
+    return PyObject_CallFunction((PyObject *)&SymbolModel_Type, "IO",
+                                 num_symbols, compress);
+}
+
 static PyTypeObject SymbolModel_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
     .tp_name = "lazpy._cpylaz.ArithmeticModel",
@@ -336,19 +345,39 @@ static void Encoder_dealloc(EncoderObject *self)
 }
 
 /*
- * Every coding call goes through this first. An encoder without a stream has
- * either not been started or has already been flushed by done(), and coding
- * into it would dereference NULL; a stream that has failed left a Python
- * exception pending, which is what the caller should see.
+ * Raises for a failed write, preferring the exception the file object itself
+ * raised. Shaped like reader_error: the first call after a failure propagates
+ * the original, and later ones -- the caller having caught and cleared it --
+ * still raise something rather than returning NULL with nothing set.
+ */
+static PyObject *encoder_error(void)
+{
+    if (PyErr_Occurred()) return NULL;            /* propagate the original */
+    PyErr_SetString(LazErrorType, "error writing to the underlying file");
+    return NULL;
+}
+
+/*
+ * Every coding call is bracketed by these two.
+ *
+ * An encoder without a stream has either not been started or has already been
+ * flushed by done(), and coding into it would dereference NULL.
  */
 static int encoder_ready(EncoderObject *self)
 {
-    if (self->stream->failed) return -1;        /* exception already set */
+    if (self->stream->failed) { encoder_error(); return -1; }
     if (self->e.stream == NULL) {
         PyErr_SetString(PyExc_ValueError, "encoder is not started");
         return -1;
     }
     return 0;
+}
+
+/* Returns None, or NULL with an exception set if the stream failed. */
+static PyObject *encoder_result(EncoderObject *self)
+{
+    if (self->stream->failed) return encoder_error();
+    Py_RETURN_NONE;
 }
 
 static PyObject *Encoder_start(EncoderObject *self, PyObject *Py_UNUSED(i))
@@ -361,8 +390,7 @@ static PyObject *Encoder_done(EncoderObject *self, PyObject *Py_UNUSED(i))
 {
     if (encoder_ready(self) < 0) return NULL;
     laz_encoder_done(&self->e);
-    if (self->stream->failed) return NULL;      /* the write raised */
-    Py_RETURN_NONE;
+    return encoder_result(self);
 }
 
 static PyObject *Encoder_encode_bit(EncoderObject *self, PyObject *args)
@@ -376,8 +404,7 @@ static PyObject *Encoder_encode_bit(EncoderObject *self, PyObject *args)
     }
     if (encoder_ready(self) < 0) return NULL;
     laz_encode_bit(&self->e, &((BitModelObject *)m)->m, sym);
-    if (self->stream->failed) return NULL;
-    Py_RETURN_NONE;
+    return encoder_result(self);
 }
 
 static PyObject *Encoder_encode_symbol(EncoderObject *self, PyObject *args)
@@ -397,8 +424,7 @@ static PyObject *Encoder_encode_symbol(EncoderObject *self, PyObject *args)
     }
     if (encoder_ready(self) < 0) return NULL;
     laz_encode_symbol(&self->e, sm, sym);
-    if (self->stream->failed) return NULL;
-    Py_RETURN_NONE;
+    return encoder_result(self);
 }
 
 static PyObject *Encoder_write_bits(EncoderObject *self, PyObject *args)
@@ -415,8 +441,7 @@ static PyObject *Encoder_write_bits(EncoderObject *self, PyObject *args)
     }
     if (encoder_ready(self) < 0) return NULL;
     laz_write_bits(&self->e, bits, sym);
-    if (self->stream->failed) return NULL;
-    Py_RETURN_NONE;
+    return encoder_result(self);
 }
 
 static PyObject *Encoder_write_int(EncoderObject *self, PyObject *args)
@@ -425,23 +450,15 @@ static PyObject *Encoder_write_int(EncoderObject *self, PyObject *args)
     if (!PyArg_ParseTuple(args, "I", &sym)) return NULL;
     if (encoder_ready(self) < 0) return NULL;
     laz_write_int(&self->e, sym);
-    if (self->stream->failed) return NULL;
-    Py_RETURN_NONE;
+    return encoder_result(self);
 }
 
 /* Compression models never build a decoder table; that is the only way in
  * which a model differs between the two directions. */
 static PyObject *Encoder_create_symbol_model(EncoderObject *self, PyObject *args)
 {
-    unsigned int num_symbols;
-    PyObject *argtuple, *model;
     (void)self;
-    if (!PyArg_ParseTuple(args, "I", &num_symbols)) return NULL;
-    argtuple = Py_BuildValue("(IO)", num_symbols, Py_True);
-    if (!argtuple) return NULL;
-    model = PyObject_CallObject((PyObject *)&SymbolModel_Type, argtuple);
-    Py_DECREF(argtuple);
-    return model;
+    return coder_create_symbol_model(args, Py_True);
 }
 
 static PyObject *Encoder_repr(EncoderObject *self)
@@ -566,15 +583,8 @@ static PyObject *Decoder_read_int(DecoderObject *self, PyObject *Py_UNUSED(i))
 
 static PyObject *Decoder_create_symbol_model(DecoderObject *self, PyObject *args)
 {
-    unsigned int num_symbols;
-    PyObject *argtuple, *model;
     (void)self;
-    if (!PyArg_ParseTuple(args, "I", &num_symbols)) return NULL;
-    argtuple = Py_BuildValue("(IO)", num_symbols, Py_False);
-    if (!argtuple) return NULL;
-    model = PyObject_CallObject((PyObject *)&SymbolModel_Type, argtuple);
-    Py_DECREF(argtuple);
-    return model;
+    return coder_create_symbol_model(args, Py_False);
 }
 
 static PyObject *Decoder_repr(DecoderObject *self)
@@ -624,12 +634,14 @@ static PyTypeObject Decoder_Type = {
 
 /* ==================================================== IntegerCompressor == */
 
-/* Codes in one direction only: exactly one of dec/enc is non-NULL. */
+/*
+ * Codes in one direction only. `coder` keeps the decoder or encoder alive;
+ * which one it is, is already recorded by the core, as ic.dec / ic.enc.
+ */
 typedef struct {
     PyObject_HEAD
     LazIntCompressor ic;
-    PyObject *dec;
-    PyObject *enc;
+    PyObject *coder;
 } IntCompObject;
 
 static PyTypeObject IntComp_Type;
@@ -647,40 +659,47 @@ static int IntComp_tp_init(IntCompObject *self, PyObject *args, PyObject *kwds)
     if (PyObject_TypeCheck(dec_or_enc, &Decoder_Type)) {
         laz_ic_setup_dec(&self->ic, &((DecoderObject *)dec_or_enc)->d,
                          bits, contexts, bits_high, range);
-        Py_INCREF(dec_or_enc);
-        self->dec = dec_or_enc;
     } else if (PyObject_TypeCheck(dec_or_enc, &Encoder_Type)) {
         laz_ic_setup_enc(&self->ic, &((EncoderObject *)dec_or_enc)->e,
                          bits, contexts, bits_high, range);
-        Py_INCREF(dec_or_enc);
-        self->enc = dec_or_enc;
     } else {
         PyErr_SetString(PyExc_TypeError,
                         "first argument must be an ArithmeticDecoder or ArithmeticEncoder");
         return -1;
     }
+    Py_INCREF(dec_or_enc);
+    self->coder = dec_or_enc;
     return 0;
 }
 
 static void IntComp_dealloc(IntCompObject *self)
 {
     laz_ic_free(&self->ic);
-    Py_XDECREF(self->dec);
-    Py_XDECREF(self->enc);
+    Py_XDECREF(self->coder);
     PyObject_Del(self);
 }
 
-/* Guards the direction and the argument range shared by (de)compress. */
-static int intcomp_ready(IntCompObject *self, PyObject *coder, U32 context,
-                         const char *init_name)
+/* The direction is recorded by the core: exactly one of ic.dec/ic.enc is set. */
+static BOOL intcomp_codes(IntCompObject *self, BOOL compress)
 {
-    if (coder == NULL) {
-        PyErr_SetString(PyExc_ValueError,
-                        "this IntegerCompressor codes in the other direction");
-        return -1;
-    }
+    return compress ? (self->ic.enc != NULL) : (self->ic.dec != NULL);
+}
+
+static int intcomp_check_direction(IntCompObject *self, BOOL compress)
+{
+    if (intcomp_codes(self, compress)) return 0;
+    PyErr_SetString(PyExc_ValueError,
+                    "this IntegerCompressor codes in the other direction");
+    return -1;
+}
+
+/* Guards the direction and the argument range shared by (de)compress. */
+static int intcomp_ready(IntCompObject *self, BOOL compress, U32 context)
+{
+    if (intcomp_check_direction(self, compress) < 0) return -1;
     if (!self->ic.models_created) {
-        PyErr_Format(PyExc_ValueError, "call %s() first", init_name);
+        PyErr_Format(PyExc_ValueError, "call init_%scompressor() first",
+                     compress ? "" : "de");
         return -1;
     }
     if (context >= self->ic.contexts) {
@@ -690,24 +709,22 @@ static int intcomp_ready(IntCompObject *self, PyObject *coder, U32 context,
     return 0;
 }
 
+static PyObject *intcomp_init(IntCompObject *self, BOOL compress)
+{
+    if (intcomp_check_direction(self, compress) < 0) return NULL;
+    if (!(compress ? laz_ic_init_compressor(&self->ic)
+                   : laz_ic_init_decompressor(&self->ic))) return PyErr_NoMemory();
+    Py_RETURN_NONE;
+}
+
 static PyObject *IntComp_init_decompressor(IntCompObject *self, PyObject *Py_UNUSED(i))
 {
-    if (self->dec == NULL) {
-        PyErr_SetString(PyExc_ValueError, "this IntegerCompressor has no decoder");
-        return NULL;
-    }
-    if (!laz_ic_init_decompressor(&self->ic)) return PyErr_NoMemory();
-    Py_RETURN_NONE;
+    return intcomp_init(self, LAZ_FALSE);
 }
 
 static PyObject *IntComp_init_compressor(IntCompObject *self, PyObject *Py_UNUSED(i))
 {
-    if (self->enc == NULL) {
-        PyErr_SetString(PyExc_ValueError, "this IntegerCompressor has no encoder");
-        return NULL;
-    }
-    if (!laz_ic_init_compressor(&self->ic)) return PyErr_NoMemory();
-    Py_RETURN_NONE;
+    return intcomp_init(self, LAZ_TRUE);
 }
 
 static PyObject *IntComp_decompress(IntCompObject *self, PyObject *args)
@@ -715,7 +732,7 @@ static PyObject *IntComp_decompress(IntCompObject *self, PyObject *args)
     int pred;
     unsigned int context = 0;
     if (!PyArg_ParseTuple(args, "i|I", &pred, &context)) return NULL;
-    if (intcomp_ready(self, self->dec, context, "init_decompressor") < 0) return NULL;
+    if (intcomp_ready(self, LAZ_FALSE, context) < 0) return NULL;
     return PyLong_FromLong(laz_ic_decompress(&self->ic, pred, context));
 }
 
@@ -724,10 +741,9 @@ static PyObject *IntComp_compress(IntCompObject *self, PyObject *args)
     int pred, real;
     unsigned int context = 0;
     if (!PyArg_ParseTuple(args, "ii|I", &pred, &real, &context)) return NULL;
-    if (intcomp_ready(self, self->enc, context, "init_compressor") < 0) return NULL;
+    if (intcomp_ready(self, LAZ_TRUE, context) < 0) return NULL;
     laz_ic_compress(&self->ic, pred, real, context);
-    if (((EncoderObject *)self->enc)->stream->failed) return NULL;
-    Py_RETURN_NONE;
+    return encoder_result((EncoderObject *)self->coder);
 }
 
 static PyObject *IntComp_get_m_bits(IntCompObject *self, PyObject *args)
@@ -771,21 +787,18 @@ INTCOMP_GETTER(k, PyLong_FromUnsignedLong(self->ic.k))
 INTCOMP_GETTER(corr_bits, PyLong_FromUnsignedLong(self->ic.corr_bits))
 
 /* One of the two is always None: an IntegerCompressor codes in one direction. */
-static PyObject *IntComp_get_dec(IntCompObject *self, void *c)
+static PyObject *intcomp_coder_if(IntCompObject *self, BOOL compress)
 {
-    (void)c;
-    if (self->dec == NULL) Py_RETURN_NONE;
-    Py_INCREF(self->dec);
-    return self->dec;
+    if (!intcomp_codes(self, compress)) Py_RETURN_NONE;
+    Py_INCREF(self->coder);
+    return self->coder;
 }
 
+static PyObject *IntComp_get_dec(IntCompObject *self, void *c)
+{ (void)c; return intcomp_coder_if(self, LAZ_FALSE); }
+
 static PyObject *IntComp_get_enc(IntCompObject *self, void *c)
-{
-    (void)c;
-    if (self->enc == NULL) Py_RETURN_NONE;
-    Py_INCREF(self->enc);
-    return self->enc;
-}
+{ (void)c; return intcomp_coder_if(self, LAZ_TRUE); }
 
 static PyMethodDef IntComp_methods[] = {
     {"init_decompressor", (PyCFunction)IntComp_init_decompressor, METH_NOARGS, NULL},

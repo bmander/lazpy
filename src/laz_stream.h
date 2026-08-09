@@ -75,11 +75,15 @@ U64 laz_stream_get64(LazStream *s);
 /*
  * The write-side counterpart, ported from ByteStreamOut.
  *
- * Deliberately unbuffered: the arithmetic encoder keeps its own ring buffer
- * (carry propagation has to be able to reach back into already-produced
- * bytes), so it hands over whole 1024-byte blocks and only ever writes single
- * bytes for the two or three terminators at the end of a stream. A second
- * buffer underneath would earn nothing.
+ * The file sink is deliberately unbuffered, unlike its input-side twin: the
+ * arithmetic encoder keeps its own ring buffer, because carry propagation has
+ * to be able to reach back into already-produced bytes, so it hands over whole
+ * AC_BUFFER_SIZE blocks and a second buffer underneath would earn nothing.
+ *
+ * Only that one sink exists so far. The vtable mirrors LazStream because the
+ * layered v3/v4 writers will need an in-memory sink for the same reason the
+ * layered readers need an in-memory source, and a chunked writer will need a
+ * position to patch its chunk table from.
  *
  * As on the input side, a failed write sets `failed` and leaves the Python
  * exception pending rather than raising through the C core.
@@ -103,7 +107,5 @@ void laz_outstream_destroy(LazOutStream *s);
 
 static inline void laz_outstream_put_bytes(LazOutStream *s, const U8 *b, I64 n)
 { s->put_bytes(s, b, n); }
-static inline void laz_outstream_put_byte(LazOutStream *s, U8 b)
-{ s->put_bytes(s, &b, 1); }
 
 #endif /* LAZ_STREAM_H */

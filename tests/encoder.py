@@ -5,6 +5,11 @@ BM_LENGTH_SHIFT = 13
 
 U32_MASK = 0xFFFFFFFF
 
+# the interval bounds, shared by the encoder and the decoder: they have to
+# stay identical or the two desync
+AC_MAX_LENGTH = 0xFFFFFFFF
+AC_MIN_LENGTH = 0x01000000
+
 # Bytes accumulate in a ring of two halves of this size. A half is handed to
 # the file only once the other half has been filled, which keeps that many
 # bytes of slack behind the write cursor for a carry to ripple back into.
@@ -14,8 +19,6 @@ AC_BUFFER_SIZE = 1024
 class ArithmeticEncoder:
     """An ArithmeticEncoder is the inverse of ArithmeticDecoder: it turns a
     sequence of symbols back into the byte stream the decoder consumes."""
-    AC_MAX_LENGTH = 0xFFFFFFFF
-    AC_MIN_LENGTH = 0x01000000
 
     def __init__(self, fp):
         self.fp = fp
@@ -27,7 +30,7 @@ class ArithmeticEncoder:
 
     def start(self):
         self.base = 0
-        self.length = self.AC_MAX_LENGTH
+        self.length = AC_MAX_LENGTH
         self.outbyte = 0
         # nothing has been produced yet, so there is no history to keep and
         # the first half to hand off is the whole ring
@@ -67,7 +70,7 @@ class ArithmeticEncoder:
                 self._manage_outbuffer()
             self.base = (self.base << 8) & U32_MASK
             self.length = (self.length << 8) & U32_MASK
-            if self.length >= self.AC_MIN_LENGTH:
+            if self.length >= AC_MIN_LENGTH:
                 break
 
     def encode_bit(self, m, sym):
@@ -87,7 +90,7 @@ class ArithmeticEncoder:
             if init_base > self.base:  # overflow = carry
                 self._propagate_carry()
 
-        if self.length < self.AC_MIN_LENGTH:
+        if self.length < AC_MIN_LENGTH:
             self._renorm_enc_interval()
 
         m.bits_until_update -= 1  # TODO get the model to handle this
@@ -114,7 +117,7 @@ class ArithmeticEncoder:
         if init_base > self.base:
             self._propagate_carry()
 
-        if self.length < self.AC_MIN_LENGTH:
+        if self.length < AC_MIN_LENGTH:
             self._renorm_enc_interval()
 
         m.increment_symbol_count(sym)
@@ -137,7 +140,7 @@ class ArithmeticEncoder:
         if init_base > self.base:
             self._propagate_carry()
 
-        if self.length < self.AC_MIN_LENGTH:
+        if self.length < AC_MIN_LENGTH:
             self._renorm_enc_interval()
 
     def write_int(self, sym):
@@ -152,12 +155,12 @@ class ArithmeticEncoder:
         another_byte = True
 
         # pick a final base inside the current interval that ends in zeros
-        if self.length > 2 * self.AC_MIN_LENGTH:
-            self.base = (self.base + self.AC_MIN_LENGTH) & U32_MASK
-            self.length = self.AC_MIN_LENGTH >> 1     # one more byte
+        if self.length > 2 * AC_MIN_LENGTH:
+            self.base = (self.base + AC_MIN_LENGTH) & U32_MASK
+            self.length = AC_MIN_LENGTH >> 1     # one more byte
         else:
-            self.base = (self.base + (self.AC_MIN_LENGTH >> 1)) & U32_MASK
-            self.length = self.AC_MIN_LENGTH >> 9     # two more bytes
+            self.base = (self.base + (AC_MIN_LENGTH >> 1)) & U32_MASK
+            self.length = AC_MIN_LENGTH >> 9     # two more bytes
             another_byte = False
 
         if init_base > self.base:
@@ -188,8 +191,6 @@ class ArithmeticEncoder:
 class ArithmeticDecoder:
     """An ArithmeticDecoder decodes a stream of symbols using an arithmetic
     model."""
-    AC_MAX_LENGTH = 0xFFFFFFFF
-    AC_MIN_LENGTH = 0x01000000
 
     def __init__(self, fp):
         self.fp = fp
@@ -197,14 +198,14 @@ class ArithmeticDecoder:
         self.value = 0
 
     def start(self):
-        self.length = self.AC_MAX_LENGTH
+        self.length = AC_MAX_LENGTH
 
         data = self.fp.read(4)
         self.value = int.from_bytes(data, byteorder='big')
 
     def _renorm_dec_interval(self):
         """Renormalize the decoder interval."""
-        while self.length < self.AC_MIN_LENGTH:
+        while self.length < AC_MIN_LENGTH:
             data = unsigned_int(self.fp.read(1))
             self.value = (self.value << 8) | data
             self.length <<= 8
@@ -224,7 +225,7 @@ class ArithmeticDecoder:
             self.value -= x
             self.length -= x
 
-        if self.length < self.AC_MIN_LENGTH:
+        if self.length < AC_MIN_LENGTH:
             self._renorm_dec_interval()
 
         m.bits_until_update -= 1  # TODO get the model to handle this
@@ -288,7 +289,7 @@ class ArithmeticDecoder:
         self.value -= x
         self.length = y - x
 
-        if self.length < self.AC_MIN_LENGTH:
+        if self.length < AC_MIN_LENGTH:
             self._renorm_dec_interval()
 
         m.increment_symbol_count(sym)
@@ -307,7 +308,7 @@ class ArithmeticDecoder:
         sym = self.value // (self.length)
         self.value = self.value % self.length
 
-        if self.length < self.AC_MIN_LENGTH:
+        if self.length < AC_MIN_LENGTH:
             self._renorm_dec_interval()
 
         return sym

@@ -429,9 +429,10 @@ void laz_encoder_done(LazEncoder *e)
     }
 
     /* two or three zero bytes, to stay in sync with the decoder */
-    laz_outstream_put_byte(e->stream, 0);
-    laz_outstream_put_byte(e->stream, 0);
-    if (another_byte) laz_outstream_put_byte(e->stream, 0);
+    {
+        static const U8 zeros[3] = {0, 0, 0};
+        laz_outstream_put_bytes(e->stream, zeros, another_byte ? 3 : 2);
+    }
 
     e->stream = NULL;
 }

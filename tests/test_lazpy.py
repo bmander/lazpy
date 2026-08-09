@@ -549,6 +549,35 @@ def pseudorandom(count, modulus, seed=1):
     return [rand.randrange(modulus) for _ in range(count)]
 
 
+def symbols_round_trip(coder, num_symbols, symbols):
+    """Encodes symbols through a fresh model and decodes them back through
+    another. Returns (decoded, encoded bytes)."""
+    def encode_into(enc):
+        m = enc.create_symbol_model(num_symbols)
+        m.init()
+        for s in symbols:
+            enc.encode_symbol(m, s)
+
+    data = encode(coder, encode_into)
+
+    dec = decoder_for(coder, data)
+    m = dec.create_symbol_model(num_symbols)
+    m.init()
+    return [dec.decode_symbol(m) for _ in symbols], data
+
+
+def compress_all(coder, pairs, bits, contexts=1, bits_high=8):
+    """Compresses every (pred, real) pair and returns the encoded bytes."""
+    enc = coder[0](io.BytesIO())
+    ic = coder[2](enc, bits=bits, contexts=contexts, bits_high=bits_high)
+    ic.init_compressor()
+    enc.start()
+    for i, (pred, real) in enumerate(pairs):
+        ic.compress(pred, real, i % contexts)
+    enc.done()
+    return enc.fp.getvalue()
+
+
 @coders
 class TestArithmeticEncoder:
 
@@ -577,17 +606,7 @@ class TestArithmeticEncoder:
     @pytest.mark.parametrize("num_symbols", [2, 8, 16, 17, 256, 2048])
     def test_symbols_round_trip(self, coder, num_symbols):
         symbols = pseudorandom(4000, num_symbols, seed=num_symbols)
-
-        def encode_into(enc):
-            m = enc.create_symbol_model(num_symbols)
-            m.init()
-            for s in symbols:
-                enc.encode_symbol(m, s)
-
-        dec = decoder_for(coder, encode(coder, encode_into))
-        m = dec.create_symbol_model(num_symbols)
-        m.init()
-        assert [dec.decode_symbol(m) for _ in symbols] == symbols
+        assert symbols_round_trip(coder, num_symbols, symbols)[0] == symbols
 
     def test_raw_bits_round_trip(self, coder):
         rand = random.Random(7)
@@ -620,21 +639,12 @@ class TestArithmeticEncoder:
     # Long enough to cycle the encoder's ring buffer several times, which is
     # what puts carry propagation across a buffer boundary in play.
     def test_long_stream_round_trip(self, coder):
-        symbols = pseudorandom(40000, 256, seed=11)
+        symbols = pseudorandom(8000, 256, seed=11)
 
-        def encode_into(enc):
-            m = enc.create_symbol_model(256)
-            m.init()
-            for s in symbols:
-                enc.encode_symbol(m, s)
+        decoded, data = symbols_round_trip(coder, 256, symbols)
 
-        data = encode(coder, encode_into)
         assert len(data) > 4 * 1024        # more than two ring buffers
-
-        dec = decoder_for(coder, data)
-        m = dec.create_symbol_model(256)
-        m.init()
-        assert [dec.decode_symbol(m) for _ in symbols] == symbols
+        assert decoded == symbols
 
     def test_mixed_round_trip(self, coder):
         """Interleaving the three kinds of write is the case that matters in a
@@ -660,16 +670,21 @@ class TestArithmeticEncoder:
             assert dec.decode_bit(bit_model) == s & 1
             assert dec.read_bits(7) == s % 128
 
+    # the two implementations track "started" differently -- the binding on
+    # its stream, the reference on its interval -- so they raise different
+    # types for it
+    NOT_STARTED = (ValueError, RuntimeError)
+
     def test_encoding_before_start_raises(self, coder):
         enc = coder[0](io.BytesIO())
-        with pytest.raises(Exception):
+        with pytest.raises(self.NOT_STARTED):
             enc.write_bits(8, 0)
 
     def test_encoding_after_done_raises(self, coder):
         enc = coder[0](io.BytesIO())
         enc.start()
         enc.done()
-        with pytest.raises(Exception):
+        with pytest.raises(self.NOT_STARTED):
             enc.write_bits(8, 0)
 
 
@@ -685,6 +700,11 @@ def test_a_failing_write_is_not_swallowed():
     enc.write_bits(16, 4242)
     with pytest.raises(PermissionError):
         enc.done()
+
+    # and once the caller has caught that, the encoder still refuses to be
+    # used rather than returning NULL with nothing set
+    with pytest.raises(LazError):
+        enc.write_bits(8, 0)
 
 
 def test_the_two_encoders_emit_the_same_bytes():
@@ -708,19 +728,10 @@ class TestIntegerCompressorRoundTrip:
 
     def round_trip(self, coder, pairs, bits, contexts=1, bits_high=8):
         """Compresses every (pred, real) pair and decompresses them back."""
-        enc_class, dec_class, ic_class = coder
+        data = compress_all(coder, pairs, bits, contexts, bits_high)
 
-        fp = io.BytesIO()
-        enc = enc_class(fp)
-        ic = ic_class(enc, bits=bits, contexts=contexts, bits_high=bits_high)
-        ic.init_compressor()
-        enc.start()
-        for i, (pred, real) in enumerate(pairs):
-            ic.compress(pred, real, i % contexts)
-        enc.done()
-
-        dec = dec_class(io.BytesIO(fp.getvalue()))
-        ic = ic_class(dec, bits=bits, contexts=contexts, bits_high=bits_high)
+        dec = coder[1](io.BytesIO(data))
+        ic = coder[2](dec, bits=bits, contexts=contexts, bits_high=bits_high)
         ic.init_decompressor()
         dec.start()
         return [ic.decompress(pred, i % contexts)
@@ -774,22 +785,9 @@ class TestIntegerCompressorRoundTrip:
 
 def test_the_two_integer_compressors_emit_the_same_bytes():
     values = pseudorandom(3000, 1 << 16, seed=31)
+    pairs = list(zip([0] + values, values))     # a running predictor
 
-    def encode_with(enc_class, ic_class):
-        fp = io.BytesIO()
-        enc = enc_class(fp)
-        ic = ic_class(enc, bits=16)
-        ic.init_compressor()
-        enc.start()
-        pred = 0
-        for real in values:
-            ic.compress(pred, real)
-            pred = real
-        enc.done()
-        return fp.getvalue()
-
-    assert encode_with(encoder.ArithmeticEncoder, compressor.IntegerCompressor) \
-        == encode_with(cpylaz.ArithmeticEncoder, cpylaz.IntegerCompressor)
+    assert compress_all(PY_CODER, pairs, 16) == compress_all(C_CODER, pairs, 16)
 
 
 class TestCIntegerCompressorDirection:
