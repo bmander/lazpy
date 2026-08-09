@@ -64,21 +64,23 @@ static void raw_read_byte(LazReadItem *self, U8 *item, U32 *context)
     laz_stream_get_bytes(self->instream, item, ((RawReader *)self)->number);
 }
 
-/* Field accessors for the packed 30-byte LAS 1.4 point record. */
-#define P14_X(b)                 ((I32)((U32)(b)[0] | ((U32)(b)[1] << 8) | ((U32)(b)[2] << 16) | ((U32)(b)[3] << 24)))
-#define P14_Y(b)                 ((I32)((U32)(b)[4] | ((U32)(b)[5] << 8) | ((U32)(b)[6] << 16) | ((U32)(b)[7] << 24)))
-#define P14_Z(b)                 ((I32)((U32)(b)[8] | ((U32)(b)[9] << 8) | ((U32)(b)[10] << 16) | ((U32)(b)[11] << 24)))
-#define P14_INTENSITY(b)         ((U16)((b)[12] | ((b)[13] << 8)))
-#define P14_RETURN_NUMBER(b)     ((b)[14] & 0x0F)
-#define P14_NUMBER_OF_RETURNS(b) (((b)[14] >> 4) & 0x0F)
-#define P14_CLASS_FLAGS(b)       ((b)[15] & 0x0F)
-#define P14_SCANNER_CHANNEL(b)   (((b)[15] >> 4) & 0x03)
-#define P14_SCAN_DIR_FLAG(b)     (((b)[15] >> 6) & 0x01)
-#define P14_EDGE_OF_FLIGHT(b)    (((b)[15] >> 7) & 0x01)
-#define P14_CLASSIFICATION(b)    ((b)[16])
-#define P14_USER_DATA(b)         ((b)[17])
-#define P14_SCAN_ANGLE(b)        ((I16)((U16)((b)[18] | ((b)[19] << 8))))
-#define P14_POINT_SOURCE_ID(b)   ((U16)((b)[20] | ((b)[21] << 8)))
+/* Field accessors for the packed 30-byte LAS 1.4 point record -- the on-disk
+ * layout, which is not the LASpoint14 layout the P14_* macros in laz_item.h
+ * describe. This is the one place the two meet. */
+#define REC14_X(b)                 ((I32)((U32)(b)[0] | ((U32)(b)[1] << 8) | ((U32)(b)[2] << 16) | ((U32)(b)[3] << 24)))
+#define REC14_Y(b)                 ((I32)((U32)(b)[4] | ((U32)(b)[5] << 8) | ((U32)(b)[6] << 16) | ((U32)(b)[7] << 24)))
+#define REC14_Z(b)                 ((I32)((U32)(b)[8] | ((U32)(b)[9] << 8) | ((U32)(b)[10] << 16) | ((U32)(b)[11] << 24)))
+#define REC14_INTENSITY(b)         ((U16)((b)[12] | ((b)[13] << 8)))
+#define REC14_RETURN_NUMBER(b)     ((b)[14] & 0x0F)
+#define REC14_NUMBER_OF_RETURNS(b) (((b)[14] >> 4) & 0x0F)
+#define REC14_CLASS_FLAGS(b)       ((b)[15] & 0x0F)
+#define REC14_SCANNER_CHANNEL(b)   (((b)[15] >> 4) & 0x03)
+#define REC14_SCAN_DIR_FLAG(b)     (((b)[15] >> 6) & 0x01)
+#define REC14_EDGE_OF_FLIGHT(b)    (((b)[15] >> 7) & 0x01)
+#define REC14_CLASSIFICATION(b)    ((b)[16])
+#define REC14_USER_DATA(b)         ((b)[17])
+#define REC14_SCAN_ANGLE(b)        ((I16)((U16)((b)[18] | ((b)[19] << 8))))
+#define REC14_POINT_SOURCE_ID(b)   ((U16)((b)[20] | ((b)[21] << 8)))
 
 static void raw_read_point14(LazReadItem *self, U8 *item, U32 *context)
 {
@@ -90,13 +92,13 @@ static void raw_read_point14(LazReadItem *self, U8 *item, U32 *context)
     (void)context;
     laz_stream_get_bytes(self->instream, b, 30);
 
-    p->X = P14_X(b);
-    p->Y = P14_Y(b);
-    p->Z = P14_Z(b);
-    p->intensity = P14_INTENSITY(b);
+    p->X = REC14_X(b);
+    p->Y = REC14_Y(b);
+    p->Z = REC14_Z(b);
+    p->intensity = REC14_INTENSITY(b);
 
-    return_number = P14_RETURN_NUMBER(b);
-    number_of_returns = P14_NUMBER_OF_RETURNS(b);
+    return_number = REC14_RETURN_NUMBER(b);
+    number_of_returns = REC14_NUMBER_OF_RETURNS(b);
 
     /* the legacy 3-bit fields saturate rather than wrap */
     if (number_of_returns > 7) {
@@ -111,27 +113,27 @@ static void raw_read_point14(LazReadItem *self, U8 *item, U32 *context)
         p->number_of_returns = number_of_returns;
     }
 
-    p->scan_direction_flag = P14_SCAN_DIR_FLAG(b);
-    p->edge_of_flight_line = P14_EDGE_OF_FLIGHT(b);
+    p->scan_direction_flag = REC14_SCAN_DIR_FLAG(b);
+    p->edge_of_flight_line = REC14_EDGE_OF_FLIGHT(b);
 
     /* legacy classification byte: flags in the top 3 bits, class in the low 5 */
     {
-        U8 legacy = (U8)((P14_CLASS_FLAGS(b) << 5) & 0xE0);
-        U8 cls = P14_CLASSIFICATION(b);
+        U8 legacy = (U8)((REC14_CLASS_FLAGS(b) << 5) & 0xE0);
+        U8 cls = REC14_CLASSIFICATION(b);
         if (cls < 32) legacy |= cls;
         ((U8 *)item)[15] = legacy;
     }
 
-    p->scan_angle_rank = I8_CLAMP(I16_QUANTIZE(0.006f * P14_SCAN_ANGLE(b)));
-    p->user_data = P14_USER_DATA(b);
-    p->point_source_ID = P14_POINT_SOURCE_ID(b);
+    p->scan_angle_rank = I8_CLAMP(I16_QUANTIZE(0.006f * REC14_SCAN_ANGLE(b)));
+    p->user_data = REC14_USER_DATA(b);
+    p->point_source_ID = REC14_POINT_SOURCE_ID(b);
 
-    p->extended_scanner_channel = P14_SCANNER_CHANNEL(b);
-    p->extended_classification_flags = P14_CLASS_FLAGS(b);
-    p->extended_classification = P14_CLASSIFICATION(b);
+    p->extended_scanner_channel = REC14_SCANNER_CHANNEL(b);
+    p->extended_classification_flags = REC14_CLASS_FLAGS(b);
+    p->extended_classification = REC14_CLASSIFICATION(b);
     p->extended_return_number = return_number;
     p->extended_number_of_returns = number_of_returns;
-    p->extended_scan_angle = P14_SCAN_ANGLE(b);
+    p->extended_scan_angle = REC14_SCAN_ANGLE(b);
 
     memcpy(&p->gps_time, &b[22], 8);
 }

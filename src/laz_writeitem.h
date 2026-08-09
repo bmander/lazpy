@@ -63,8 +63,8 @@ LazWriteItem *laz_writeitem_raw_rgb12(LazOutStream *out);
 LazWriteItem *laz_writeitem_raw_rgbnir14(LazOutStream *out);
 LazWriteItem *laz_writeitem_raw_wavepacket13(LazOutStream *out);
 LazWriteItem *laz_writeitem_raw_byte(LazOutStream *out, U32 number);
-/* gathers the LAS 1.4 fields of a LazPoint back into the 30-byte record, so it
- * lives with the writers that share that layout (laz_writeitem_v3.c) */
+/* gathers the LAS 1.4 fields of a LazPoint back into the 30-byte record, the
+ * inverse of laz_readitem_raw_point14 */
 LazWriteItem *laz_writeitem_raw_point14(LazOutStream *out);
 
 /* --- v1 compressed writers (laswriteitemcompressed_v1.cpp) --- */

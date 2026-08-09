@@ -1376,7 +1376,8 @@ static PyObject *cpylaz_compress_chunks(PyObject *self, PyObject *args)
     LazWriteItem **raw = NULL, **compressed = NULL;
     LazReadItem **scatter = NULL;
     LazStream *in = NULL;
-    LazPoint point;
+    LazPoint point = {0};
+    I32 offsets[LAZ_MAX_ITEMS];
     U8 *extra_bytes = NULL, *at[LAZ_MAX_ITEMS];
     U32 num_extra_bytes = 0;
     U32 num_items = 0, i;
@@ -1431,13 +1432,13 @@ static PyObject *cpylaz_compress_chunks(PyObject *self, PyObject *args)
 
     /* Built once and reused, as laz_readpoint_setup builds its readers. */
     for (i = 0; i < num_items; i++) {
-        I32 offset = laz_item_offset(items[i].type);
-        if (offset == -2) {
+        offsets[i] = laz_item_offset(items[i].type);
+        if (offsets[i] == -2) {
             PyErr_Format(PyExc_ValueError, "item type %u is not supported",
                          items[i].type);
             goto done;
         }
-        if (offset == -1) num_extra_bytes += items[i].size;
+        if (offsets[i] == -1) num_extra_bytes += items[i].size;
         if (items[i].type == LAZ_ITEM_POINT14) point.extended_point_type = 1;
 
         scatter[i] = laz_readitem_new_raw(&items[i], in);
@@ -1457,12 +1458,12 @@ static PyObject *cpylaz_compress_chunks(PyObject *self, PyObject *args)
         }
     }
 
+    /* deferred until num_extra_bytes is known, which is the only reason the
+     * item coders' targets are not resolved in the loop above */
     extra_bytes = (U8 *)PyMem_Calloc(num_extra_bytes + 1, 1);
     if (!extra_bytes) { PyErr_NoMemory(); goto done; }
-    for (i = 0; i < num_items; i++) {
-        I32 offset = laz_item_offset(items[i].type);
-        at[i] = (offset < 0) ? extra_bytes : (U8 *)&point + offset;
-    }
+    for (i = 0; i < num_items; i++)
+        at[i] = (offsets[i] < 0) ? extra_bytes : (U8 *)&point + offsets[i];
 
     /* a chunk size of zero means one chunk holding every record, which is what
      * the non-chunked POINTWISE container does */

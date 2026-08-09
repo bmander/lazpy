@@ -37,42 +37,8 @@
  */
 #include "laz_readitem.h"
 
-/* LASzip's combined LASpoint14 struct; the item buffer is this layout. The
- * write extent is declared in laz_types.h, which asserts it cannot reach the
- * next item's slot. */
-#define LASPOINT14_SIZE LAZ_POINT14_WRITE_EXTENT
-
-#define P14_X(p)  (*(I32 *)((p) + 0))
-#define P14_Y(p)  (*(I32 *)((p) + 4))
-#define P14_Z(p)  (*(I32 *)((p) + 8))
-#define P14_INTENSITY(p) (*(U16 *)((p) + 12))
-
-#define P14_SET_LEGACY_RETURN_NUMBER(p, v)     ((p)[14] = (U8)(((p)[14] & 0xF8) | ((v) & 0x07)))
-#define P14_SET_LEGACY_NUMBER_OF_RETURNS(p, v) ((p)[14] = (U8)(((p)[14] & 0xC7) | (((v) & 0x07) << 3)))
-#define P14_SCAN_DIRECTION_FLAG(p)             (((p)[14] >> 6) & 0x01)
-#define P14_SET_SCAN_DIRECTION_FLAG(p, v)      ((p)[14] = (U8)(((p)[14] & 0xBF) | (((v) & 0x01) << 6)))
-#define P14_EDGE_OF_FLIGHT_LINE(p)             (((p)[14] >> 7) & 0x01)
-#define P14_SET_EDGE_OF_FLIGHT_LINE(p, v)      ((p)[14] = (U8)(((p)[14] & 0x7F) | (((v) & 0x01) << 7)))
-
-#define P14_SET_LEGACY_CLASSIFICATION(p, v)    ((p)[15] = (U8)(((p)[15] & 0xE0) | ((v) & 0x1F)))
-#define P14_SET_LEGACY_FLAGS(p, v)             ((p)[15] = (U8)(((p)[15] & 0x1F) | (((v) & 0x07) << 5)))
-
-#define P14_SET_LEGACY_SCAN_ANGLE_RANK(p, v)   (*(I8 *)((p) + 16) = (I8)(v))
-#define P14_USER_DATA(p)                       ((p)[17])
-#define P14_POINT_SOURCE_ID(p)                 (*(U16 *)((p) + 18))
-#define P14_SCAN_ANGLE(p)                      (*(I16 *)((p) + 20))
-
-#define P14_SCANNER_CHANNEL(p)                 (((p)[22] >> 2) & 0x03)
-#define P14_SET_SCANNER_CHANNEL(p, v)          ((p)[22] = (U8)(((p)[22] & 0xF3) | (((v) & 0x03) << 2)))
-#define P14_CLASSIFICATION_FLAGS(p)            (((p)[22] >> 4) & 0x0F)
-#define P14_SET_CLASSIFICATION_FLAGS(p, v)     ((p)[22] = (U8)(((p)[22] & 0x0F) | (((v) & 0x0F) << 4)))
-#define P14_CLASSIFICATION(p)                  ((p)[23])
-#define P14_RETURN_NUMBER(p)                   ((p)[24] & 0x0F)
-#define P14_SET_RETURN_NUMBER(p, v)            ((p)[24] = (U8)(((p)[24] & 0xF0) | ((v) & 0x0F)))
-#define P14_NUMBER_OF_RETURNS(p)               (((p)[24] >> 4) & 0x0F)
-#define P14_SET_NUMBER_OF_RETURNS(p, v)        ((p)[24] = (U8)(((p)[24] & 0x0F) | (((v) & 0x0F) << 4)))
-#define P14_GPS_TIME_CHANGE(p)                 (*(I32 *)((p) + 28))
-#define P14_GPS_TIME(p)                        (*(F64 *)((p) + 32))
+/* The LASpoint14 field accessors this file decodes into live in laz_item.h,
+ * shared with the writers so one definition of the layout serves both. */
 
 #define LASZIP_GPSTIME_MULTI            500
 #define LASZIP_GPSTIME_MULTI_MINUS      (-10)

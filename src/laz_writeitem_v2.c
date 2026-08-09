@@ -223,22 +223,6 @@ static BOOL gps11v2_init(LazWriteItem *self, const U8 *item, U32 *context)
     return LAZ_TRUE;
 }
 
-/*
- * Looks for a stored sequence whose last time is within 32 bits of this one.
- * Returns the offset from `last` (1..3), or 0 if none qualifies. Four
- * interleaved sequences let a file that alternates between two sensors stay in
- * the cheap small-difference path.
- */
-static U32 find_other_sequence(const Gpstime11v2 *w, I64 this_gpstime)
-{
-    U32 i;
-    for (i = 1; i < 4; i++) {
-        I64 diff64 = this_gpstime - w->last_gpstime[(w->last + i) & 3];
-        if (diff64 == (I64)(I32)diff64) return i;
-    }
-    return 0;
-}
-
 /* Starts a fresh sequence, coding the time in full. */
 static void start_new_sequence(Gpstime11v2 *w, LazEncoder *enc, I64 this_gpstime)
 {
@@ -274,7 +258,7 @@ static BOOL gps11v2_write(LazWriteItem *self, const U8 *item, U32 *context)
             w->last_gpstime_diff[w->last] = diff32;
             w->multi_extreme_counter[w->last] = 0;
         } else {                                /* difference is huge */
-            other = find_other_sequence(w, this_gpstime);
+            other = laz_gps_find_other_sequence(w->last_gpstime, w->last, this_gpstime);
             if (other) {                        /* it belongs to another sequence */
                 laz_encode_symbol(self->enc, &w->m_gpstime_0diff, other + 2);
                 w->last = (w->last + other) & 3;
@@ -346,7 +330,7 @@ static BOOL gps11v2_write(LazWriteItem *self, const U8 *item, U32 *context)
             }
         }
     } else {                                    /* difference is huge */
-        other = find_other_sequence(w, this_gpstime);
+        other = laz_gps_find_other_sequence(w->last_gpstime, w->last, this_gpstime);
         if (other) {                            /* it belongs to another sequence */
             laz_encode_symbol(self->enc, &w->m_gpstime_multi,
                               (U32)(LASZIP_GPSTIME_MULTI_CODE_FULL + (I32)other));

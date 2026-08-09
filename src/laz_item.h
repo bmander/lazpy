@@ -79,6 +79,95 @@ static inline I32 laz_item_offset(U32 type)
 #define P10_NUMBER_OF_RETURNS(li) (((li)[14] >> 3) & 0x07)
 #define P10_SCAN_DIR_FLAG(li)     (((li)[14] >> 6) & 0x01)
 
+/*
+ * Fields of LASzip's combined LASpoint14 -- the layout the LAS 1.4 item coders
+ * hold in last_item, and the one they are handed a point in. One definition of
+ * the offsets and bit positions serves both directions, because two would be
+ * free to drift apart silently.
+ *
+ * The mutable set below is what a reader decodes into; the _IN set that
+ * follows is the same fields on a const item, for the writers, exactly as
+ * P10_X_IN mirrors P10_X above.
+ */
+#define LASPOINT14_SIZE LAZ_POINT14_WRITE_EXTENT
+
+#define P14_X(li)  (*(I32 *)((li) + 0))
+#define P14_Y(li)  (*(I32 *)((li) + 4))
+#define P14_Z(li)  (*(I32 *)((li) + 8))
+#define P14_INTENSITY(li) (*(U16 *)((li) + 12))
+
+#define P14_SET_LEGACY_RETURN_NUMBER(li, v)     ((li)[14] = (U8)(((li)[14] & 0xF8) | ((v) & 0x07)))
+#define P14_SET_LEGACY_NUMBER_OF_RETURNS(li, v) ((li)[14] = (U8)(((li)[14] & 0xC7) | (((v) & 0x07) << 3)))
+#define P14_SCAN_DIRECTION_FLAG(li)             (((li)[14] >> 6) & 0x01)
+#define P14_SET_SCAN_DIRECTION_FLAG(li, v)      ((li)[14] = (U8)(((li)[14] & 0xBF) | (((v) & 0x01) << 6)))
+#define P14_EDGE_OF_FLIGHT_LINE(li)             (((li)[14] >> 7) & 0x01)
+#define P14_SET_EDGE_OF_FLIGHT_LINE(li, v)      ((li)[14] = (U8)(((li)[14] & 0x7F) | (((v) & 0x01) << 7)))
+
+#define P14_SET_LEGACY_CLASSIFICATION(li, v)    ((li)[15] = (U8)(((li)[15] & 0xE0) | ((v) & 0x1F)))
+#define P14_SET_LEGACY_FLAGS(li, v)             ((li)[15] = (U8)(((li)[15] & 0x1F) | (((v) & 0x07) << 5)))
+
+#define P14_SET_LEGACY_SCAN_ANGLE_RANK(li, v)   (*(I8 *)((li) + 16) = (I8)(v))
+#define P14_USER_DATA(li)                       ((li)[17])
+#define P14_POINT_SOURCE_ID(li)                 (*(U16 *)((li) + 18))
+#define P14_SCAN_ANGLE(li)                      (*(I16 *)((li) + 20))
+
+#define P14_SCANNER_CHANNEL(li)                 (((li)[22] >> 2) & 0x03)
+#define P14_SET_SCANNER_CHANNEL(li, v)          ((li)[22] = (U8)(((li)[22] & 0xF3) | (((v) & 0x03) << 2)))
+#define P14_CLASSIFICATION_FLAGS(li)            (((li)[22] >> 4) & 0x0F)
+#define P14_SET_CLASSIFICATION_FLAGS(li, v)     ((li)[22] = (U8)(((li)[22] & 0x0F) | (((v) & 0x0F) << 4)))
+#define P14_CLASSIFICATION(li)                  ((li)[23])
+#define P14_RETURN_NUMBER(li)                   ((li)[24] & 0x0F)
+#define P14_SET_RETURN_NUMBER(li, v)            ((li)[24] = (U8)(((li)[24] & 0xF0) | ((v) & 0x0F)))
+#define P14_NUMBER_OF_RETURNS(li)               (((li)[24] >> 4) & 0x0F)
+#define P14_SET_NUMBER_OF_RETURNS(li, v)        ((li)[24] = (U8)(((li)[24] & 0x0F) | (((v) & 0x0F) << 4)))
+#define P14_GPS_TIME_CHANGE(li)                 (*(I32 *)((li) + 28))
+#define P14_GPS_TIME(li)                        (*(F64 *)((li) + 32))
+
+/* The same fields on a const item. A writer reads both the point it was handed
+ * and its own last_item through these; only last_item is ever assigned to, and
+ * that goes through the mutable set above. */
+#define P14_X_IN(p)  (*(const I32 *)((const U8 *)(p) + 0))
+#define P14_Y_IN(p)  (*(const I32 *)((const U8 *)(p) + 4))
+#define P14_Z_IN(p)  (*(const I32 *)((const U8 *)(p) + 8))
+#define P14_INTENSITY_IN(p) (*(const U16 *)((const U8 *)(p) + 12))
+
+#define P14_SCAN_DIRECTION_FLAG_IN(p) ((((const U8 *)(p))[14] >> 6) & 0x01)
+#define P14_EDGE_OF_FLIGHT_LINE_IN(p) ((((const U8 *)(p))[14] >> 7) & 0x01)
+
+#define P14_USER_DATA_IN(p)           (((const U8 *)(p))[17])
+#define P14_POINT_SOURCE_ID_IN(p)     (*(const U16 *)((const U8 *)(p) + 18))
+#define P14_SCAN_ANGLE_IN(p)          (*(const I16 *)((const U8 *)(p) + 20))
+
+#define P14_SCANNER_CHANNEL_IN(p)      ((((const U8 *)(p))[22] >> 2) & 0x03)
+#define P14_CLASSIFICATION_FLAGS_IN(p) ((((const U8 *)(p))[22] >> 4) & 0x0F)
+#define P14_CLASSIFICATION_IN(p)       (((const U8 *)(p))[23])
+#define P14_RETURN_NUMBER_IN(p)        (((const U8 *)(p))[24] & 0x0F)
+#define P14_NUMBER_OF_RETURNS_IN(p)    ((((const U8 *)(p))[24] >> 4) & 0x0F)
+
+#define P14_GPS_TIME_CHANGE_IN(p) (*(const I32 *)((const U8 *)(p) + 28))
+#define P14_GPS_TIME_IN(p)        (*(const F64 *)((const U8 *)(p) + 32))
+/* the same eight bytes as P14_GPS_TIME_IN, compared and coded as an integer */
+#define P14_GPS_TIME_I64_IN(p)    (*(const I64 *)((const U8 *)(p) + 32))
+
+/*
+ * Looks for a stored sequence whose last time is within 32 bits of this one.
+ * Returns the offset from `last` (1..3), or 0 if none qualifies. Four
+ * interleaved sequences let a file that alternates between two sensors stay in
+ * the cheap small-difference path.
+ *
+ * Only the writers search: a decoder is told which sequence to move to.
+ */
+static inline U32 laz_gps_find_other_sequence(const I64 *last_gpstime, U32 last,
+                                              I64 this_gpstime)
+{
+    U32 i;
+    for (i = 1; i < 4; i++) {
+        I64 diff64 = this_gpstime - last_gpstime[(last + i) & 3];
+        if (diff64 == (I64)(I32)diff64) return i;
+    }
+    return 0;
+}
+
 /* Median of the three preceding differences, branch-for-branch as LASzip.
  * Predicts x and y in the POINT10 v1 coders. */
 static inline I32 laz_median3(const I32 *d)

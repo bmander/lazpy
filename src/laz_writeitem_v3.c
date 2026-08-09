@@ -41,38 +41,9 @@
  */
 #include "laz_writeitem.h"
 
-/* The item buffer is LASzip's combined LASpoint14; laz_types.h asserts the
- * write extent cannot reach the next item's slot. */
-#define LASPOINT14_SIZE LAZ_POINT14_WRITE_EXTENT
-
-/*
- * Field accessors. Everything the POINT14 writer looks at is read-only -- the
- * point being written is const, and last_item is refreshed by copying the whole
- * point -- so one const-correct set covers both, with gps_time_change the sole
- * exception because it is state the writer keeps rather than a point field.
- */
-#define P14_X(p)  (*(const I32 *)((const U8 *)(p) + 0))
-#define P14_Y(p)  (*(const I32 *)((const U8 *)(p) + 4))
-#define P14_Z(p)  (*(const I32 *)((const U8 *)(p) + 8))
-#define P14_INTENSITY(p) (*(const U16 *)((const U8 *)(p) + 12))
-
-#define P14_SCAN_DIRECTION_FLAG(p) ((((const U8 *)(p))[14] >> 6) & 0x01)
-#define P14_EDGE_OF_FLIGHT_LINE(p) ((((const U8 *)(p))[14] >> 7) & 0x01)
-
-#define P14_USER_DATA(p)           (((const U8 *)(p))[17])
-#define P14_POINT_SOURCE_ID(p)     (*(const U16 *)((const U8 *)(p) + 18))
-#define P14_SCAN_ANGLE(p)          (*(const I16 *)((const U8 *)(p) + 20))
-
-#define P14_SCANNER_CHANNEL(p)      ((((const U8 *)(p))[22] >> 2) & 0x03)
-#define P14_CLASSIFICATION_FLAGS(p) ((((const U8 *)(p))[22] >> 4) & 0x0F)
-#define P14_CLASSIFICATION(p)       (((const U8 *)(p))[23])
-#define P14_RETURN_NUMBER(p)        (((const U8 *)(p))[24] & 0x0F)
-#define P14_NUMBER_OF_RETURNS(p)    ((((const U8 *)(p))[24] >> 4) & 0x0F)
-
-#define P14_GPS_TIME_CHANGE(p)     (*(const I32 *)((const U8 *)(p) + 28))
-#define P14_SET_GPS_TIME_CHANGE(p, v) (*(I32 *)((U8 *)(p) + 28) = (v))
-#define P14_GPS_TIME(p)            (*(const F64 *)((const U8 *)(p) + 32))
-#define P14_GPS_TIME_I64(p)        (*(const I64 *)((const U8 *)(p) + 32))
+/* The LASpoint14 field accessors live in laz_item.h, shared with the readers.
+ * A writer reads through the const _IN set and assigns to its own last_item
+ * through the mutable one. */
 
 #define LASZIP_GPSTIME_MULTI            500
 #define LASZIP_GPSTIME_MULTI_MINUS      (-10)
@@ -129,9 +100,18 @@ static U32 wlayer_num_bytes(WLayer *l)
     return (U32)size;
 }
 
+/* Closes a kept layer's encoder and emits its length; a dropped layer's size
+ * goes out as zero and its encoder is never finished, because nothing will
+ * read the bytes it would flush. Each layer encodes into its own array sink,
+ * so closing one here cannot disturb another's byte count. */
 static void wlayer_put_size(WLayer *l, LazOutStream *out)
 {
-    laz_outstream_put32(out, l->changed ? wlayer_num_bytes(l) : 0);
+    if (!l->changed) {
+        laz_outstream_put32(out, 0);
+        return;
+    }
+    laz_encoder_done(&l->enc);
+    laz_outstream_put32(out, wlayer_num_bytes(l));
 }
 
 static void wlayer_put_bytes(WLayer *l, LazOutStream *out)
@@ -149,80 +129,6 @@ static void wlayer_put_bytes(WLayer *l, LazOutStream *out)
 static LazOutStream *chunk_stream(LazWriteItem *self)
 {
     return self->enc->stream;
-}
-
-/* ==================================================== POINT14 raw writer == */
-
-/*
- * Gathers the LAS 1.4 fields of a decoded point back into the 30-byte record,
- * the exact inverse of laz_readitem_raw_point14. Lives here rather than with
- * the other raw writers because it is the one that has to understand the
- * split between the legacy and extended fields of a point.
- *
- * A point that never came from a 1.4 source has extended_point_type clear, and
- * then the extended fields are derived from the legacy ones instead.
- */
-typedef struct {
-    LazWriteItem base;
-    U8 buffer[30];
-} RawPoint14;
-
-static BOOL raw_p14_write(LazWriteItem *self, const U8 *item, U32 *context)
-{
-    RawPoint14 *w = (RawPoint14 *)self;
-    U8 *b = w->buffer;
-    const U8 *p = item;
-    U8 classification, return_number, number_of_returns, scanner_channel;
-    U8 classification_flags;
-    I16 scan_angle;
-
-    (void)context;
-    memcpy(b + 0, p + 0, 14);           /* X, Y, Z, intensity */
-
-    classification = (U8)(p[15] & 0x1F);        /* legacy classification */
-    if (p[22] & 0x03) {                         /* extended_point_type */
-        classification_flags = (U8)(((p[22] >> 4) & 0x08) | (p[15] >> 5));
-        if (classification == 0) classification = p[23];
-        scanner_channel = (U8)((p[22] >> 2) & 0x03);
-        return_number = (U8)(p[24] & 0x0F);
-        number_of_returns = (U8)((p[24] >> 4) & 0x0F);
-        scan_angle = *(const I16 *)(p + 20);
-    } else {
-        classification_flags = (U8)(p[15] >> 5);
-        scanner_channel = 0;
-        return_number = (U8)(p[14] & 0x07);
-        number_of_returns = (U8)((p[14] >> 3) & 0x07);
-        scan_angle = I16_QUANTIZE(*(const I8 *)(p + 16) / 0.006f);
-    }
-
-    b[14] = (U8)(return_number | (number_of_returns << 4));
-    b[15] = (U8)(classification_flags | (scanner_channel << 4) |
-                 (P14_SCAN_DIRECTION_FLAG(p) << 6) |
-                 (P14_EDGE_OF_FLIGHT_LINE(p) << 7));
-    b[16] = classification;
-    b[17] = p[17];                      /* user_data */
-    memcpy(b + 18, &scan_angle, 2);
-    memcpy(b + 20, p + 18, 2);          /* point_source_ID */
-    memcpy(b + 22, p + 32, 8);          /* gps_time */
-
-    laz_outstream_put_bytes(self->outstream, b, 30);
-    return LAZ_TRUE;
-}
-
-static BOOL raw_p14_init_noop(LazWriteItem *self, const U8 *item, U32 *context)
-{
-    (void)self; (void)item; (void)context;
-    return LAZ_TRUE;
-}
-
-LazWriteItem *laz_writeitem_raw_point14(LazOutStream *out)
-{
-    RawPoint14 *w = (RawPoint14 *)calloc(1, sizeof(RawPoint14));
-    if (!w) return NULL;
-    w->base.write = raw_p14_write;
-    w->base.init = raw_p14_init_noop;
-    w->base.outstream = out;
-    return (LazWriteItem *)w;
 }
 
 /* ======================================================== POINT14 v3/v4 == */
@@ -321,7 +227,7 @@ static void p14_create_and_init(Point14v3 *w, U32 context, const U8 *item)
 
     /* Z layer */
     laz_ic_init_compressor(&c->ic_Z);
-    for (i = 0; i < 8; i++) c->last_Z[i] = P14_Z(item);
+    for (i = 0; i < 8; i++) c->last_Z[i] = P14_Z_IN(item);
 
     /* classification / flags / user_data layers */
     laz_bank_reinit(c->m_classification, c->created_cls, 64);
@@ -330,7 +236,7 @@ static void p14_create_and_init(Point14v3 *w, U32 context, const U8 *item)
 
     /* intensity layer */
     laz_ic_init_compressor(&c->ic_intensity);
-    for (i = 0; i < 8; i++) c->last_intensity[i] = P14_INTENSITY(item);
+    for (i = 0; i < 8; i++) c->last_intensity[i] = P14_INTENSITY_IN(item);
 
     laz_ic_init_compressor(&c->ic_scan_angle);
     laz_ic_init_compressor(&c->ic_point_source_ID);
@@ -343,11 +249,11 @@ static void p14_create_and_init(Point14v3 *w, U32 context, const U8 *item)
     c->next = 0;
     memset(c->last_gpstime_diff, 0, sizeof(c->last_gpstime_diff));
     memset(c->multi_extreme_counter, 0, sizeof(c->multi_extreme_counter));
-    c->last_gpstime[0] = P14_GPS_TIME_I64(item);
+    c->last_gpstime[0] = P14_GPS_TIME_I64_IN(item);
     c->last_gpstime[1] = c->last_gpstime[2] = c->last_gpstime[3] = 0;
 
     memcpy(c->last_item, item, LASPOINT14_SIZE);
-    P14_SET_GPS_TIME_CHANGE(c->last_item, LAZ_FALSE);
+    P14_GPS_TIME_CHANGE(c->last_item) = LAZ_FALSE;
 
     c->unused = LAZ_FALSE;
 }
@@ -381,7 +287,7 @@ static BOOL p14_init(LazWriteItem *self, const U8 *item, U32 *context)
 
     for (c = 0; c < 4; c++) w->contexts[c].unused = LAZ_TRUE;
 
-    w->current_context = P14_SCANNER_CHANNEL(item);
+    w->current_context = P14_SCANNER_CHANNEL_IN(item);
     *context = w->current_context;   /* POINT14 sets the context for all items */
 
     p14_create_and_init(w, w->current_context, item);
@@ -401,26 +307,26 @@ static BOOL p14_write(LazWriteItem *self, const U8 *item, U32 *context)
 
     /* single (3) / first (1) / last (2) / intermediate (0) from the last return,
      * plus whether the GPS time changed on that return */
-    lpr = (P14_RETURN_NUMBER(last_item) == 1 ? 1 : 0);
-    lpr += (P14_RETURN_NUMBER(last_item) >= P14_NUMBER_OF_RETURNS(last_item) ? 2 : 0);
-    lpr += (P14_GPS_TIME_CHANGE(last_item) ? 4 : 0);
+    lpr = (P14_RETURN_NUMBER_IN(last_item) == 1 ? 1 : 0);
+    lpr += (P14_RETURN_NUMBER_IN(last_item) >= P14_NUMBER_OF_RETURNS_IN(last_item) ? 2 : 0);
+    lpr += (P14_GPS_TIME_CHANGE_IN(last_item) ? 4 : 0);
 
     /* a switch to a context that already exists predicts against that
      * context's last point, so the comparisons below have to see it */
-    scanner_channel = P14_SCANNER_CHANNEL(item);
+    scanner_channel = P14_SCANNER_CHANNEL_IN(item);
     if (scanner_channel != w->current_context &&
         !w->contexts[scanner_channel].unused) {
         last_item = w->contexts[scanner_channel].last_item;
     }
 
-    point_source_change = (P14_POINT_SOURCE_ID(item) != P14_POINT_SOURCE_ID(last_item));
-    gps_time_change = (P14_GPS_TIME(item) != P14_GPS_TIME(last_item));
-    scan_angle_change = (P14_SCAN_ANGLE(item) != P14_SCAN_ANGLE(last_item));
+    point_source_change = (P14_POINT_SOURCE_ID_IN(item) != P14_POINT_SOURCE_ID_IN(last_item));
+    gps_time_change = (P14_GPS_TIME_IN(item) != P14_GPS_TIME_IN(last_item));
+    scan_angle_change = (P14_SCAN_ANGLE_IN(item) != P14_SCAN_ANGLE_IN(last_item));
 
-    last_n = P14_NUMBER_OF_RETURNS(last_item);
-    last_r = P14_RETURN_NUMBER(last_item);
-    n = P14_NUMBER_OF_RETURNS(item);
-    rn = P14_RETURN_NUMBER(item);
+    last_n = P14_NUMBER_OF_RETURNS_IN(last_item);
+    last_r = P14_RETURN_NUMBER_IN(last_item);
+    n = P14_NUMBER_OF_RETURNS_IN(item);
+    rn = P14_RETURN_NUMBER_IN(item);
 
     changed_values = ((scanner_channel != w->current_context) << 6) |
                      (point_source_change << 5) |
@@ -481,27 +387,27 @@ static BOOL p14_write(LazWriteItem *self, const U8 *item, U32 *context)
 
     /* X */
     median = laz_median5_get(&cx->last_X_diff_median5[(m << 1) | gps_time_change]);
-    diff = P14_X(item) - P14_X(last_item);
+    diff = P14_X_IN(item) - P14_X_IN(last_item);
     laz_ic_compress(&cx->ic_dX, median, diff, (n == 1));
     laz_median5_add(&cx->last_X_diff_median5[(m << 1) | gps_time_change], diff);
 
     /* Y */
     k_bits = cx->ic_dX.k;
     median = laz_median5_get(&cx->last_Y_diff_median5[(m << 1) | gps_time_change]);
-    diff = P14_Y(item) - P14_Y(last_item);
+    diff = P14_Y_IN(item) - P14_Y_IN(last_item);
     laz_ic_compress(&cx->ic_dY, median, diff,
                     (n == 1) + (k_bits < 20 ? U32_ZERO_BIT_0(k_bits) : 20));
     laz_median5_add(&cx->last_Y_diff_median5[(m << 1) | gps_time_change], diff);
 
     /* Z */
     k_bits = (cx->ic_dX.k + cx->ic_dY.k) / 2;
-    laz_ic_compress(&cx->ic_Z, cx->last_Z[l], P14_Z(item),
+    laz_ic_compress(&cx->ic_Z, cx->last_Z[l], P14_Z_IN(item),
                     (n == 1) + (k_bits < 18 ? U32_ZERO_BIT_0(k_bits) : 18));
-    cx->last_Z[l] = P14_Z(item);
+    cx->last_Z[l] = P14_Z_IN(item);
 
     {
-        U32 last_classification = P14_CLASSIFICATION(last_item);
-        U32 classification = P14_CLASSIFICATION(item);
+        U32 last_classification = P14_CLASSIFICATION_IN(last_item);
+        U32 classification = P14_CLASSIFICATION_IN(item);
         U32 ccc = ((last_classification & 0x1F) << 1) + (cpr == 3 ? 1 : 0);
 
         if (classification != last_classification) w->classification.changed = LAZ_TRUE;
@@ -511,12 +417,12 @@ static BOOL p14_write(LazWriteItem *self, const U8 *item, U32 *context)
     }
 
     {
-        U32 last_flags = (U32)((P14_EDGE_OF_FLIGHT_LINE(last_item) << 5) |
-                               (P14_SCAN_DIRECTION_FLAG(last_item) << 4) |
-                               P14_CLASSIFICATION_FLAGS(last_item));
-        U32 flags = (U32)((P14_EDGE_OF_FLIGHT_LINE(item) << 5) |
-                          (P14_SCAN_DIRECTION_FLAG(item) << 4) |
-                          P14_CLASSIFICATION_FLAGS(item));
+        U32 last_flags = (U32)((P14_EDGE_OF_FLIGHT_LINE_IN(last_item) << 5) |
+                               (P14_SCAN_DIRECTION_FLAG_IN(last_item) << 4) |
+                               P14_CLASSIFICATION_FLAGS_IN(last_item));
+        U32 flags = (U32)((P14_EDGE_OF_FLIGHT_LINE_IN(item) << 5) |
+                          (P14_SCAN_DIRECTION_FLAG_IN(item) << 4) |
+                          P14_CLASSIFICATION_FLAGS_IN(item));
 
         if (flags != last_flags) w->flags.changed = LAZ_TRUE;
         laz_encode_symbol(&w->flags.enc,
@@ -524,57 +430,41 @@ static BOOL p14_write(LazWriteItem *self, const U8 *item, U32 *context)
                           flags);
     }
 
-    if (P14_INTENSITY(item) != P14_INTENSITY(last_item)) w->intensity.changed = LAZ_TRUE;
+    if (P14_INTENSITY_IN(item) != P14_INTENSITY_IN(last_item)) w->intensity.changed = LAZ_TRUE;
     laz_ic_compress(&cx->ic_intensity,
                     cx->last_intensity[(cpr << 1) | gps_time_change],
-                    P14_INTENSITY(item), (U32)cpr);
-    cx->last_intensity[(cpr << 1) | gps_time_change] = P14_INTENSITY(item);
+                    P14_INTENSITY_IN(item), (U32)cpr);
+    cx->last_intensity[(cpr << 1) | gps_time_change] = P14_INTENSITY_IN(item);
 
     if (scan_angle_change) {
         w->scan_angle.changed = LAZ_TRUE;
-        laz_ic_compress(&cx->ic_scan_angle, P14_SCAN_ANGLE(last_item),
-                        P14_SCAN_ANGLE(item), (U32)gps_time_change);
+        laz_ic_compress(&cx->ic_scan_angle, P14_SCAN_ANGLE_IN(last_item),
+                        P14_SCAN_ANGLE_IN(item), (U32)gps_time_change);
     }
 
     {
-        U32 idx = P14_USER_DATA(last_item) / 4;
-        if (P14_USER_DATA(item) != P14_USER_DATA(last_item))
+        U32 idx = P14_USER_DATA_IN(last_item) / 4;
+        if (P14_USER_DATA_IN(item) != P14_USER_DATA_IN(last_item))
             w->user_data.changed = LAZ_TRUE;
         laz_encode_symbol(&w->user_data.enc,
                           laz_bank_get(cx->m_user_data, cx->created_usr, idx),
-                          P14_USER_DATA(item));
+                          P14_USER_DATA_IN(item));
     }
 
     if (point_source_change) {
         w->point_source.changed = LAZ_TRUE;
-        laz_ic_compress(&cx->ic_point_source_ID, P14_POINT_SOURCE_ID(last_item),
-                        P14_POINT_SOURCE_ID(item), 0);
+        laz_ic_compress(&cx->ic_point_source_ID, P14_POINT_SOURCE_ID_IN(last_item),
+                        P14_POINT_SOURCE_ID_IN(item), 0);
     }
 
     if (gps_time_change) {
         w->gps_time.changed = LAZ_TRUE;
-        p14_write_gps_time(w, P14_GPS_TIME_I64(item));
+        p14_write_gps_time(w, P14_GPS_TIME_I64_IN(item));
     }
 
     memcpy(cx->last_item, item, LASPOINT14_SIZE);
-    P14_SET_GPS_TIME_CHANGE(cx->last_item, gps_time_change);
+    P14_GPS_TIME_CHANGE(cx->last_item) = gps_time_change;
     return LAZ_TRUE;
-}
-
-/*
- * Looks for a stored sequence whose last time is within 32 bits of this one.
- * Returns the offset from `last` (1..3), or 0 if none qualifies -- as in the
- * GPSTIME11 v2 writer, four interleaved sequences keep a file that alternates
- * between two sensors in the cheap small-difference path.
- */
-static U32 p14_find_other_sequence(const Point14Context *c, I64 gps_time)
-{
-    U32 i;
-    for (i = 1; i < 4; i++) {
-        I64 diff64 = gps_time - c->last_gpstime[(c->last + i) & 3];
-        if (diff64 == (I64)(I32)diff64) return i;
-    }
-    return 0;
 }
 
 /* Starts a fresh sequence, coding the time in full. */
@@ -604,7 +494,7 @@ static void p14_write_gps_time(Point14v3 *w, I64 gps_time)
             c->last_gpstime_diff[c->last] = diff32;
             c->multi_extreme_counter[c->last] = 0;
         } else {                                /* difference is huge */
-            other = p14_find_other_sequence(c, gps_time);
+            other = laz_gps_find_other_sequence(c->last_gpstime, c->last, gps_time);
             if (other) {                        /* it belongs to another sequence */
                 laz_encode_symbol(enc, &c->m_gpstime_0diff, other + 1);
                 c->last = (c->last + other) & 3;
@@ -669,7 +559,7 @@ static void p14_write_gps_time(Point14v3 *w, I64 gps_time)
             }
         }
     } else {                                    /* difference is huge */
-        other = p14_find_other_sequence(c, gps_time);
+        other = laz_gps_find_other_sequence(c->last_gpstime, c->last, gps_time);
         if (other) {                            /* it belongs to another sequence */
             laz_encode_symbol(enc, &c->m_gpstime_multi,
                               (U32)(LASZIP_GPSTIME_MULTI_CODE_FULL + (I32)other));
@@ -688,16 +578,6 @@ static BOOL p14_chunk_sizes(LazWriteItem *self)
 {
     Point14v3 *w = (Point14v3 *)self;
     LazOutStream *out = chunk_stream(self);
-
-    laz_encoder_done(&w->channel_returns_XY.enc);
-    laz_encoder_done(&w->Z.enc);
-    if (w->classification.changed) laz_encoder_done(&w->classification.enc);
-    if (w->flags.changed) laz_encoder_done(&w->flags.enc);
-    if (w->intensity.changed) laz_encoder_done(&w->intensity.enc);
-    if (w->scan_angle.changed) laz_encoder_done(&w->scan_angle.enc);
-    if (w->user_data.changed) laz_encoder_done(&w->user_data.enc);
-    if (w->point_source.changed) laz_encoder_done(&w->point_source.enc);
-    if (w->gps_time.changed) laz_encoder_done(&w->gps_time.enc);
 
     wlayer_put_size(&w->channel_returns_XY, out);
     wlayer_put_size(&w->Z, out);
@@ -913,7 +793,6 @@ static BOOL rgb14_write(LazWriteItem *self, const U8 *item, U32 *context)
 static BOOL rgb14_chunk_sizes(LazWriteItem *self)
 {
     Rgb14v3 *w = (Rgb14v3 *)self;
-    laz_encoder_done(&w->rgb.enc);
     wlayer_put_size(&w->rgb, chunk_stream(self));
     return LAZ_TRUE;
 }
@@ -1051,8 +930,6 @@ static BOOL rgbnir14_chunk_sizes(LazWriteItem *self)
 {
     RgbNir14v3 *w = (RgbNir14v3 *)self;
     LazOutStream *out = chunk_stream(self);
-    laz_encoder_done(&w->rgb.enc);
-    laz_encoder_done(&w->nir.enc);
     wlayer_put_size(&w->rgb, out);
     wlayer_put_size(&w->nir, out);
     return LAZ_TRUE;
@@ -1228,7 +1105,6 @@ static BOOL wave14_write(LazWriteItem *self, const U8 *item, U32 *context)
 static BOOL wave14_chunk_sizes(LazWriteItem *self)
 {
     Wave14v3 *w = (Wave14v3 *)self;
-    laz_encoder_done(&w->wavepacket.enc);
     wlayer_put_size(&w->wavepacket, chunk_stream(self));
     return LAZ_TRUE;
 }
@@ -1360,10 +1236,7 @@ static BOOL byte14_chunk_sizes(LazWriteItem *self)
     Byte14v3 *w = (Byte14v3 *)self;
     LazOutStream *out = chunk_stream(self);
     U32 i;
-    for (i = 0; i < w->number; i++) {
-        laz_encoder_done(&w->layers[i].enc);
-        wlayer_put_size(&w->layers[i], out);
-    }
+    for (i = 0; i < w->number; i++) wlayer_put_size(&w->layers[i], out);
     return LAZ_TRUE;
 }
 

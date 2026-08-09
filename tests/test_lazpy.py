@@ -989,6 +989,32 @@ def compressed_chunks(name, records):
     return cpylaz.compress_chunks(items, records, chunk_size)
 
 
+def assert_reproduces_point_block(name, records):
+    """Compressing `records` rebuilds `name`'s point block chunk for chunk.
+
+    Walking the chunks end to end also pins their lengths: the last one has to
+    finish exactly where the chunk table begins.
+    """
+    block = point_block(name)
+    table_start = struct.unpack_from("<q", block, 0)[0]
+
+    position = 8                                   # past the chunk table offset
+    for index, written in enumerate(compressed_chunks(name, records)):
+        assert block[position:position + len(written)] == written, \
+            f"chunk {index} differs"
+        position += len(written)
+
+    assert load(name).header["offset_to_point_data"] + position == table_start
+
+
+def chunked_block(name, chunks):
+    """`chunks` behind a chunk table offset pointing back at the point block,
+    which is how laszip leaves a file it was interrupted writing. The reader
+    then walks the chunks in order, which is all the round trips need."""
+    return (struct.pack("<q", load(name).header["offset_to_point_data"])
+            + b"".join(chunks))
+
+
 @pytest.mark.parametrize("point_format", LEGACY_FORMATS)
 def test_v1_output_is_byte_identical_to_laszip(point_format):
     """The whole point block of a non-chunked v1 file, reproduced exactly."""
@@ -1000,23 +1026,9 @@ def test_v1_output_is_byte_identical_to_laszip(point_format):
 
 @pytest.mark.parametrize("point_format", LEGACY_FORMATS)
 def test_v2_output_is_byte_identical_to_laszip(point_format):
-    """Every chunk of a chunked v2 file, reproduced exactly.
-
-    Walking the chunks end to end also pins their lengths: the last one has to
-    finish exactly where the chunk table begins.
-    """
-    name = f"pt{point_format}_v2.laz"
-    block = point_block(name)
-    table_start = struct.unpack_from("<q", block, 0)[0]
-
-    position = 8                                   # past the chunk table offset
-    for index, written in enumerate(
-            compressed_chunks(name, las_records(f"pt{point_format}_v0.las"))):
-        assert block[position:position + len(written)] == written, \
-            f"chunk {index} differs"
-        position += len(written)
-
-    assert load(name).header["offset_to_point_data"] + position == table_start
+    """Every chunk of a chunked v2 file, reproduced exactly."""
+    assert_reproduces_point_block(f"pt{point_format}_v2.laz",
+                                  las_records(f"pt{point_format}_v0.las"))
 
 
 @pytest.mark.parametrize("point_format", LEGACY_FORMATS)
@@ -1040,19 +1052,40 @@ def test_raw_output_is_byte_identical(point_format):
 # feeds the writers the points laszip actually compressed.
 # ---------------------------------------------------------------------------
 
+def pack_point14(X, Y, Z, intensity, return_number, number_of_returns,
+                 classification_flags, scanner_channel, scan_direction_flag,
+                 edge_of_flight_line, classification, user_data, scan_angle,
+                 point_source_ID, gps_time):
+    """The 30-byte LAS 1.4 point record, from its fields.
+
+    Byte 14 and byte 15 each pack several fields, and both have to agree with
+    raw_write_point14 in the extension, so they are composed in one place.
+    """
+    return struct.pack(
+        "<iiiHBBBBhHd", X, Y, Z, intensity,
+        return_number | (number_of_returns << 4),
+        classification_flags | (scanner_channel << 4) |
+        (scan_direction_flag << 6) | (edge_of_flight_line << 7),
+        classification, user_data, scan_angle, point_source_ID, gps_time)
+
+
+def point14_scanner_channel(record):
+    """The scanner channel back out of a record pack_point14 built."""
+    return (record[15] >> 4) & 3
+
+
 def pack_las14_record(point, items):
     """A decoded point, back in the layout its items have on disk."""
     out = bytearray()
     for item_type, size, _ in items:
         if item_type == ItemType.POINT14:
-            out += struct.pack(
-                "<iiiHBBBBhHd", point.X, point.Y, point.Z, point.intensity,
-                point.extended_return_number |
-                (point.extended_number_of_returns << 4),
-                point.extended_classification_flags |
-                (point.extended_scanner_channel << 4) |
-                (point.scan_direction_flag << 6) |
-                (point.edge_of_flight_line << 7),
+            out += pack_point14(
+                point.X, point.Y, point.Z, point.intensity,
+                point.extended_return_number,
+                point.extended_number_of_returns,
+                point.extended_classification_flags,
+                point.extended_scanner_channel,
+                point.scan_direction_flag, point.edge_of_flight_line,
                 point.extended_classification, point.user_data,
                 point.extended_scan_angle, point.point_source_ID,
                 point.gps_time)
@@ -1079,22 +1112,9 @@ def packed_records(name):
 @pytest.mark.parametrize("point_format", LAS14_FORMATS)
 @pytest.mark.parametrize("version", (3, 4))
 def test_layered_output_is_byte_identical_to_laszip(point_format, version):
-    """Every chunk of a v3 or v4 file, reproduced exactly.
-
-    As on the v2 side, walking the chunks end to end also pins their lengths:
-    the last one has to finish exactly where the chunk table begins.
-    """
+    """Every chunk of a v3 or v4 file, reproduced exactly."""
     name = f"pt{point_format}_v{version}.laz"
-    block = point_block(name)
-    table_start = struct.unpack_from("<q", block, 0)[0]
-
-    position = 8                                   # past the chunk table offset
-    for index, written in enumerate(compressed_chunks(name, packed_records(name))):
-        assert block[position:position + len(written)] == written, \
-            f"chunk {index} differs"
-        position += len(written)
-
-    assert load(name).header["offset_to_point_data"] + position == table_start
+    assert_reproduces_point_block(name, packed_records(name))
 
 
 def test_the_layered_fixtures_switch_scanner_channel_mid_chunk():
@@ -1146,14 +1166,12 @@ def awkward_las14_records(count, items):
         record = bytearray()
         for item_type, size, _ in items:
             if item_type == ItemType.POINT14:
-                record += struct.pack(
-                    "<iiiHBBBBhHd",
+                record += pack_point14(
                     rand.randrange(-2**30, 2**30) if i % 5 == 0 else i * 11,
                     i * -13 if i % 4 else rand.randrange(-2**30, 2**30),
                     (i * i) % 70000, rand.randrange(65536),
-                    return_number | (number_of_returns << 4),
-                    (i % 16) | (scanner_channel << 4) | ((i & 1) << 6) |
-                    (((i >> 1) & 1) << 7),
+                    return_number, number_of_returns,
+                    i % 16, scanner_channel, i & 1, (i >> 1) & 1,
                     rand.randrange(256), rand.randrange(256),
                     rand.randrange(-32768, 32768), rand.randrange(65536),
                     sequences[which])
@@ -1195,18 +1213,14 @@ class TestLayeredPointsReadBack:
 
         # every ordered pair of scanner channels, staying put included, and
         # POINT14 is item 0 so its record is at the front
-        channels = [(record[15] >> 4) & 3 for record in records]
+        channels = [point14_scanner_channel(record) for record in records]
         assert len(set(zip(channels, channels[1:]))) == 16
 
         raw = f"pt{point_format}_v0.las"
         with Reader(rebuilt(raw, b"".join(records), len(records))) as reader:
             expected = reader.checksum()
 
-        # As on the v2 side, a chunk table offset pointing back at the point
-        # block is how laszip leaves a file it was interrupted writing; the
-        # reader then walks the chunks in order, which is all this needs.
-        block = (struct.pack("<q", load(name).header["offset_to_point_data"])
-                 + b"".join(chunks))
+        block = chunked_block(name, chunks)
         with Reader(rebuilt(name, block, len(records))) as reader:
             assert reader.checksum() == expected
 
@@ -1280,11 +1294,7 @@ class TestWrittenPointsReadBack:
         chunks = compressed_chunks(name, records)
         assert len(chunks) > 1
 
-        # A chunk table offset pointing back at the point block is how laszip
-        # leaves a file it was interrupted writing; the reader then walks the
-        # chunks in order, which is all this needs.
-        block = (struct.pack("<q", load(name).header["offset_to_point_data"])
-                 + b"".join(chunks))
+        block = chunked_block(name, chunks)
         with Reader(rebuilt(name, block, len(records))) as reader:
             assert reader.checksum() == expected
 
