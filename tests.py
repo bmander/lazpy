@@ -8,7 +8,8 @@ import cpylaz
 import encoder
 import lazpy
 import models
-from lazpy import Reader, Selective, ItemType, LazError, UnsupportedFileError
+from lazpy import (Compressor, Reader, Selective, ItemType, LazError,
+                   UnsupportedFileError)
 
 
 class TestArithmeticModel:
@@ -510,7 +511,8 @@ class TestCIntegerCompressor:
 # End-to-end reading.
 #
 # testdata/ holds a small file for every point data format (0-10) crossed with
-# every LASzip item version that applies to it, plus reference_hashes.txt: the
+# every LASzip item version that applies to it, a "_pointwise" variant of each
+# legacy format for the non-chunked container, plus reference_hashes.txt: the
 # FNV-1a checksum of every decoded field of every point, produced by laszip
 # itself via tools/lazdump.c. Matching those hashes is the real correctness
 # claim -- the unit tests above only pin the entropy coder.
@@ -579,6 +581,43 @@ def test_reader_reports_its_position(name):
         assert reader.index == 10
         reader.read()
         assert reader.index == 11
+
+
+POINTWISE_FIXTURES = [n for n in FIXTURES if n.endswith("_pointwise.laz")]
+
+
+class TestPointwiseContainer:
+    """
+    LASzip's original container compresses the whole file as one stream with no
+    chunk table, so chunk_size stays U32_MAX, number_chunks stays 0 and
+    read_chunk_table is skipped -- and seeking has nowhere to jump to, so it
+    re-reads from point_start instead.
+
+    Decoding and seeking are already covered: the fixtures are in FIXTURES, so
+    the parametrised tests above run over them. What those cannot see is which
+    container the file actually uses, because a pointwise file read as chunked
+    does not raise -- it just decodes to garbage. So that is what this pins.
+    """
+
+    @staticmethod
+    def compressor_of(name):
+        with Reader(fixture(name)) as reader:
+            return reader.laz_header["compressor"]
+
+    def test_the_suite_has_pointwise_fixtures(self):
+        """Otherwise the parametrised tests below pass over an empty list."""
+        assert POINTWISE_FIXTURES
+
+    @pytest.mark.parametrize("name", POINTWISE_FIXTURES)
+    def test_fixture_really_is_non_chunked(self, name):
+        assert self.compressor_of(name) == Compressor.POINTWISE
+
+    def test_chunked_fixtures_are_still_chunked(self):
+        """Guards the contrast: the rest of testdata/ must stay chunked."""
+        for name in FIXTURES:
+            if name.endswith(".las") or name in POINTWISE_FIXTURES:
+                continue
+            assert self.compressor_of(name) != Compressor.POINTWISE
 
 
 class TestPointSemantics:

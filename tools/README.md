@@ -39,9 +39,13 @@ is to exercise v1 and v4 as well.
 ./mklaz <point_type 0-10> <version 0-4> <npoints> <chunk_size> out.laz
 ```
 
-Version 0 writes uncompressed LAS. The generated points deliberately sweep
-return numbers, scanner channels, classification flags and GPS-time patterns so
-the rare branches of each coder are reached.
+Version 0 writes uncompressed LAS. A chunk size of 0 selects LASzip's original
+`POINTWISE` container -- the whole file as one stream, no chunk table -- which
+only exists for point types 0-5.
+
+The generated points deliberately sweep return numbers, scanner channels,
+classification flags and GPS-time patterns so the rare branches of each coder
+are reached.
 
 ## compare_with_laszip.py
 
@@ -63,6 +67,12 @@ for pt in 0 1 2 3 4 5 6 7 8 9 10; do
     ./mklaz "$pt" "$v" 500 137 "../testdata/pt${pt}_v${v}.$ext"
   done
 done
+
+# non-chunked variants; POINTWISE predates the 1.4 point types
+for pt in 0 1 2 3 4 5; do
+  ./mklaz "$pt" 1 500 0 "../testdata/pt${pt}_v1_pointwise.laz"
+done
+
 : > ../testdata/reference_hashes.txt
 for f in ../testdata/pt*; do
   echo "$(basename "$f") $(./lazdump "$f" --hash)" >> ../testdata/reference_hashes.txt
