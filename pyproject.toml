@@ -47,6 +47,7 @@ sources = [
     "src/laz_writeitem_raw.c",
     "src/laz_writeitem_v1.c",
     "src/laz_writeitem_v2.c",
+    "src/laz_writeitem_v3.c",
     "src/laz_readitem_raw.c",
     "src/laz_readitem_v1.c",
     "src/laz_readitem_v2.c",

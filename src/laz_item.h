@@ -26,6 +26,37 @@
 #include "laz_arithmetic.h"
 #include "laz_intcompressor.h"
 
+/*
+ * Where item `type` lives inside a LazPoint. Extra bytes are the exception:
+ * they go to a caller-supplied buffer, signalled by -1, and an item type
+ * neither direction can code gives -2.
+ *
+ * Both directions need this, because an item coder is handed a pointer into
+ * the point rather than the point itself.
+ */
+static inline I32 laz_item_offset(U32 type)
+{
+    switch (type) {
+    case LAZ_ITEM_POINT10:
+    case LAZ_ITEM_POINT14:
+        return LAZ_POINT_OFFSET_XYZ;
+    case LAZ_ITEM_GPSTIME11:
+        return LAZ_POINT_OFFSET_GPSTIME;
+    case LAZ_ITEM_RGB12:
+    case LAZ_ITEM_RGB14:
+    case LAZ_ITEM_RGBNIR14:
+        return LAZ_POINT_OFFSET_RGB;
+    case LAZ_ITEM_WAVEPACKET13:
+    case LAZ_ITEM_WAVEPACKET14:
+        return LAZ_POINT_OFFSET_WAVEPACKET;
+    case LAZ_ITEM_BYTE:
+    case LAZ_ITEM_BYTE14:
+        return -1;
+    default:
+        return -2;      /* unsupported */
+    }
+}
+
 /* Fields of the 20-byte legacy point record, as held in a reader's last_item.
  * The v2 reader adds bitfield accessors of its own on top of these. */
 #define P10_X(li)               (*(I32 *)((li) + 0))

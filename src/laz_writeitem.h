@@ -60,8 +60,12 @@ static inline void laz_writeitem_destroy(LazWriteItem *w)
 LazWriteItem *laz_writeitem_raw_point10(LazOutStream *out);
 LazWriteItem *laz_writeitem_raw_gpstime11(LazOutStream *out);
 LazWriteItem *laz_writeitem_raw_rgb12(LazOutStream *out);
+LazWriteItem *laz_writeitem_raw_rgbnir14(LazOutStream *out);
 LazWriteItem *laz_writeitem_raw_wavepacket13(LazOutStream *out);
 LazWriteItem *laz_writeitem_raw_byte(LazOutStream *out, U32 number);
+/* gathers the LAS 1.4 fields of a LazPoint back into the 30-byte record, so it
+ * lives with the writers that share that layout (laz_writeitem_v3.c) */
+LazWriteItem *laz_writeitem_raw_point14(LazOutStream *out);
 
 /* --- v1 compressed writers (laswriteitemcompressed_v1.cpp) --- */
 LazWriteItem *laz_writeitem_v1_point10(LazEncoder *enc);
@@ -77,8 +81,28 @@ LazWriteItem *laz_writeitem_v2_rgb12(LazEncoder *enc);
 LazWriteItem *laz_writeitem_v2_byte(LazEncoder *enc, U32 number);
 
 /*
- * Picks the writer for one item of a LASzip VLR, mirroring make_raw_reader and
- * make_compressed_reader in laz_readpoint.c. Returns NULL for a type or
+ * --- v3/v4 layered writers (laswriteitemcompressed_v3.cpp / _v4.cpp) ---
+ *
+ * `enc` is not encoded through: these writers hold their own encoder per
+ * layer, and take the shared one only to reach the chunk's output stream,
+ * exactly as the layered readers take the shared decoder only for its input
+ * stream.
+ */
+LazWriteItem *laz_writeitem_v3_point14(LazEncoder *enc);
+LazWriteItem *laz_writeitem_v3_rgb14(LazEncoder *enc);
+LazWriteItem *laz_writeitem_v3_rgbnir14(LazEncoder *enc);
+LazWriteItem *laz_writeitem_v3_wavepacket14(LazEncoder *enc);
+LazWriteItem *laz_writeitem_v3_byte14(LazEncoder *enc, U32 number);
+
+LazWriteItem *laz_writeitem_v4_point14(LazEncoder *enc);
+LazWriteItem *laz_writeitem_v4_rgb14(LazEncoder *enc);
+LazWriteItem *laz_writeitem_v4_rgbnir14(LazEncoder *enc);
+LazWriteItem *laz_writeitem_v4_wavepacket14(LazEncoder *enc);
+LazWriteItem *laz_writeitem_v4_byte14(LazEncoder *enc, U32 number);
+
+/*
+ * Picks the writer for one item of a LASzip VLR, mirroring laz_readitem_new_raw
+ * and make_compressed_reader on the read side. Returns NULL for a type or
  * version with no writer, which the caller reports.
  *
  * item->version selects the encoding, exactly as the VLR declares it: 0 means

@@ -109,9 +109,18 @@ LazOutStream *laz_outstream_new_file(void *py_fp);
 LazOutStream *laz_outstream_new_array(void);
 const U8 *laz_outstream_array_data(LazOutStream *s, I64 *size);
 
+/* Drops everything written so far but keeps the buffer, so the next chunk
+ * refills it. LASzip's ByteStreamOutArray::seek(0); the layered v3/v4 writers
+ * recycle one array sink per layer across every chunk of a file. */
+void laz_outstream_array_rewind(LazOutStream *s);
+
 void laz_outstream_destroy(LazOutStream *s);
 
 static inline void laz_outstream_put_bytes(LazOutStream *s, const U8 *b, I64 n)
 { s->put_bytes(s, b, n); }
+
+/* The one multi-byte field a writer emits outside the entropy coder: the
+ * layered chunk's per-layer byte counts. */
+void laz_outstream_put32(LazOutStream *s, U32 value);
 
 #endif /* LAZ_STREAM_H */

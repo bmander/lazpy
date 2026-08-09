@@ -58,6 +58,7 @@ static RawWriter *raw_new(LazOutStream *out,
 RAW_FIXED_WRITER(raw_write_point10,     20)
 RAW_FIXED_WRITER(raw_write_gpstime11,    8)
 RAW_FIXED_WRITER(raw_write_rgb12,        6)
+RAW_FIXED_WRITER(raw_write_rgbnir14,     8)
 RAW_FIXED_WRITER(raw_write_wavepacket13, 29)
 
 static BOOL raw_write_byte(LazWriteItem *self, const U8 *item, U32 *context)
@@ -75,6 +76,9 @@ LazWriteItem *laz_writeitem_raw_gpstime11(LazOutStream *out)
 
 LazWriteItem *laz_writeitem_raw_rgb12(LazOutStream *out)
 { return (LazWriteItem *)raw_new(out, raw_write_rgb12, 0); }
+
+LazWriteItem *laz_writeitem_raw_rgbnir14(LazOutStream *out)
+{ return (LazWriteItem *)raw_new(out, raw_write_rgbnir14, 0); }
 
 LazWriteItem *laz_writeitem_raw_wavepacket13(LazOutStream *out)
 { return (LazWriteItem *)raw_new(out, raw_write_wavepacket13, 0); }

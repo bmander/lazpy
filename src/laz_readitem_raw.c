@@ -156,3 +156,20 @@ LazReadItem *laz_readitem_raw_byte(LazStream *in, U32 number)
 
 LazReadItem *laz_readitem_raw_point14(LazStream *in)
 { return (LazReadItem *)raw_new(in, raw_read_point14, 0); }
+
+LazReadItem *laz_readitem_new_raw(const LazItem *item, LazStream *in)
+{
+    switch (item->type) {
+    case LAZ_ITEM_POINT10:      return laz_readitem_raw_point10(in);
+    case LAZ_ITEM_GPSTIME11:    return laz_readitem_raw_gpstime11(in);
+    case LAZ_ITEM_RGB12:
+    case LAZ_ITEM_RGB14:        return laz_readitem_raw_rgb12(in);
+    case LAZ_ITEM_RGBNIR14:     return laz_readitem_raw_rgbnir14(in);
+    case LAZ_ITEM_WAVEPACKET13:
+    case LAZ_ITEM_WAVEPACKET14: return laz_readitem_raw_wavepacket13(in);
+    case LAZ_ITEM_BYTE:
+    case LAZ_ITEM_BYTE14:       return laz_readitem_raw_byte(in, item->size);
+    case LAZ_ITEM_POINT14:      return laz_readitem_raw_point14(in);
+    default:                    return NULL;
+    }
+}
