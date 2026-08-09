@@ -256,21 +256,21 @@ static void p14_create_and_init(Point14v3 *r, U32 context, const U8 *item)
         laz_bank_setup(c->m_return_number, c->created_rn, 16, 16);
         laz_symbol_model_setup(&c->m_return_number_gps_same, 13, LAZ_FALSE);
 
-        laz_ic_setup(&c->ic_dX, &r->channel_returns_XY.dec, 32, 2, 8, 0);
-        laz_ic_setup(&c->ic_dY, &r->channel_returns_XY.dec, 32, 22, 8, 0);
-        laz_ic_setup(&c->ic_Z, &r->Z.dec, 32, 20, 8, 0);
+        laz_ic_setup_dec(&c->ic_dX, &r->channel_returns_XY.dec, 32, 2, 8, 0);
+        laz_ic_setup_dec(&c->ic_dY, &r->channel_returns_XY.dec, 32, 22, 8, 0);
+        laz_ic_setup_dec(&c->ic_Z, &r->Z.dec, 32, 20, 8, 0);
 
         laz_bank_setup(c->m_classification, c->created_cls, 64, 256);
         laz_bank_setup(c->m_flags, c->created_flg, 64, 64);
         laz_bank_setup(c->m_user_data, c->created_usr, 64, 256);
 
-        laz_ic_setup(&c->ic_intensity, &r->intensity.dec, 16, 4, 8, 0);
-        laz_ic_setup(&c->ic_scan_angle, &r->scan_angle.dec, 16, 2, 8, 0);
-        laz_ic_setup(&c->ic_point_source_ID, &r->point_source.dec, 16, 1, 8, 0);
+        laz_ic_setup_dec(&c->ic_intensity, &r->intensity.dec, 16, 4, 8, 0);
+        laz_ic_setup_dec(&c->ic_scan_angle, &r->scan_angle.dec, 16, 2, 8, 0);
+        laz_ic_setup_dec(&c->ic_point_source_ID, &r->point_source.dec, 16, 1, 8, 0);
 
         laz_symbol_model_setup(&c->m_gpstime_multi, LASZIP_GPSTIME_MULTI_TOTAL, LAZ_FALSE);
         laz_symbol_model_setup(&c->m_gpstime_0diff, 5, LAZ_FALSE);
-        laz_ic_setup(&c->ic_gpstime, &r->gps_time.dec, 32, 9, 8, 0);
+        laz_ic_setup_dec(&c->ic_gpstime, &r->gps_time.dec, 32, 9, 8, 0);
 
         c->created = LAZ_TRUE;
     }
@@ -1092,10 +1092,10 @@ static void wave14_create_and_init(Wave14v3 *r, U32 context, const U8 *item)
         if (!c->created) {
             laz_symbol_model_setup(&c->m_packet_index, 256, LAZ_FALSE);
             for (i = 0; i < 4; i++) laz_symbol_model_setup(&c->m_offset_diff[i], 4, LAZ_FALSE);
-            laz_ic_setup(&c->ic_offset_diff, &r->wavepacket.dec, 32, 1, 8, 0);
-            laz_ic_setup(&c->ic_packet_size, &r->wavepacket.dec, 32, 1, 8, 0);
-            laz_ic_setup(&c->ic_return_point, &r->wavepacket.dec, 32, 1, 8, 0);
-            laz_ic_setup(&c->ic_xyz, &r->wavepacket.dec, 32, 3, 8, 0);
+            laz_ic_setup_dec(&c->ic_offset_diff, &r->wavepacket.dec, 32, 1, 8, 0);
+            laz_ic_setup_dec(&c->ic_packet_size, &r->wavepacket.dec, 32, 1, 8, 0);
+            laz_ic_setup_dec(&c->ic_return_point, &r->wavepacket.dec, 32, 1, 8, 0);
+            laz_ic_setup_dec(&c->ic_xyz, &r->wavepacket.dec, 32, 3, 8, 0);
             c->created = LAZ_TRUE;
         }
         laz_symbol_model_init(&c->m_packet_index, NULL);

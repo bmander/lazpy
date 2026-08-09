@@ -194,16 +194,16 @@ LazReadItem *laz_readitem_v2_point10(LazDecoder *dec)
     r->base.dec = dec;
 
     laz_symbol_model_setup(&r->m_changed_values, 64, LAZ_FALSE);
-    laz_ic_setup(&r->ic_intensity, dec, 16, 4, 8, 0);
+    laz_ic_setup_dec(&r->ic_intensity, dec, 16, 4, 8, 0);
     laz_symbol_model_setup(&r->m_scan_angle_rank[0], 256, LAZ_FALSE);
     laz_symbol_model_setup(&r->m_scan_angle_rank[1], 256, LAZ_FALSE);
-    laz_ic_setup(&r->ic_point_source_ID, dec, 16, 1, 8, 0);
+    laz_ic_setup_dec(&r->ic_point_source_ID, dec, 16, 1, 8, 0);
     laz_bank_setup(r->m_bit_byte, r->created_bit_byte, 256, 256);
     laz_bank_setup(r->m_classification, r->created_classification, 256, 256);
     laz_bank_setup(r->m_user_data, r->created_user_data, 256, 256);
-    laz_ic_setup(&r->ic_dx, dec, 32, 2, 8, 0);
-    laz_ic_setup(&r->ic_dy, dec, 32, 22, 8, 0);
-    laz_ic_setup(&r->ic_z, dec, 32, 20, 8, 0);
+    laz_ic_setup_dec(&r->ic_dx, dec, 32, 2, 8, 0);
+    laz_ic_setup_dec(&r->ic_dy, dec, 32, 22, 8, 0);
+    laz_ic_setup_dec(&r->ic_z, dec, 32, 20, 8, 0);
     return (LazReadItem *)r;
 }
 
@@ -351,7 +351,7 @@ LazReadItem *laz_readitem_v2_gpstime11(LazDecoder *dec)
 
     laz_symbol_model_setup(&r->m_gpstime_multi, LASZIP_GPSTIME_MULTI_TOTAL, LAZ_FALSE);
     laz_symbol_model_setup(&r->m_gpstime_0diff, 6, LAZ_FALSE);
-    laz_ic_setup(&r->ic_gpstime, dec, 32, 9, 8, 0);
+    laz_ic_setup_dec(&r->ic_gpstime, dec, 32, 9, 8, 0);
     return (LazReadItem *)r;
 }
 

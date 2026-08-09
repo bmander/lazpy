@@ -146,12 +146,12 @@ LazReadItem *laz_readitem_v1_point10(LazDecoder *dec)
     r->base.destroy = p10v1_destroy;
     r->base.dec = dec;
 
-    laz_ic_setup(&r->ic_dx, dec, 32, 1, 8, 0);
-    laz_ic_setup(&r->ic_dy, dec, 32, 20, 8, 0);
-    laz_ic_setup(&r->ic_z, dec, 32, 20, 8, 0);
-    laz_ic_setup(&r->ic_intensity, dec, 16, 1, 8, 0);
-    laz_ic_setup(&r->ic_scan_angle_rank, dec, 8, 2, 8, 0);
-    laz_ic_setup(&r->ic_point_source_ID, dec, 16, 1, 8, 0);
+    laz_ic_setup_dec(&r->ic_dx, dec, 32, 1, 8, 0);
+    laz_ic_setup_dec(&r->ic_dy, dec, 32, 20, 8, 0);
+    laz_ic_setup_dec(&r->ic_z, dec, 32, 20, 8, 0);
+    laz_ic_setup_dec(&r->ic_intensity, dec, 16, 1, 8, 0);
+    laz_ic_setup_dec(&r->ic_scan_angle_rank, dec, 8, 2, 8, 0);
+    laz_ic_setup_dec(&r->ic_point_source_ID, dec, 16, 1, 8, 0);
     laz_symbol_model_setup(&r->m_changed_values, 64, LAZ_FALSE);
     laz_bank_setup(r->m_bit_byte, r->created_bit_byte, 256, 256);
     laz_bank_setup(r->m_classification, r->created_classification, 256, 256);
@@ -256,7 +256,7 @@ LazReadItem *laz_readitem_v1_gpstime11(LazDecoder *dec)
     r->base.dec = dec;
     laz_symbol_model_setup(&r->m_gpstime_multi, LASZIP_GPSTIME_MULTIMAX, LAZ_FALSE);
     laz_symbol_model_setup(&r->m_gpstime_0diff, 3, LAZ_FALSE);
-    laz_ic_setup(&r->ic_gpstime, dec, 32, 6, 8, 0);
+    laz_ic_setup_dec(&r->ic_gpstime, dec, 32, 6, 8, 0);
     return (LazReadItem *)r;
 }
 
@@ -322,7 +322,7 @@ LazReadItem *laz_readitem_v1_rgb12(LazDecoder *dec)
     r->base.destroy = rgb12v1_destroy;
     r->base.dec = dec;
     laz_symbol_model_setup(&r->m_byte_used, 64, LAZ_FALSE);
-    laz_ic_setup(&r->ic_rgb, dec, 8, 6, 8, 0);
+    laz_ic_setup_dec(&r->ic_rgb, dec, 8, 6, 8, 0);
     return (LazReadItem *)r;
 }
 
@@ -371,7 +371,7 @@ LazReadItem *laz_readitem_v1_byte(LazDecoder *dec, U32 number)
     r->base.destroy = bytev1_destroy;
     r->base.dec = dec;
     r->number = number;
-    laz_ic_setup(&r->ic_byte, dec, 8, number, 8, 0);
+    laz_ic_setup_dec(&r->ic_byte, dec, 8, number, 8, 0);
     r->last_item = (U8 *)calloc(number ? number : 1, 1);
     if (!r->last_item) { free(r); return NULL; }
     return (LazReadItem *)r;
@@ -504,9 +504,9 @@ LazReadItem *laz_readitem_v1_wavepacket13(LazDecoder *dec)
 
     laz_symbol_model_setup(&r->m_packet_index, 256, LAZ_FALSE);
     for (i = 0; i < 4; i++) laz_symbol_model_setup(&r->m_offset_diff[i], 4, LAZ_FALSE);
-    laz_ic_setup(&r->ic_offset_diff, dec, 32, 1, 8, 0);
-    laz_ic_setup(&r->ic_packet_size, dec, 32, 1, 8, 0);
-    laz_ic_setup(&r->ic_return_point, dec, 32, 1, 8, 0);
-    laz_ic_setup(&r->ic_xyz, dec, 32, 3, 8, 0);
+    laz_ic_setup_dec(&r->ic_offset_diff, dec, 32, 1, 8, 0);
+    laz_ic_setup_dec(&r->ic_packet_size, dec, 32, 1, 8, 0);
+    laz_ic_setup_dec(&r->ic_return_point, dec, 32, 1, 8, 0);
+    laz_ic_setup_dec(&r->ic_xyz, dec, 32, 3, 8, 0);
     return (LazReadItem *)r;
 }

@@ -13,6 +13,9 @@
  * LAZ point ultimately comes through here: a symbol model picks the magnitude
  * bucket k, then a per-k model (plus raw bits for large k) locates the value
  * inside that bucket.
+ *
+ * One instance codes in one direction: set it up with a decoder or with an
+ * encoder, never both.
  */
 #ifndef LAZ_INTCOMPRESSOR_H
 #define LAZ_INTCOMPRESSOR_H
@@ -20,8 +23,9 @@
 #include "laz_arithmetic.h"
 
 typedef struct {
-    LazDecoder *dec;        /* borrowed */
-    U32 k;                  /* magnitude bucket of the last corrector read */
+    LazDecoder *dec;        /* borrowed; NULL when compressing */
+    LazEncoder *enc;        /* borrowed; NULL when decompressing */
+    U32 k;                  /* magnitude bucket of the last corrector coded */
 
     U32 bits;
     U32 contexts;
@@ -40,11 +44,15 @@ typedef struct {
 } LazIntCompressor;
 
 /* bits_high defaults to 8 and range to 0 in LASzip; pass them explicitly. */
-void laz_ic_setup(LazIntCompressor *ic, LazDecoder *dec, U32 bits, U32 contexts,
-                  U32 bits_high, U32 range);
+void laz_ic_setup_dec(LazIntCompressor *ic, LazDecoder *dec, U32 bits, U32 contexts,
+                      U32 bits_high, U32 range);
+void laz_ic_setup_enc(LazIntCompressor *ic, LazEncoder *enc, U32 bits, U32 contexts,
+                      U32 bits_high, U32 range);
 BOOL laz_ic_init_decompressor(LazIntCompressor *ic);
+BOOL laz_ic_init_compressor(LazIntCompressor *ic);
 void laz_ic_free(LazIntCompressor *ic);
 
 I32 laz_ic_decompress(LazIntCompressor *ic, I32 pred, U32 context);
+void laz_ic_compress(LazIntCompressor *ic, I32 pred, I32 real, U32 context);
 
 #endif /* LAZ_INTCOMPRESSOR_H */
