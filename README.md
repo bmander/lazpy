@@ -1,6 +1,44 @@
 # lazpy
 
-lazpy is a Python package for reading and writing LAZ files.
+A reader for LAS and LAZ point clouds: a port of [LASzip](https://github.com/LASzip/LASzip)'s
+decompressor to C, with a Python front end.
+
+Every LAZ point format and every LASzip item version is supported, and decoding
+is verified against laszip itself, field for field.
+
+```python
+from lazpy import Reader
+
+with Reader("cloud.laz") as reader:
+    print(reader.num_points, reader.point_format)
+
+    for point in reader:
+        print(point.X, point.Y, point.Z, point.classification)
+
+    reader.seek(1_000_000)          # random access
+    point = reader.read()
+    x, y, z = reader.scale(point)   # georeferenced floats
+```
+
+## Status
+
+Reading is complete. Writing is not implemented — `ArithmeticEncoder` raises
+`NotImplementedError`.
+
+| Point data format | Items | LAZ versions |
+|---|---|---|
+| 0–5 | POINT10, GPSTIME11, RGB12, WAVEPACKET13, BYTE | uncompressed, v1, v2 |
+| 6–10 | POINT14, RGB14, RGBNIR14, WAVEPACKET14, BYTE14 | uncompressed, v3, v4 |
+
+Also handled: LAS 1.0–1.4 headers, variable-length records, extra bytes,
+pointwise-chunked and layered-chunked containers, fixed and adaptive chunk
+tables, files whose chunk table is missing because the compressor was
+interrupted, and selective decompression of LAS 1.4 attribute layers.
+
+Little-endian hosts only; the build fails there rather than mis-decode.
+
+Anything that goes wrong reading a file raises `lazpy.LazError`, except an error
+from the underlying file object, which propagates as itself.
 
 ## Building
 
@@ -8,8 +46,94 @@ lazpy is a Python package for reading and writing LAZ files.
 python setup.py build_ext --inplace
 ```
 
-## Run tests
+## Tests
 
 ```bash
+pip install pytest
 pytest tests.py
 ```
+
+The suite has two halves. The unit tests pin the entropy coder — arithmetic
+models, decoder and integer decompressor — against known bit-exact vectors and
+against the pure-Python reference implementations in `models.py`, `encoder.py`
+and `compressor.py`.
+
+The end-to-end tests read `testdata/`, which holds a small file for every point
+data format crossed with every item version that applies to it, and compare a
+checksum of every decoded field of every point against
+`testdata/reference_hashes.txt` — values produced by laszip itself. A single
+wrong bit anywhere changes the hash.
+
+## Verification
+
+Correctness is established by decoding the same files with laszip and with
+lazpy and comparing every field of every point:
+
+- **33 format × version combinations** decode to identical whole-file
+  checksums, repeated across chunk sizes of 1, 137, 3000, one less than the
+  point count, exactly the point count, and larger than the point count.
+- **43,271,750 points** of a real-world format-1 survey file produce a
+  checksum identical to laszip's.
+- **Random access** lands on the same point a sequential read would, forwards,
+  backwards, repeated, and across chunk boundaries, for all 33 files.
+
+`tools/` holds the harness:
+
+- `lazdump.c` — links against liblaszip and dumps every decoded field, either
+  as text (`lazdump in.laz out.txt`) or as a whole-file checksum
+  (`lazdump in.laz --hash`).
+- `compare_with_laszip.py` — reads the same file with lazpy and compares,
+  reporting the first mismatching field.
+
+Both are only needed to regenerate or extend the reference data; running the
+test suite does not require laszip.
+
+## Performance
+
+Decoding the 43M-point file above:
+
+| | time |
+|---|---|
+| laszip (its own C++ reader) | 51 s |
+| lazpy | 38 s |
+
+Per-point iteration through the Python API runs at roughly 1.3M points/sec; the
+in-C `checksum()` path is faster still. `Reader.read()` returns the reader's own
+`Point` object, refilled in place, so iterating a large file does not allocate
+an object per point — call `point.copy()` to keep one. It also holds the GIL:
+decoding a single point costs less than releasing and reacquiring it. The bulk
+paths, `checksum()` and `seek()`, do release it.
+
+For LAS 1.4 files, `decompress_selective` skips whole attribute layers:
+
+```python
+from lazpy import Reader, Selective
+
+# decode only position; leave intensity, classification, GPS time et al. packed
+mask = Selective.CHANNEL_RETURNS_XY | Selective.Z
+with Reader("cloud.laz", decompress_selective=mask) as reader:
+    ...
+```
+
+## Layout
+
+| | |
+|---|---|
+| `lazpy.py` | header and VLR parsing, the `Reader` API |
+| `cpylazmodule.c` | Python bindings |
+| `src/laz_stream.*` | buffered file and in-memory byte streams |
+| `src/laz_arithmetic.*` | arithmetic models and decoder |
+| `src/laz_intcompressor.*` | entropy-coded integer decompressor |
+| `src/laz_readitem_raw.c` | uncompressed item readers |
+| `src/laz_readitem_v1.c` | LASzip 1.0 item readers |
+| `src/laz_readitem_v2.c` | LASzip 2.0 item readers |
+| `src/laz_readitem_v3.c` | layered LAS 1.4 item readers, v3 and v4 |
+| `src/laz_readpoint.c` | chunking, chunk tables, seeking |
+| `models.py`, `encoder.py`, `compressor.py` | pure-Python reference implementations, used as a test oracle |
+
+## References
+
+- [LAS 1.2 specification](https://www.asprs.org/a/society/committees/standards/asprs_las_format_v12.pdf)
+- [LAS 1.4 specification](https://www.asprs.org/wp-content/uploads/2010/12/LAS_1_4_r13.pdf)
+- [LASzip](https://github.com/LASzip/LASzip) — the reference implementation this
+  is ported from, by Martin Isenburg / rapidlasso.

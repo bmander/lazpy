@@ -1,15 +1,39 @@
+"""Read LAS and LAZ point cloud files.
+
+Header and variable-length-record parsing happen here; everything from the
+first point onward is handled by the ``cpylaz`` C extension, which is a port of
+LASzip's decompressor.
+
+    >>> reader = Reader("cloud.laz")
+    >>> reader.num_points
+    43271750
+    >>> for point in reader:
+    ...     print(point.X, point.Y, point.Z, point.classification)
+
+LAS file specification
+    1.2: https://www.asprs.org/a/society/committees/standards/asprs_las_format_v12.pdf
+    1.4: https://www.asprs.org/wp-content/uploads/2010/12/LAS_1_4_r13.pdf
+"""
+
 from enum import IntEnum
 import sys
-from utils import unsigned_int, u32_array, u64_array, double, cstr, \
-    signed_int
-from cpylaz import ArithmeticDecoder, IntegerCompressor
-import readers as rd
 
-# LAS file specification
-# 1.2:
-# https://www.asprs.org/a/society/committees/standards/asprs_las_format_v12.pdf
-# 1.4:
-# https://www.asprs.org/wp-content/uploads/2010/12/LAS_1_4_r13.pdf
+from cpylaz import PointReader, Point, LazError  # noqa: F401 (re-exported)
+from utils import unsigned_int, signed_int, u32_array, u64_array, double, cstr
+
+__all__ = ["Reader", "Point", "Compressor", "Coder", "ItemType",
+           "Selective", "LazError", "UnsupportedFileError"]
+
+LASZIP_VLR_RECORD_ID = 22204
+LASZIP_VLR_USER_ID = b"laszip encoded"
+
+
+# LazError is defined in the C extension so decode failures raised from C and
+# header failures raised from Python are one catchable category.
+
+
+class UnsupportedFileError(LazError):
+    """Raised for a well-formed file whose encoding lazpy cannot handle."""
 
 
 class Compressor(IntEnum):
@@ -21,6 +45,30 @@ class Compressor(IntEnum):
 
 class Coder(IntEnum):
     ARITHMETIC = 0
+
+
+class Selective(IntEnum):
+    """Attributes to decode, for the layered LAS 1.4 point formats.
+
+    These map to the byte layers of a v3/v4 chunk. Skipping a layer avoids its
+    entropy decoding entirely, so reading only XY out of a format-6 file is
+    substantially faster than reading everything.
+    """
+    CHANNEL_RETURNS_XY = 0x00000000   # always decoded
+    Z = 0x00000001
+    CLASSIFICATION = 0x00000002
+    FLAGS = 0x00000004
+    INTENSITY = 0x00000008
+    SCAN_ANGLE = 0x00000010
+    USER_DATA = 0x00000020
+    POINT_SOURCE = 0x00000040
+    GPS_TIME = 0x00000080
+    RGB = 0x00000100
+    NIR = 0x00000200
+    WAVEPACKET = 0x00000400
+    BYTE0 = 0x00010000
+    EXTRA_BYTES = 0xFFFF0000
+    ALL = 0xFFFFFFFF
 
 
 class ItemType(IntEnum):
@@ -41,70 +89,215 @@ class ItemType(IntEnum):
     BYTE14 = 14
 
 
-TYPE_RAW_READER = {
-    ItemType.POINT10: rd.las_read_item_raw_point10_le,
-    ItemType.GPSTIME11: rd.las_read_item_raw_gpstime11_le,
-    # ItemType.RGB12: las_read_item_raw_rgb12_le,
-    # ItemType.BYTE: las_read_item_raw_byte_le,
-    # ItemType.RGBNIR14: las_read_item_raw_rgbnir14_le,
-    # ItemType.WAVEPACKET13: las_read_item_raw_wavepacket13_le,
+# Point data record sizes for formats 0-10, and which optional items each has.
+# Mirrors LASzip::setup(); anything beyond these sizes is extra bytes.
+_POINT_FORMATS = {
+    #  (base_size, gps_time, rgb,   nir,   wavepacket, point14)
+    0:  (20,       False,    False, False, False,      False),
+    1:  (28,       True,     False, False, False,      False),
+    2:  (26,       False,    True,  False, False,      False),
+    3:  (34,       True,     True,  False, False,      False),
+    4:  (57,       True,     False, False, True,       False),
+    5:  (63,       True,     True,  False, True,       False),
+    6:  (30,       False,    False, False, False,      True),
+    7:  (36,       False,    True,  False, False,      True),
+    8:  (38,       False,    True,  True,  False,      True),
+    9:  (59,       False,    False, False, True,       True),
+    10: (67,       False,    True,  True,  True,       True),
 }
 
 
-TYPE_VERSION_COMPRESSED_READER = {
-    (ItemType.POINT10, 1): rd.read_item_compressed_point10_v1,
-    (ItemType.POINT10, 2): rd.read_item_compressed_point10_v2,
-    (ItemType.GPSTIME11, 1): rd.read_item_compressed_gpstime11_v1,
-    (ItemType.GPSTIME11, 2): rd.read_item_compressed_gpstime11_v2,
-    (ItemType.RGB12, 1): rd.read_item_compressed_rgb12_v1,
-    (ItemType.RGB12, 2): rd.read_item_compressed_rgb12_v2,
-    (ItemType.BYTE, 1): rd.read_item_compressed_byte_v1,
-    (ItemType.BYTE, 2): rd.read_item_compressed_byte_v2,
-    (ItemType.POINT14, 3): rd.read_item_compressed_point14_v3,
-    (ItemType.POINT14, 4): rd.read_item_compressed_point14_v4,
-    (ItemType.RGB14, 3): rd.read_item_compressed_rgb12_v3,
-    (ItemType.RGB14, 4): rd.read_item_compressed_rgb12_v4,
-    (ItemType.RGBNIR14, 3): rd.read_item_compressed_rgbnir14_v3,
-    (ItemType.RGBNIR14, 4): rd.read_item_compressed_rgbnir14_v4,
-    (ItemType.BYTE14, 3): rd.read_item_compressed_byte_v3,
-    (ItemType.BYTE14, 4): rd.read_item_compressed_byte_v4,
-    (ItemType.WAVEPACKET13, 1):
-        rd.read_item_compressed_wavepacket13_v1,
-    (ItemType.WAVEPACKET14, 3):
-        rd.read_item_compressed_wavepacket14_v3,
-    (ItemType.WAVEPACKET14, 4):
-        rd.read_item_compressed_wavepacket14_v4
-}
+def items_for_point_format(point_format, point_size):
+    """Derive the LASzip item layout of an *uncompressed* point record.
+
+    Compressed files carry this list explicitly in the LASzip VLR; for plain
+    LAS it has to be reconstructed from the point format and record length,
+    with any surplus bytes becoming a trailing BYTE item.
+
+    Returns a list of ``(type, size, version)`` triples with version 0.
+    """
+    try:
+        base, gps, rgb, nir, wave, point14 = _POINT_FORMATS[point_format]
+    except KeyError:
+        raise UnsupportedFileError(
+            f"unknown point data format {point_format}") from None
+
+    extra = point_size - base
+    if extra < 0:
+        raise LazError(
+            f"point size {point_size} is {-extra} bytes too small "
+            f"for point data format {point_format}")
+
+    items = [(ItemType.POINT14 if point14 else ItemType.POINT10,
+              30 if point14 else 20, 0)]
+    if gps:
+        items.append((ItemType.GPSTIME11, 8, 0))
+    if rgb:
+        if point14:
+            items.append((ItemType.RGBNIR14, 8, 0) if nir
+                         else (ItemType.RGB14, 6, 0))
+        else:
+            items.append((ItemType.RGB12, 6, 0))
+    if wave:
+        items.append((ItemType.WAVEPACKET14 if point14 else ItemType.WAVEPACKET13,
+                      29, 0))
+    if extra:
+        items.append((ItemType.BYTE14 if point14 else ItemType.BYTE, extra, 0))
+    return items
 
 
 class Reader:
-    def __init__(self):
-        pass
+    """Sequential and random access to the points of a LAS or LAZ file."""
 
-    def _init_point_reader_functions(self):
+    HEADER_FORMAT_12 = (
+        ('file_signature', 4, cstr),
+        ('file_source_id', 2, unsigned_int),
+        ('global_encoding', 2, unsigned_int),
+        ('guid_data_1', 4, unsigned_int),
+        ('guid_data_2', 2, unsigned_int),
+        ('guid_data_3', 2, unsigned_int),
+        ('guid_data_4', 8, cstr),
+        ('version_major', 1, unsigned_int),
+        ('version_minor', 1, unsigned_int),
+        ('system_identifier', 32, cstr),
+        ('generating_software', 32, cstr),
+        ('file_creation_day', 2, unsigned_int),
+        ('file_creation_year', 2, unsigned_int),
+        ('header_size', 2, unsigned_int),
+        ('offset_to_point_data', 4, unsigned_int),
+        ('number_of_variable_length_records', 4, unsigned_int),
+        ('point_data_format_id', 1, unsigned_int),
+        ('point_data_record_length', 2, unsigned_int),
+        ('number_of_point_records', 4, unsigned_int),
+        ('number_of_points_by_return', 4 * 5, u32_array),
+        ('x_scale_factor', 8, double),
+        ('y_scale_factor', 8, double),
+        ('z_scale_factor', 8, double),
+        ('x_offset', 8, double),
+        ('y_offset', 8, double),
+        ('z_offset', 8, double),
+        ('max_x', 8, double),
+        ('min_x', 8, double),
+        ('max_y', 8, double),
+        ('min_y', 8, double),
+        ('max_z', 8, double),
+        ('min_z', 8, double),
+    )
 
-        # get raw reader functions
-        self.readers_raw = []
-        for item in self.laz_header['items']:
-            func = TYPE_RAW_READER.get(item['type'])
+    HEADER_FORMAT_13 = (
+        ('start_of_waveform_data_packet_record', 8, unsigned_int),
+    )
 
-            if func is None:
-                raise Exception("Unknown item type")
+    HEADER_FORMAT_14 = (
+        ('start_of_first_extended_variable_length_record', 8, unsigned_int),
+        ('number_of_extended_variable_length_records', 4, unsigned_int),
+        ('extended_number_of_point_records', 8, unsigned_int),
+        ('extended_number_of_points_by_return', 8 * 15, u64_array),
+    )
 
-            self.readers_raw.append(func)
+    def __init__(self, filename=None, decompress_selective=None):
+        """Open *filename*, if given.
 
-        # get compressed reader functions
-        self.readers_compressed = []
-        for item in self.laz_header['items']:
-            key = (item['type'], item['version'])
+        ``decompress_selective`` is a bitmask of ``Selective`` flags naming the
+        attributes worth decoding. It only has an effect on the layered LAS 1.4
+        formats (6-10), where each attribute is a separately skippable byte
+        layer; everything else always decodes in full. Attributes that are
+        skipped keep the value they had in the first point of the chunk.
+        """
+        self.fp = None
+        self.header = None
+        self.laz_header = None
+        self._reader = None
+        self._owns_fp = False
+        self.decompress_selective = (Selective.ALL if decompress_selective is None
+                                     else int(decompress_selective))
+        if filename is not None:
+            self.open(filename)
 
-            if key not in TYPE_VERSION_COMPRESSED_READER:
-                raise Exception("Unkown item type/version")
+    # -- construction ----------------------------------------------------
 
-            compressed_reader_class = TYPE_VERSION_COMPRESSED_READER[key]
-            compressed_reader = compressed_reader_class(self.dec)
+    def open(self, filename):
+        """Open a file by path. Also accepts an already-open binary file."""
+        if sys.byteorder != 'little':
+            raise UnsupportedFileError("only little-endian hosts are supported")
 
-            self.readers_compressed.append(compressed_reader)
+        if hasattr(filename, 'read'):
+            self.fp = filename
+            self._owns_fp = False
+        else:
+            self.fp = open(filename, 'rb')
+            self._owns_fp = True
+
+        try:
+            self._setup()
+        except Exception:
+            self.close()
+            raise
+        return self
+
+    def _setup(self):
+        self.header = self._read_las_header(self.fp)
+        self.laz_header = self._find_laz_header(self.header)
+
+        if self.laz_header is None:
+            # plain LAS: reconstruct the item layout from the point format
+            compressor = Compressor.NONE
+            coder = Coder.ARITHMETIC
+            chunk_size = 0
+            items = items_for_point_format(
+                self.header['point_data_format_id'],
+                self.header['point_data_record_length'])
+        else:
+            compressor = self.laz_header['compressor']
+            coder = self.laz_header['coder']
+            chunk_size = self.laz_header['chunk_size']
+            items = [(it['type'], it['size'], it['version'])
+                     for it in self.laz_header['items']]
+
+            if compressor == Compressor.NONE:
+                raise LazError("LASzip VLR declares no compression")
+            if coder != Coder.ARITHMETIC:
+                raise UnsupportedFileError(f"unknown entropy coder {coder}")
+
+            # the high bit of the format id flags compression; clear it
+            self.header['point_data_format_id'] &= 0b01111111
+
+            # a negative chunk size means adaptive (variable-size) chunks
+            if chunk_size < 0:
+                chunk_size = 0xFFFFFFFF
+
+        self.items = items
+        self._reader = PointReader(
+            self.fp,
+            items,
+            int(compressor),
+            coder=int(coder),
+            chunk_size=int(chunk_size),
+            start_offset=self.header['offset_to_point_data'],
+            decompress_selective=self.decompress_selective,
+        )
+        # sized by the C core from the item layout, not recomputed here
+        self.num_extra_bytes = self._reader.num_extra_bytes
+        # cached so scale() does not do six dict lookups per point
+        h = self.header
+        self._scale_offset = (h['x_scale_factor'], h['y_scale_factor'],
+                              h['z_scale_factor'], h['x_offset'],
+                              h['y_offset'], h['z_offset'])
+
+    def close(self):
+        self._reader = None
+        if self.fp is not None and self._owns_fp:
+            self.fp.close()
+        self.fp = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+    # -- header parsing --------------------------------------------------
 
     @staticmethod
     def _read_variable_length_record(fp):
@@ -117,97 +310,45 @@ class Reader:
         record['data'] = fp.read(record['record_length_after_header'])
         return record
 
-    @staticmethod
-    def _read_las_header(fp):
-        HEADER_FORMAT_12 = (
-            ('file_signature', 4, cstr),
-            ('file_source_id', 2, unsigned_int),
-            ('global_encoding', 2, unsigned_int),
-            ('guid_data_1', 4, unsigned_int),
-            ('guid_data_2', 2, unsigned_int),
-            ('guid_data_3', 2, unsigned_int),
-            ('guid_data_4', 8, cstr),
-            ('version_major', 1, unsigned_int),
-            ('version_minor', 1, unsigned_int),
-            ('system_identifier', 32, cstr),
-            ('generating_software', 32, cstr),
-            ('file_creation_day', 2, unsigned_int),
-            ('file_creation_year', 2, unsigned_int),
-            ('header_size', 2, unsigned_int),
-            ('offset_to_point_data', 4, unsigned_int),
-            ('number_of_variable_length_records', 4, unsigned_int),
-            ('point_data_format_id', 1, unsigned_int),
-            ('point_data_record_length', 2, unsigned_int),
-            ('number_of_point_records', 4, unsigned_int),
-            ('number_of_points_by_return', 4*5, u32_array),
-            ('x_scale_factor', 8, double),
-            ('y_scale_factor', 8, double),
-            ('z_scale_factor', 8, double),
-            ('x_offset', 8, double),
-            ('y_offset', 8, double),
-            ('z_offset', 8, double),
-            ('max_x', 8, double),
-            ('min_x', 8, double),
-            ('max_y', 8, double),
-            ('min_y', 8, double),
-            ('max_z', 8, double),
-            ('min_z', 8, double),
-        )
-
-        HEADER_FORMAT_13 = (
-            ('start_of_waveform_data_packet_record', 8, unsigned_int),
-        )
-
-        HEADER_FORMAT_14 = (
-            ('start_of_first_extended_variable_length_record', 8,
-             unsigned_int),
-            ('number_of_extended_variable_length_records', 4, unsigned_int),
-            ('number_of_point_records', 8, unsigned_int),
-            ('number_of_points_by_return', 8*15, u64_array),
-        )
-
-        def read_into_header(fp, header, format):
-            for name, size, func in format:
+    @classmethod
+    def _read_las_header(cls, fp):
+        def read_into(header, fmt):
+            for name, size, func in fmt:
                 header[name] = func(fp.read(size))
-
-        def header_section_size(format):
-            return sum([size for name, size, func in format])
+            return sum(size for _, size, _ in fmt)
 
         header = {}
+        bytes_read = read_into(header, cls.HEADER_FORMAT_12)
 
-        # Read header
-        read_into_header(fp, header, HEADER_FORMAT_12)
-        bytes_read = header_section_size(HEADER_FORMAT_12)
-
-        # Ensure the file is a LAS file
         if header['file_signature'] != b'LASF':
-            raise Exception("Invalid file signature")
+            raise LazError("not a LAS file (bad file signature)")
 
-        # Read 1.3 header fields
-        if header['version_major'] == 1 and header['version_minor'] >= 3:
-            read_into_header(fp, header, HEADER_FORMAT_13)
-            bytes_read += header_section_size(HEADER_FORMAT_13)
+        major, minor = header['version_major'], header['version_minor']
+        if major == 1 and minor >= 3:
+            bytes_read += read_into(header, cls.HEADER_FORMAT_13)
+        if major == 1 and minor >= 4:
+            bytes_read += read_into(header, cls.HEADER_FORMAT_14)
+            # LAS 1.4 zeroes the legacy count for the extended point formats
+            if header['number_of_point_records'] == 0:
+                header['number_of_point_records'] = \
+                    header['extended_number_of_point_records']
 
-        # Read 1.4 header fields
-        if header['version_major'] == 1 and header['version_minor'] >= 4:
-            read_into_header(fp, header, HEADER_FORMAT_14)
-            bytes_read += header_section_size(HEADER_FORMAT_14)
-
-        # Read user data, if any
+        # anything between the known fields and header_size is user data
         user_data_size = header['header_size'] - bytes_read
+        if user_data_size < 0:
+            raise LazError(f"header_size {header['header_size']} is too small")
         header['user_data'] = fp.read(user_data_size)
 
-        # Read variable length records
         header['variable_length_records'] = {}
-        for i in range(header['number_of_variable_length_records']):
-            vlr = Reader._read_variable_length_record(fp)
+        for _ in range(header['number_of_variable_length_records']):
+            vlr = cls._read_variable_length_record(fp)
             header['variable_length_records'][vlr['record_id']] = vlr
 
         return header
 
     @staticmethod
     def _parse_laszip_record(data):
-        laszip_record_format = (
+        fmt = (
             ('compressor', 2, unsigned_int),
             ('coder', 2, unsigned_int),
             ('version_major', 1, unsigned_int),
@@ -220,36 +361,33 @@ class Reader:
             ('number_of_items', 2, unsigned_int),
         )
 
-        laszip_record = {}
+        record = {}
         offset = 0
-        for name, size, func in laszip_record_format:
-            laszip_record[name] = func(data[offset:offset+size])
+        for name, size, func in fmt:
+            record[name] = func(data[offset:offset + size])
             offset += size
 
-        laszip_record['items'] = []
-        for i in range(laszip_record['number_of_items']):
-            item = {}
-            item['type'] = unsigned_int(data[offset:offset+2])
-            item['size'] = unsigned_int(data[offset+2:offset+4])
-            item['version'] = unsigned_int(data[offset+4:offset+6])
+        record['items'] = []
+        for _ in range(record['number_of_items']):
+            record['items'].append({
+                'type': unsigned_int(data[offset:offset + 2]),
+                'size': unsigned_int(data[offset + 2:offset + 4]),
+                'version': unsigned_int(data[offset + 4:offset + 6]),
+            })
             offset += 6
-            laszip_record['items'].append(item)
 
-        laszip_record['user_data'] = data[offset:]
-
-        return laszip_record
+        record['user_data'] = data[offset:]
+        return record
 
     @staticmethod
-    def _read_laz_header(header):
+    def _find_laz_header(header):
+        """Return the parsed LASzip VLR, or None for an uncompressed file."""
+        vlr = header['variable_length_records'].get(LASZIP_VLR_RECORD_ID)
+        if vlr is None:
+            return None
+        return Reader._parse_laszip_record(vlr['data'])
 
-        # Read LASzip record, stored in the data payload of a variable length
-        # record
-        LASZIP_VLR_ID = 22204
-        laszip_vlr = header['variable_length_records'].get(LASZIP_VLR_ID)
-        if laszip_vlr is None:
-            raise Exception("File is not compressed with LASzip")
-
-        return Reader._parse_laszip_record(laszip_vlr['data'])
+    # -- properties ------------------------------------------------------
 
     @property
     def num_points(self):
@@ -257,101 +395,91 @@ class Reader:
 
     @property
     def chunk_size(self):
+        if self.laz_header is None:
+            return 0
         return self.laz_header['chunk_size']
 
-    @staticmethod
-    def _read_chunk_table(fp, dec):
-        chunk_table_start_position = unsigned_int(fp.read(8))
-        chunks_start = fp.tell()
+    @property
+    def point_format(self):
+        return self.header['point_data_format_id']
 
-        fp.seek(chunk_table_start_position)
+    @property
+    def is_compressed(self):
+        return self.laz_header is not None
 
-        version = unsigned_int(fp.read(4))
-        if version != 0:
-            raise Exception("Unknown chunk table version")
+    @property
+    def scales(self):
+        h = self.header
+        return (h['x_scale_factor'], h['y_scale_factor'], h['z_scale_factor'])
 
-        number_chunks = unsigned_int(fp.read(4))
+    @property
+    def offsets(self):
+        return (self.header['x_offset'], self.header['y_offset'],
+                self.header['z_offset'])
 
-        dec.start()
+    @property
+    def index(self):
+        """Index of the next point to be read."""
+        return self._reader.index
 
-        # read chunk sizes
-        ic = IntegerCompressor(dec, 32, 2)
-        ic.init_decompressor()
+    @property
+    def warning(self):
+        """A non-fatal problem found while reading, or None.
 
-        chunk_sizes = []
-        chunk_size = 0
-        for _ in range(number_chunks-1):
-            chunk_size = ic.decompress(chunk_size, 1)
-            chunk_sizes.append(chunk_size)
+        Set when the chunk table is missing or corrupt, which is recoverable
+        but costs random access: seeking then has to decode forward instead of
+        jumping to a chunk.
+        """
+        return self._reader.warning
 
-        # calculate chunk offsets
-        chunk_starts = [chunks_start]
-        for chunk_size in chunk_sizes:
-            chunk_starts.append(chunk_starts[-1] + chunk_size)
-
-        fp.seek(chunks_start)
-
-        return chunk_starts
-
-    def open(self, filename):
-        if not sys.byteorder == 'little':
-            raise NotImplementedError("Only little endian is supported")
-
-        self.fp = open(filename, 'rb')
-
-        # read standard las header
-        self.header = Reader._read_las_header(self.fp)
-        
-        # read laz header
-        self.laz_header = Reader._read_laz_header(self.header)
-
-        if self.laz_header['compressor'] == Compressor.POINTWISE:
-            raise Exception("Pointwise compressor not supported")
-
-        # clear the bit that indicates that the file is compressed
-        self.header['point_data_format_id'] &= 0b01111111
-
-        # create decoder
-        if self.laz_header['coder'] == Coder.ARITHMETIC:
-            self.dec = ArithmeticDecoder(self.fp)
-        else:
-            raise Exception("Unknown coder")
-
-        self.chunk_starts = self._read_chunk_table(self.fp, self.dec)
-
-        self._init_point_reader_functions()
-
-        # indicate the reader is at the end of the chunk in order
-        # to force a read of the next chunk
-        self.chunk_count = self.chunk_size
+    # -- reading ---------------------------------------------------------
 
     def read(self):
-        context = 0
+        """Decode the next point.
 
-        point = []
+        The returned :class:`Point` is the reader's own buffer and is
+        overwritten by the next ``read()``; call ``point.copy()`` to keep it.
+        """
+        return self._reader.read()
 
-        # if this is a new chunk
-        # read the first uncompressed point and use it to initialize the reader
-        # functions
-        if self.chunk_count == self.chunk_size:
-            for reader_raw, reader_compressed in zip(self.readers_raw,
-                                                     self.readers_compressed):
-                pt_section = reader_raw(self.fp)
-                reader_compressed.init(pt_section, context)
+    def checksum(self, count=None):
+        """Decode *count* points and return ``(fnv1a_hash, points_read)``.
 
-                point.append(pt_section)
+        Defaults to every point remaining in the file. Hashes each decoded
+        field entirely in C, which is what makes whole-file verification
+        against a laszip reference practical at tens of millions of points.
+        Advances the reader.
+        """
+        if count is None:
+            count = self.num_points - self.index
+        return self._reader.checksum(max(0, count))
 
-            self.dec.start()
+    def seek(self, index):
+        """Position the reader so the next ``read()`` returns point *index*."""
+        if index < 0 or index > self.num_points:
+            raise IndexError(f"point index {index} out of range")
+        self._reader.seek(index)
 
-            self.chunk_count = 0
-        else:
-            for reader in self.readers_compressed:
-                pt_section = reader.read(context)
-                point.append(pt_section)
+    def scale(self, point):
+        """Return the georeferenced (x, y, z) of *point* as floats."""
+        sx, sy, sz, ox, oy, oz = self._scale_offset
+        return (point.X * sx + ox, point.Y * sy + oy, point.Z * sz + oz)
 
-        self.chunk_count += 1
-        return point
+    def points(self, start=0, count=None):
+        """Yield points, one at a time, without copying.
 
-    def jump_to_chunk(self, chunk):
-        self.fp.seek(self.chunk_starts[chunk])
-        self.chunk_count = self.chunk_size
+        Each iteration yields the same object with new contents, so store
+        ``point.copy()`` if points need to outlive the loop.
+        """
+        if start:
+            self.seek(start)
+        remaining = self.num_points - start if count is None else count
+        read = self._reader.read      # hoisted: this loop runs per point
+        for _ in range(remaining):
+            yield read()
+
+    def __iter__(self):
+        return self.points(self.index)
+
+    def __len__(self):
+        return self.num_points

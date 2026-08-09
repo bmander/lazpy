@@ -1,0 +1,120 @@
+#include "laz_intcompressor.h"
+
+void laz_ic_setup(LazIntCompressor *ic, LazDecoder *dec, U32 bits, U32 contexts,
+                  U32 bits_high, U32 range)
+{
+    memset(ic, 0, sizeof(*ic));
+    ic->dec = dec;
+    ic->bits = bits;
+    ic->contexts = contexts;
+    ic->bits_high = bits_high;
+    ic->range = range;
+
+    if (range) {                 /* the corrector's significant bits and range */
+        U32 r = range;
+        ic->corr_bits = 0;
+        ic->corr_range = range;
+        while (r) { r >>= 1; ic->corr_bits++; }
+        if (ic->corr_range == (1u << (ic->corr_bits - 1))) ic->corr_bits--;
+        ic->corr_min = -((I32)(ic->corr_range / 2));
+        ic->corr_max = ic->corr_min + ic->corr_range - 1;
+    } else if (bits && bits < 32) {
+        ic->corr_bits = bits;
+        ic->corr_range = 1u << bits;
+        ic->corr_min = -((I32)(ic->corr_range / 2));
+        ic->corr_max = ic->corr_min + ic->corr_range - 1;
+    } else {
+        ic->corr_bits = 32;
+        ic->corr_range = 0;
+        ic->corr_min = I32_MIN;
+        ic->corr_max = I32_MAX;
+    }
+
+    ic->k = 0;
+    ic->models_created = LAZ_FALSE;
+}
+
+BOOL laz_ic_init_decompressor(LazIntCompressor *ic)
+{
+    U32 i;
+
+    if (!ic->models_created) {
+        ic->m_bits = laz_symbol_models_new(ic->contexts, ic->corr_bits + 1, LAZ_FALSE);
+        if (!ic->m_bits) return LAZ_FALSE;
+
+        /* entry 0 is the bit model held separately; 1..corr_bits are symbol models */
+        ic->m_corrector = (LazSymbolModel *)calloc(ic->corr_bits + 1, sizeof(LazSymbolModel));
+        if (!ic->m_corrector) return LAZ_FALSE;
+        for (i = 1; i <= ic->corr_bits; i++) {
+            U32 num_symbols = (i <= ic->bits_high) ? (1u << i) : (1u << ic->bits_high);
+            laz_symbol_model_setup(&ic->m_corrector[i], num_symbols, LAZ_FALSE);
+        }
+        ic->models_created = LAZ_TRUE;
+    }
+
+    for (i = 0; i < ic->contexts; i++) {
+        if (!laz_symbol_model_init(&ic->m_bits[i], NULL)) return LAZ_FALSE;
+    }
+    laz_bit_model_init(&ic->m_corrector0);
+    for (i = 1; i <= ic->corr_bits; i++) {
+        if (!laz_symbol_model_init(&ic->m_corrector[i], NULL)) return LAZ_FALSE;
+    }
+    return LAZ_TRUE;
+}
+
+void laz_ic_free(LazIntCompressor *ic)
+{
+    if (ic->m_bits) {
+        laz_symbol_models_free(ic->m_bits, ic->contexts);
+        ic->m_bits = NULL;
+    }
+    if (ic->m_corrector) {
+        U32 i;
+        for (i = 1; i <= ic->corr_bits; i++) laz_symbol_model_free(&ic->m_corrector[i]);
+        free(ic->m_corrector);
+        ic->m_corrector = NULL;
+    }
+    ic->models_created = LAZ_FALSE;
+}
+
+/* Decodes which magnitude bucket the corrector falls in, then its exact
+ * location within that bucket. */
+static I32 read_corrector(LazIntCompressor *ic, LazSymbolModel *m_bits)
+{
+    I32 c;
+
+    ic->k = laz_decode_symbol(ic->dec, m_bits);
+
+    if (ic->k) {                    /* c is either smaller than 0 or bigger than 1 */
+        if (ic->k < 32) {
+            if (ic->k <= ic->bits_high) {
+                c = (I32)laz_decode_symbol(ic->dec, &ic->m_corrector[ic->k]);
+            } else {
+                /* high bits through the model, low bits raw */
+                U32 k1 = ic->k - ic->bits_high;
+                c = (I32)laz_decode_symbol(ic->dec, &ic->m_corrector[ic->k]);
+                c = (c << k1) | (I32)laz_read_bits(ic->dec, k1);
+            }
+            /* translate c back into its correct interval */
+            if (c >= (1 << (ic->k - 1))) {
+                c += 1;
+            } else {
+                c -= ((1 << ic->k) - 1);
+            }
+        } else {
+            c = ic->corr_min;
+        }
+    } else {                        /* c is either 0 or 1 */
+        c = (I32)laz_decode_bit(ic->dec, &ic->m_corrector0);
+    }
+
+    return c;
+}
+
+I32 laz_ic_decompress(LazIntCompressor *ic, I32 pred, U32 context)
+{
+    I32 real = pred + read_corrector(ic, &ic->m_bits[context]);
+    if (real < 0) real += ic->corr_range;
+    else if ((U32)real >= ic->corr_range) real -= ic->corr_range;
+    return real;
+}
