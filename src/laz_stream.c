@@ -296,6 +296,7 @@ LazStream *laz_stream_new_file(void *py_fp)
 
 typedef struct {
     PyObject *fp;
+    I64 pos;        /* write position, counted here rather than asked of fp */
 } FileOutImpl;
 
 static void fileout_put_bytes(LazOutStream *s, const U8 *bytes, I64 num_bytes)
@@ -316,8 +317,49 @@ static void fileout_put_bytes(LazOutStream *s, const U8 *bytes, I64 num_bytes)
         s->failed = LAZ_TRUE;         /* exception left set for the binding */
     } else {
         Py_DECREF(res);
+        f->pos += num_bytes;
     }
     PyGILState_Release(gil);
+}
+
+static I64 fileout_tell(LazOutStream *s) { return ((FileOutImpl *)s->impl)->pos; }
+
+static BOOL fileout_seek(LazOutStream *s, I64 position)
+{
+    FileOutImpl *f = (FileOutImpl *)s->impl;
+    PyObject *res;
+    PyGILState_STATE gil;
+
+    if (s->failed || !s->seekable) return LAZ_FALSE;   /* see fileout_put_bytes */
+    if (position == f->pos) return LAZ_TRUE;
+
+    gil = PyGILState_Ensure();
+    res = PyObject_CallMethod(f->fp, "seek", "L", (long long)position);
+    if (res == NULL) { s->failed = LAZ_TRUE; PyGILState_Release(gil); return LAZ_FALSE; }
+    Py_DECREF(res);
+    PyGILState_Release(gil);
+
+    f->pos = position;
+    return LAZ_TRUE;
+}
+
+/* Whether seeks on `fp` can be expected to work. A file object that answers
+ * seekable() is taken at its word -- a pipe has a seek method that raises --
+ * and anything else is judged by whether it has one at all. */
+static BOOL fileout_is_seekable(PyObject *fp)
+{
+    PyObject *res;
+    int ok;
+
+    if (!PyObject_HasAttrString(fp, "seek")) return LAZ_FALSE;
+    if (!PyObject_HasAttrString(fp, "seekable")) return LAZ_TRUE;
+
+    res = PyObject_CallMethod(fp, "seekable", NULL);
+    if (res == NULL) { PyErr_Clear(); return LAZ_FALSE; }
+    ok = PyObject_IsTrue(res);
+    Py_DECREF(res);
+    if (ok < 0) { PyErr_Clear(); return LAZ_FALSE; }
+    return ok ? LAZ_TRUE : LAZ_FALSE;
 }
 
 static void fileout_destroy(LazOutStream *s)
@@ -329,7 +371,7 @@ static void fileout_destroy(LazOutStream *s)
     free(f);
 }
 
-LazOutStream *laz_outstream_new_file(void *py_fp)
+LazOutStream *laz_outstream_new_file(void *py_fp, I64 start_offset)
 {
     LazOutStream *s = (LazOutStream *)calloc(1, sizeof(LazOutStream));
     FileOutImpl *f;
@@ -343,8 +385,28 @@ LazOutStream *laz_outstream_new_file(void *py_fp)
 
     s->impl = f;
     s->put_bytes = fileout_put_bytes;
+    s->tell = fileout_tell;
+    s->seek = fileout_seek;
     s->destroy = fileout_destroy;
+    s->seekable = fileout_is_seekable(f->fp);
     s->failed = LAZ_FALSE;
+    /* Positions are absolute file offsets, because that is what the chunk
+     * table records: a writer appending behind a header starts counting at the
+     * end of that header. An object with no usable tell() and no offset from
+     * the caller starts at zero, and then positions are relative to wherever
+     * it happened to be. */
+    if (start_offset >= 0) {
+        f->pos = start_offset;
+    } else if (PyObject_HasAttrString(f->fp, "tell")) {
+        PyObject *res = PyObject_CallMethod(f->fp, "tell", NULL);
+        if (res == NULL) {
+            PyErr_Clear();
+        } else {
+            f->pos = (I64)PyLong_AsLongLong(res);
+            Py_DECREF(res);
+            if (PyErr_Occurred()) { PyErr_Clear(); f->pos = 0; }
+        }
+    }
     return s;
 }
 
@@ -352,7 +414,8 @@ LazOutStream *laz_outstream_new_file(void *py_fp)
 
 typedef struct {
     U8 *data;
-    I64 size;
+    I64 size;       /* bytes written; the high-water mark of pos */
+    I64 pos;        /* write cursor, which a seek can move back into `data` */
     I64 capacity;
 } ArrayOutImpl;
 
@@ -362,17 +425,30 @@ static void arrayout_put_bytes(LazOutStream *s, const U8 *bytes, I64 num_bytes)
 
     if (s->failed || num_bytes <= 0) return;
 
-    if (a->size + num_bytes > a->capacity) {
+    if (a->pos + num_bytes > a->capacity) {
         I64 want = a->capacity ? a->capacity : 1024;
         U8 *grown;
-        while (want < a->size + num_bytes) want *= 2;
+        while (want < a->pos + num_bytes) want *= 2;
         grown = (U8 *)realloc(a->data, (size_t)want);
         if (!grown) { s->failed = LAZ_TRUE; return; }
         a->data = grown;
         a->capacity = want;
     }
-    memcpy(a->data + a->size, bytes, (size_t)num_bytes);
-    a->size += num_bytes;
+    memcpy(a->data + a->pos, bytes, (size_t)num_bytes);
+    a->pos += num_bytes;
+    if (a->pos > a->size) a->size = a->pos;
+}
+
+static I64 arrayout_tell(LazOutStream *s) { return ((ArrayOutImpl *)s->impl)->pos; }
+
+/* Only backwards over what is already there: an array sink is a buffer, not a
+ * file, so there is no seeking past the end and no hole to fill. */
+static BOOL arrayout_seek(LazOutStream *s, I64 position)
+{
+    ArrayOutImpl *a = (ArrayOutImpl *)s->impl;
+    if (position < 0 || position > a->size) return LAZ_FALSE;
+    a->pos = position;
+    return LAZ_TRUE;
 }
 
 static void arrayout_destroy(LazOutStream *s)
@@ -393,7 +469,10 @@ LazOutStream *laz_outstream_new_array(void)
 
     s->impl = a;
     s->put_bytes = arrayout_put_bytes;
+    s->tell = arrayout_tell;
+    s->seek = arrayout_seek;
     s->destroy = arrayout_destroy;
+    s->seekable = LAZ_TRUE;
     s->failed = LAZ_FALSE;
     return s;
 }
@@ -407,7 +486,9 @@ const U8 *laz_outstream_array_data(LazOutStream *s, I64 *size)
 
 void laz_outstream_array_rewind(LazOutStream *s)
 {
-    ((ArrayOutImpl *)s->impl)->size = 0;
+    ArrayOutImpl *a = (ArrayOutImpl *)s->impl;
+    a->size = 0;
+    a->pos = 0;
 }
 
 /* ----------------------------------------------------------------- shared */
@@ -448,4 +529,10 @@ void laz_outstream_put32(LazOutStream *s, U32 value)
     b[2] = (U8)((value >> 16) & 0xFF);
     b[3] = (U8)((value >> 24) & 0xFF);
     s->put_bytes(s, b, 4);
+}
+
+void laz_outstream_put64(LazOutStream *s, U64 value)
+{
+    laz_outstream_put32(s, (U32)(value & 0xFFFFFFFFu));
+    laz_outstream_put32(s, (U32)(value >> 32));
 }

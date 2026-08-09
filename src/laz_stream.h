@@ -80,10 +80,15 @@ U64 laz_stream_get64(LazStream *s);
  * to be able to reach back into already-produced bytes, so it hands over whole
  * AC_BUFFER_SIZE blocks and a second buffer underneath would earn nothing.
  *
- * Only that one sink exists so far. The vtable mirrors LazStream because the
- * layered v3/v4 writers will need an in-memory sink for the same reason the
- * layered readers need an in-memory source, and a chunked writer will need a
- * position to patch its chunk table from.
+ * The vtable mirrors LazStream because the layered v3/v4 writers need an
+ * in-memory sink for the same reason the layered readers need an in-memory
+ * source, and because the chunked writer patches its chunk-table offset by
+ * seeking back to a position it remembered.
+ *
+ * tell() is a byte count the sink maintains itself rather than a question put
+ * to the underlying object: a pipe has a perfectly well-defined write position
+ * even though it cannot answer tell(), and the chunk table is a table of
+ * positions either way.
  *
  * As on the input side, a failed write sets `failed` and leaves the Python
  * exception pending rather than raising through the C core.
@@ -92,16 +97,27 @@ typedef struct LazOutStream LazOutStream;
 
 struct LazOutStream {
     void (*put_bytes)(LazOutStream *s, const U8 *bytes, I64 num_bytes);
+    I64  (*tell)(LazOutStream *s);
+    BOOL (*seek)(LazOutStream *s, I64 position);
     void (*destroy)(LazOutStream *s);
 
+    BOOL seekable;     /* clear when seek() will always fail, which is what
+                        * makes a writer emit the -1 chunk-table offset */
     BOOL failed;
 
     void *impl;
 };
 
-/* Wraps a Python file-like object (must supply write). Borrows a reference to
- * fp for the lifetime of the stream. */
-LazOutStream *laz_outstream_new_file(void *py_fp);
+/* Wraps a Python file-like object (must supply write; seeking additionally
+ * needs seek, and is offered only when the object says it is seekable).
+ * Borrows a reference to fp for the lifetime of the stream.
+ *
+ * `start_offset` is where in the file the object is already positioned, which
+ * matters because a chunk table records absolute positions: pass a negative
+ * value to have the object asked, which is right whenever it can answer, and
+ * the true offset for an appending sink that cannot -- a pipe knows neither
+ * where it is nor that anything came before it. */
+LazOutStream *laz_outstream_new_file(void *py_fp, I64 start_offset);
 
 /* Collects everything written into one growable buffer the stream owns.
  * laz_outstream_array_data hands back that buffer, valid until the next write
@@ -110,17 +126,20 @@ LazOutStream *laz_outstream_new_array(void);
 const U8 *laz_outstream_array_data(LazOutStream *s, I64 *size);
 
 /* Drops everything written so far but keeps the buffer, so the next chunk
- * refills it. LASzip's ByteStreamOutArray::seek(0); the layered v3/v4 writers
- * recycle one array sink per layer across every chunk of a file. */
+ * refills it. The layered v3/v4 writers recycle one array sink per layer
+ * across every chunk of a file. */
 void laz_outstream_array_rewind(LazOutStream *s);
 
 void laz_outstream_destroy(LazOutStream *s);
 
 static inline void laz_outstream_put_bytes(LazOutStream *s, const U8 *b, I64 n)
 { s->put_bytes(s, b, n); }
+static inline I64 laz_outstream_tell(LazOutStream *s) { return s->tell(s); }
+static inline BOOL laz_outstream_seek(LazOutStream *s, I64 p) { return s->seek(s, p); }
 
-/* The one multi-byte field a writer emits outside the entropy coder: the
- * layered chunk's per-layer byte counts. */
+/* The multi-byte fields a writer emits outside the entropy coder: a layered
+ * chunk's per-layer byte counts, and the chunk table's own offset. */
 void laz_outstream_put32(LazOutStream *s, U32 value);
+void laz_outstream_put64(LazOutStream *s, U64 value);
 
 #endif /* LAZ_STREAM_H */
