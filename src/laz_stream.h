@@ -103,6 +103,12 @@ struct LazOutStream {
  * fp for the lifetime of the stream. */
 LazOutStream *laz_outstream_new_file(void *py_fp);
 
+/* Collects everything written into one growable buffer the stream owns.
+ * laz_outstream_array_data hands back that buffer, valid until the next write
+ * or destroy. Sets `failed` if it cannot grow. */
+LazOutStream *laz_outstream_new_array(void);
+const U8 *laz_outstream_array_data(LazOutStream *s, I64 *size);
+
 void laz_outstream_destroy(LazOutStream *s);
 
 static inline void laz_outstream_put_bytes(LazOutStream *s, const U8 *b, I64 n)

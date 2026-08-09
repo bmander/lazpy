@@ -37,11 +37,6 @@ const U8 laz_number_return_level[8][8] = {
 
 /* ======================================================== POINT10 v2 ===== */
 
-/* Field accessors for the 20-byte legacy point record held in last_item. */
-#define P10_RETURN_NUMBER(li)    ((li)[14] & 0x07)
-#define P10_NUMBER_OF_RETURNS(li) (((li)[14] >> 3) & 0x07)
-#define P10_SCAN_DIR_FLAG(li)    (((li)[14] >> 6) & 0x01)
-
 typedef struct {
     LazReadItem base;
     LazSymbolModel m_changed_values;
@@ -198,9 +193,9 @@ LazReadItem *laz_readitem_v2_point10(LazDecoder *dec)
     laz_symbol_model_setup(&r->m_scan_angle_rank[0], 256, LAZ_FALSE);
     laz_symbol_model_setup(&r->m_scan_angle_rank[1], 256, LAZ_FALSE);
     laz_ic_setup_dec(&r->ic_point_source_ID, dec, 16, 1, 8, 0);
-    laz_bank_setup(r->m_bit_byte, r->created_bit_byte, 256, 256);
-    laz_bank_setup(r->m_classification, r->created_classification, 256, 256);
-    laz_bank_setup(r->m_user_data, r->created_user_data, 256, 256);
+    laz_bank_setup(r->m_bit_byte, r->created_bit_byte, 256, 256, LAZ_FALSE);
+    laz_bank_setup(r->m_classification, r->created_classification, 256, 256, LAZ_FALSE);
+    laz_bank_setup(r->m_user_data, r->created_user_data, 256, 256, LAZ_FALSE);
     laz_ic_setup_dec(&r->ic_dx, dec, 32, 2, 8, 0);
     laz_ic_setup_dec(&r->ic_dy, dec, 32, 22, 8, 0);
     laz_ic_setup_dec(&r->ic_z, dec, 32, 20, 8, 0);

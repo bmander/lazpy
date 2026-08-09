@@ -400,6 +400,13 @@ void laz_write_bits(LazEncoder *e, U32 bits, U32 sym)
     if (e->length < AC_MIN_LENGTH) renorm_enc_interval(e);
 }
 
+/* mirrors laz_read_int64: the low word first, then the high */
+void laz_write_int64(LazEncoder *e, U64 sym)
+{
+    laz_write_int(e, (U32)(sym & 0xFFFFFFFFu));
+    laz_write_int(e, (U32)(sym >> 32));
+}
+
 void laz_encoder_done(LazEncoder *e)
 {
     U32 init_base = e->base;

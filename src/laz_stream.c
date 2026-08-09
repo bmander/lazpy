@@ -348,6 +348,63 @@ LazOutStream *laz_outstream_new_file(void *py_fp)
     return s;
 }
 
+/* ------------------------------------------------------------- array out */
+
+typedef struct {
+    U8 *data;
+    I64 size;
+    I64 capacity;
+} ArrayOutImpl;
+
+static void arrayout_put_bytes(LazOutStream *s, const U8 *bytes, I64 num_bytes)
+{
+    ArrayOutImpl *a = (ArrayOutImpl *)s->impl;
+
+    if (s->failed || num_bytes <= 0) return;
+
+    if (a->size + num_bytes > a->capacity) {
+        I64 want = a->capacity ? a->capacity : 1024;
+        U8 *grown;
+        while (want < a->size + num_bytes) want *= 2;
+        grown = (U8 *)realloc(a->data, (size_t)want);
+        if (!grown) { s->failed = LAZ_TRUE; return; }
+        a->data = grown;
+        a->capacity = want;
+    }
+    memcpy(a->data + a->size, bytes, (size_t)num_bytes);
+    a->size += num_bytes;
+}
+
+static void arrayout_destroy(LazOutStream *s)
+{
+    ArrayOutImpl *a = (ArrayOutImpl *)s->impl;
+    free(a->data);
+    free(a);
+}
+
+LazOutStream *laz_outstream_new_array(void)
+{
+    LazOutStream *s = (LazOutStream *)calloc(1, sizeof(LazOutStream));
+    ArrayOutImpl *a;
+
+    if (!s) return NULL;
+    a = (ArrayOutImpl *)calloc(1, sizeof(ArrayOutImpl));
+    if (!a) { free(s); return NULL; }
+
+    s->impl = a;
+    s->put_bytes = arrayout_put_bytes;
+    s->destroy = arrayout_destroy;
+    s->failed = LAZ_FALSE;
+    return s;
+}
+
+const U8 *laz_outstream_array_data(LazOutStream *s, I64 *size)
+{
+    ArrayOutImpl *a = (ArrayOutImpl *)s->impl;
+    *size = a->size;
+    return a->data;
+}
+
 /* ----------------------------------------------------------------- shared */
 
 void laz_outstream_destroy(LazOutStream *s)
