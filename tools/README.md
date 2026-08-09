@@ -1,8 +1,8 @@
 # Verification harness
 
 These tools exist to prove lazpy decodes exactly what LASzip decodes. They are
-only needed to regenerate or extend `testdata/` — running `pytest tests.py`
-does not require any of them, because the reference hashes are committed.
+only needed to regenerate or extend `testdata/` — running `pytest` does not
+require any of them, because the reference hashes are committed.
 
 All three need a LASzip checkout built as a shared library:
 

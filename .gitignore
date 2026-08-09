@@ -1,7 +1,11 @@
 env
 data
 __pycache__
+.pytest_cache
 build
+dist
+wheelhouse
 *.so
+*.pyd
 *.egg
-lazpy.egg-info
+*.egg-info

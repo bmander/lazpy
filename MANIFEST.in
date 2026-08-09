@@ -1,0 +1,12 @@
+# Everything needed to build the extension and run the test suite from an sdist.
+include MANIFEST.in
+include README.md
+include script.py
+recursive-include src *.c *.h
+recursive-include tests *.py
+recursive-include testdata *.las *.laz *.txt
+recursive-include tools *.py *.c *.cpp *.md
+prune build
+prune env
+global-exclude *.pyc
+global-exclude __pycache__/*

@@ -1,0 +1,80 @@
+name: wheels
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  wheels:
+    name: wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest      # manylinux + musllinux x86_64
+          - ubuntu-24.04-arm   # manylinux + musllinux aarch64
+          - macos-latest       # arm64
+          - macos-15-intel     # x86_64, retired by GitHub in Aug 2027
+          - windows-latest     # AMD64
+    steps:
+      - uses: actions/checkout@v7
+
+      # Builds every CPython in requires-python and runs the test suite inside
+      # each resulting wheel; see [tool.cibuildwheel] in pyproject.toml.
+      - uses: pypa/cibuildwheel@v4.2.0
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+
+      - name: Build
+        run: pipx run build --sdist
+
+      # The sdist has to carry src/, testdata/ and tests/, not just the
+      # package: building and testing it from a scratch directory is the only
+      # thing that proves it.
+      - name: Build and test from the sdist
+        run: |
+          set -euo pipefail
+          mkdir -p ~/sdist-check && tar xzf dist/*.tar.gz -C ~/sdist-check
+          python -m venv ~/sdist-venv
+          ~/sdist-venv/bin/pip install pytest dist/*.tar.gz
+          cd ~/sdist-check
+          ~/sdist-venv/bin/pytest -q lazpy-*/tests
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  publish:
+    name: publish to PyPI
+    needs: [wheels, sdist]
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # trusted publishing; no API token stored in the repo
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: pypa/gh-action-pypi-publish@release/v1

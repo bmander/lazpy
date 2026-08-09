@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lazpy"
+version = "0.3"
+description = "A reader for LAS and LAZ point clouds"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{name = "Brandon Martin-Anderson", email = "badhill@gmail.com"}]
+keywords = ["las", "laz", "lidar", "point cloud", "laszip"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: C",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: GIS",
+]
+
+[project.urls]
+Homepage = "https://github.com/bmander/lazpy"
+Issues = "https://github.com/bmander/lazpy/issues"
+
+# The public package is `lazpy` and nothing else. models.py, encoder.py and
+# compressor.py are pure-Python reference implementations used as a test
+# oracle, so they live in tests/ and are not installed.
+[tool.setuptools]
+packages = ["lazpy"]
+
+# No extra compile flags: every compiler setuptools drives already optimizes by
+# default (-O2/-O3 from Python's own CFLAGS, /O2 from MSVC), and -Wall/-Wextra
+# are not portable to MSVC. Warnings are a development concern; see the
+# Building section of README.md.
+[[tool.setuptools.ext-modules]]
+name = "lazpy._cpylaz"
+sources = [
+    "src/cpylazmodule.c",
+    "src/laz_stream.c",
+    "src/laz_arithmetic.c",
+    "src/laz_intcompressor.c",
+    "src/laz_readitem_raw.c",
+    "src/laz_readitem_v1.c",
+    "src/laz_readitem_v2.c",
+    "src/laz_readitem_v3.c",
+    "src/laz_readpoint.c",
+]
+include-dirs = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.cibuildwheel]
+# CPython only, 64-bit only. PyPy would work through cpext but defeats the
+# point of a C decompressor.
+skip = ["pp*"]
+archs = ["auto64"]
+build-frontend = "build"
+test-requires = "pytest"
+test-command = "pytest {project}/tests"

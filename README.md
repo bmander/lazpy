@@ -40,23 +40,44 @@ Little-endian hosts only; the build fails there rather than mis-decode.
 Anything that goes wrong reading a file raises `lazpy.LazError`, except an error
 from the underlying file object, which propagates as itself.
 
+## Installing
+
+```bash
+pip install lazpy
+```
+
+Wheels are published for Linux, macOS and Windows on 64-bit CPython 3.10 and
+up, so no compiler is needed. Anywhere else, `pip` builds from the source
+distribution; the extension is plain C with no external dependencies.
+
 ## Building
 
 ```bash
-python setup.py build_ext --inplace
+pip install -e .          # builds the extension in place
+```
+
+The build is declared in `pyproject.toml` and carries no extra compiler flags —
+every compiler setuptools drives already optimizes by default. To build with
+warnings on:
+
+```bash
+CFLAGS="-Wall -Wextra" pip install -e . --no-build-isolation
 ```
 
 ## Tests
 
 ```bash
-pip install pytest
-pytest tests.py
+pip install -e . pytest
+pytest
 ```
+
+Note the editable install: the tests import `lazpy` like any other consumer, so
+the extension has to be built before they can run.
 
 The suite has two halves. The unit tests pin the entropy coder — arithmetic
 models, decoder and integer decompressor — against known bit-exact vectors and
-against the pure-Python reference implementations in `models.py`, `encoder.py`
-and `compressor.py`.
+against the pure-Python reference implementations in `tests/models.py`,
+`tests/encoder.py` and `tests/compressor.py`.
 
 The end-to-end tests read `testdata/`, which holds a small file for every point
 data format crossed with every item version that applies to it, and compare a
@@ -119,8 +140,9 @@ with Reader("cloud.laz", decompress_selective=mask) as reader:
 
 | | |
 |---|---|
-| `lazpy.py` | header and VLR parsing, the `Reader` API |
-| `cpylazmodule.c` | Python bindings |
+| `lazpy/__init__.py` | header and VLR parsing, the `Reader` API |
+| `lazpy/_utils.py` | bytestream parsing helpers |
+| `src/cpylazmodule.c` | Python bindings, built as `lazpy._cpylaz` |
 | `src/laz_stream.*` | buffered file and in-memory byte streams |
 | `src/laz_arithmetic.*` | arithmetic models and decoder |
 | `src/laz_intcompressor.*` | entropy-coded integer decompressor |
@@ -129,7 +151,9 @@ with Reader("cloud.laz", decompress_selective=mask) as reader:
 | `src/laz_readitem_v2.c` | LASzip 2.0 item readers |
 | `src/laz_readitem_v3.c` | layered LAS 1.4 item readers, v3 and v4 |
 | `src/laz_readpoint.c` | chunking, chunk tables, seeking |
-| `models.py`, `encoder.py`, `compressor.py` | pure-Python reference implementations, used as a test oracle |
+| `tests/test_lazpy.py` | the test suite |
+| `tests/models.py`, `tests/encoder.py`, `tests/compressor.py` | pure-Python reference implementations, used as a test oracle — not installed |
+| `pyproject.toml` | package metadata, the extension build, and the wheel matrix |
 
 ## References
 

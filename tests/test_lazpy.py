@@ -4,10 +4,10 @@ import os
 import pytest
 
 import compressor
-import cpylaz
 import encoder
 import lazpy
 import models
+from lazpy import _cpylaz as cpylaz
 from lazpy import (Compressor, Reader, Selective, ItemType, LazError,
                    UnsupportedFileError)
 
@@ -518,7 +518,8 @@ class TestCIntegerCompressor:
 # claim -- the unit tests above only pin the entropy coder.
 # ---------------------------------------------------------------------------
 
-TESTDATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "testdata")
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TESTDATA = os.path.join(REPO_ROOT, "testdata")
 
 
 def load_reference_hashes():
