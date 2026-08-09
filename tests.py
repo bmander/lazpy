@@ -583,62 +583,41 @@ def test_reader_reports_its_position(name):
         assert reader.index == 11
 
 
+POINTWISE_FIXTURES = [n for n in FIXTURES if n.endswith("_pointwise.laz")]
+
+
 class TestPointwiseContainer:
     """
     LASzip's original container compresses the whole file as one stream with no
     chunk table, so chunk_size stays U32_MAX, number_chunks stays 0 and
-    read_chunk_table is skipped. Nothing else in the suite reaches that branch,
-    and nothing in the decode path would complain if it broke -- a pointwise
-    file read as chunked simply produces garbage -- so the fixtures have to be
-    pinned as pointwise explicitly, not just decoded.
-    """
+    read_chunk_table is skipped -- and seeking has nowhere to jump to, so it
+    re-reads from point_start instead.
 
-    POINTWISE = [f"pt{fmt}_v1_pointwise.laz" for fmt in range(6)]
+    Decoding and seeking are already covered: the fixtures are in FIXTURES, so
+    the parametrised tests above run over them. What those cannot see is which
+    container the file actually uses, because a pointwise file read as chunked
+    does not raise -- it just decodes to garbage. So that is what this pins.
+    """
 
     @staticmethod
     def compressor_of(name):
         with Reader(fixture(name)) as reader:
             return reader.laz_header["compressor"]
 
-    @pytest.mark.parametrize("name", POINTWISE)
+    def test_the_suite_has_pointwise_fixtures(self):
+        """Otherwise the parametrised tests below pass over an empty list."""
+        assert POINTWISE_FIXTURES
+
+    @pytest.mark.parametrize("name", POINTWISE_FIXTURES)
     def test_fixture_really_is_non_chunked(self, name):
         assert self.compressor_of(name) == Compressor.POINTWISE
 
     def test_chunked_fixtures_are_still_chunked(self):
         """Guards the contrast: the rest of testdata/ must stay chunked."""
         for name in FIXTURES:
-            if name.endswith(".las") or name in self.POINTWISE:
+            if name.endswith(".las") or name in POINTWISE_FIXTURES:
                 continue
             assert self.compressor_of(name) != Compressor.POINTWISE
-
-    @pytest.mark.parametrize("name", POINTWISE)
-    def test_agrees_with_the_chunked_encoding_of_the_same_points(self, name):
-        point_format = int(name[2])
-        with Reader(fixture(name)) as pointwise, \
-                Reader(fixture(f"pt{point_format}_v1.laz")) as chunked:
-            assert pointwise.checksum() == chunked.checksum()
-
-    @pytest.mark.parametrize("name", POINTWISE)
-    def test_backwards_seek_restarts_the_single_stream(self, name):
-        """
-        With no chunk table there is nowhere to jump to, so seeking backwards
-        falls back to re-reading from point_start and skipping forward. That is
-        a different branch from the chunked seek, and the slow one.
-        """
-        def fields(point):
-            return (point.X, point.Y, point.Z, point.intensity,
-                    point.gps_time)
-
-        with Reader(fixture(name)) as reader:
-            reader.seek(400)
-            far = fields(reader.read())
-            reader.seek(0)
-            first = fields(reader.read())
-
-            # backwards, then forwards again, twice over
-            for i, want in [(400, far), (0, first), (400, far), (0, first)]:
-                reader.seek(i)
-                assert fields(reader.read()) == want, f"seek({i}) in {name}"
 
 
 class TestPointSemantics:
