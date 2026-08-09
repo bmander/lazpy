@@ -22,8 +22,10 @@ with Reader("cloud.laz") as reader:
 
 ## Status
 
-Reading is complete. Writing is not implemented — `ArithmeticEncoder` raises
-`NotImplementedError`.
+Reading is complete. Writing is under way: the entropy coder is now
+bidirectional — `ArithmeticEncoder` and the `IntegerCompressor` compress path
+are implemented and round-trip against the decoder — but nothing above them
+writes a LAZ file yet.
 
 | Point data format | Items | LAZ versions |
 |---|---|---|
@@ -77,7 +79,9 @@ the extension has to be built before they can run.
 The suite has two halves. The unit tests pin the entropy coder — arithmetic
 models, decoder and integer decompressor — against known bit-exact vectors and
 against the pure-Python reference implementations in `tests/models.py`,
-`tests/encoder.py` and `tests/compressor.py`.
+`tests/encoder.py` and `tests/compressor.py`. The encoder has no committed
+vectors of its own: it is tested as the decoder's inverse, by round trip, and
+by requiring the C and pure-Python encoders to emit the same bytes.
 
 The end-to-end tests read `testdata/`, which holds a small file for every point
 data format crossed with every item version that applies to it, and compare a
@@ -143,9 +147,9 @@ with Reader("cloud.laz", decompress_selective=mask) as reader:
 | `lazpy/__init__.py` | header and VLR parsing, the `Reader` API |
 | `lazpy/_utils.py` | bytestream parsing helpers |
 | `src/cpylazmodule.c` | Python bindings, built as `lazpy._cpylaz` |
-| `src/laz_stream.*` | buffered file and in-memory byte streams |
-| `src/laz_arithmetic.*` | arithmetic models and decoder |
-| `src/laz_intcompressor.*` | entropy-coded integer decompressor |
+| `src/laz_stream.*` | buffered file and in-memory byte streams, and the output stream |
+| `src/laz_arithmetic.*` | arithmetic models, decoder and encoder |
+| `src/laz_intcompressor.*` | entropy-coded integer (de)compressor |
 | `src/laz_readitem_raw.c` | uncompressed item readers |
 | `src/laz_readitem_v1.c` | LASzip 1.0 item readers |
 | `src/laz_readitem_v2.c` | LASzip 2.0 item readers |

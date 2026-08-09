@@ -7,12 +7,15 @@
  */
 
 /*
- * laz_arithmetic.h -- arithmetic coder models and decoder.
+ * laz_arithmetic.h -- arithmetic coder models, decoder and encoder.
  *
- * Ported from LASzip's arithmeticmodel.{hpp,cpp} and arithmeticdecoder.cpp,
- * which in turn derive from Said & Pearlman's reference implementation. The
- * integer arithmetic here is bit-exact by necessity: any deviation desynchronises
- * the bitstream rather than merely degrading it.
+ * Ported from LASzip's arithmeticmodel.{hpp,cpp}, arithmeticdecoder.cpp and
+ * arithmeticencoder.cpp, which in turn derive from Said & Pearlman's reference
+ * implementation. The integer arithmetic here is bit-exact by necessity: any
+ * deviation desynchronises the bitstream rather than merely degrading it.
+ *
+ * The models are shared between the two directions. Only the decoder builds a
+ * decoder table, which is why laz_symbol_model_setup takes a `compress` flag.
  */
 #ifndef LAZ_ARITHMETIC_H
 #define LAZ_ARITHMETIC_H
@@ -56,6 +59,28 @@ typedef struct {
     U32 length;
 } LazDecoder;
 
+/*
+ * The encoder cannot emit bytes as it produces them: a later symbol can carry
+ * into an already-produced byte, and the carry may have to ripple back through
+ * a run of 0xFF. Bytes therefore accumulate in a ring of two AC_BUFFER_SIZE
+ * halves, and a half is handed to the stream only once the other half has been
+ * filled, which puts AC_BUFFER_SIZE bytes of slack behind the write cursor.
+ *
+ * [outbuffer, endbuffer) is the ring; outbyte is the write cursor and endbyte
+ * the end of the half currently being filled.
+ */
+#define AC_BUFFER_SIZE 1024
+
+typedef struct {
+    LazOutStream *stream;   /* borrowed; not owned. NULL until init/after done */
+    U32 base;
+    U32 length;
+    U8 *outbuffer;          /* owned, 2 * AC_BUFFER_SIZE bytes */
+    U8 *endbuffer;
+    U8 *outbyte;
+    U8 *endbyte;
+} LazEncoder;
+
 void laz_bit_model_init(LazBitModel *m);
 void laz_bit_model_update(LazBitModel *m);
 
@@ -83,5 +108,18 @@ U32 laz_decode_symbol(LazDecoder *d, LazSymbolModel *m);
 U32 laz_read_bits(LazDecoder *d, U32 bits);
 static inline U32 laz_read_int(LazDecoder *d) { return laz_read_bits(d, 32); }
 U64 laz_read_int64(LazDecoder *d);
+
+/* Allocates the ring buffer. Returns LAZ_FALSE on allocation failure. */
+BOOL laz_encoder_setup(LazEncoder *e);
+void laz_encoder_init(LazEncoder *e, LazOutStream *stream);
+/* Flushes the interval and the ring, then writes the two or three trailing
+ * zero bytes the decoder's initial fill expects, and releases the stream. */
+void laz_encoder_done(LazEncoder *e);
+void laz_encoder_free(LazEncoder *e);
+
+void laz_encode_bit(LazEncoder *e, LazBitModel *m, U32 sym);
+void laz_encode_symbol(LazEncoder *e, LazSymbolModel *m, U32 sym);
+void laz_write_bits(LazEncoder *e, U32 bits, U32 sym);
+static inline void laz_write_int(LazEncoder *e, U32 sym) { laz_write_bits(e, 32, sym); }
 
 #endif /* LAZ_ARITHMETIC_H */

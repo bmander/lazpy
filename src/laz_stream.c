@@ -288,7 +288,70 @@ LazStream *laz_stream_new_file(void *py_fp)
     return s;
 }
 
+/* -------------------------------------------------------------- file out */
+
+typedef struct {
+    PyObject *fp;
+} FileOutImpl;
+
+static void fileout_put_bytes(LazOutStream *s, const U8 *bytes, I64 num_bytes)
+{
+    FileOutImpl *f = (FileOutImpl *)s->impl;
+    PyObject *res;
+    PyGILState_STATE gil;
+
+    /* Once failed the stream is inert: an exception is pending, so calling
+     * back into Python again would be illegal. The encoder keeps writing into
+     * the void until the caller notices and propagates. */
+    if (s->failed || num_bytes <= 0) return;
+
+    gil = PyGILState_Ensure();
+    res = PyObject_CallMethod(f->fp, "write", "y#",
+                              (const char *)bytes, (Py_ssize_t)num_bytes);
+    if (res == NULL) {
+        s->failed = LAZ_TRUE;         /* exception left set for the binding */
+    } else {
+        Py_DECREF(res);
+    }
+    PyGILState_Release(gil);
+}
+
+static void fileout_destroy(LazOutStream *s)
+{
+    FileOutImpl *f = (FileOutImpl *)s->impl;
+    PyGILState_STATE gil = PyGILState_Ensure();
+    Py_XDECREF(f->fp);
+    PyGILState_Release(gil);
+    free(f);
+}
+
+LazOutStream *laz_outstream_new_file(void *py_fp)
+{
+    LazOutStream *s = (LazOutStream *)calloc(1, sizeof(LazOutStream));
+    FileOutImpl *f;
+
+    if (!s) return NULL;
+    f = (FileOutImpl *)calloc(1, sizeof(FileOutImpl));
+    if (!f) { free(s); return NULL; }
+
+    f->fp = (PyObject *)py_fp;
+    Py_INCREF(f->fp);
+
+    s->impl = f;
+    s->put_bytes = fileout_put_bytes;
+    s->destroy = fileout_destroy;
+    s->failed = LAZ_FALSE;
+    return s;
+}
+
 /* ----------------------------------------------------------------- shared */
+
+void laz_outstream_destroy(LazOutStream *s)
+{
+    if (!s) return;
+    if (s->destroy) s->destroy(s);
+    free(s);
+}
 
 void laz_stream_destroy(LazStream *s)
 {

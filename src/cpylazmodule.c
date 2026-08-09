@@ -8,11 +8,13 @@
  *     C.
  *
  *   - ArithmeticBitModel / ArithmeticModel / ArithmeticDecoder /
- *     IntegerCompressor: thin wrappers over the entropy coder. These are not
- *     needed to read a file, but they let the test suite pin the coder against
- *     known bit-exact vectors and against the pure-Python reference in
- *     tests/models.py and tests/encoder.py, which is what catches a desync at
- *     its source rather than 3000 points into a chunk.
+ *     ArithmeticEncoder / IntegerCompressor: thin wrappers over the entropy
+ *     coder. These are not needed to read a file, but they let the test suite
+ *     pin the coder against known bit-exact vectors and against the pure-Python
+ *     reference in tests/models.py and tests/encoder.py, which is what catches
+ *     a desync at its source rather than 3000 points into a chunk. They are
+ *     also the only way the encoder is reachable at all until there is a
+ *     writer above it.
  */
 #include "Python.h"
 #include "structmember.h"
@@ -302,21 +304,190 @@ static PyTypeObject SymbolModel_Type = {
 
 /* ===================================================== ArithmeticEncoder == */
 
-static PyObject *Encoder_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+typedef struct {
+    PyObject_HEAD
+    LazEncoder e;
+    LazOutStream *stream;
+    PyObject *fp;
+} EncoderObject;
+
+static PyTypeObject Encoder_Type;
+
+static int Encoder_tp_init(EncoderObject *self, PyObject *args, PyObject *kwds)
 {
-    (void)type; (void)args; (void)kwds;
-    PyErr_SetString(PyExc_NotImplementedError,
-                    "lazpy does not implement compression yet");
-    return NULL;
+    PyObject *fp;
+    (void)kwds;
+    if (!PyArg_ParseTuple(args, "O", &fp)) return -1;
+
+    if (!laz_encoder_setup(&self->e)) { PyErr_NoMemory(); return -1; }
+    self->stream = laz_outstream_new_file(fp);
+    if (!self->stream) { laz_encoder_free(&self->e); PyErr_NoMemory(); return -1; }
+    Py_INCREF(fp);
+    self->fp = fp;
+    return 0;
 }
+
+static void Encoder_dealloc(EncoderObject *self)
+{
+    laz_encoder_free(&self->e);
+    if (self->stream) laz_outstream_destroy(self->stream);
+    Py_XDECREF(self->fp);
+    PyObject_Del(self);
+}
+
+/*
+ * Every coding call goes through this first. An encoder without a stream has
+ * either not been started or has already been flushed by done(), and coding
+ * into it would dereference NULL; a stream that has failed left a Python
+ * exception pending, which is what the caller should see.
+ */
+static int encoder_ready(EncoderObject *self)
+{
+    if (self->stream->failed) return -1;        /* exception already set */
+    if (self->e.stream == NULL) {
+        PyErr_SetString(PyExc_ValueError, "encoder is not started");
+        return -1;
+    }
+    return 0;
+}
+
+static PyObject *Encoder_start(EncoderObject *self, PyObject *Py_UNUSED(i))
+{
+    laz_encoder_init(&self->e, self->stream);
+    Py_RETURN_NONE;
+}
+
+static PyObject *Encoder_done(EncoderObject *self, PyObject *Py_UNUSED(i))
+{
+    if (encoder_ready(self) < 0) return NULL;
+    laz_encoder_done(&self->e);
+    if (self->stream->failed) return NULL;      /* the write raised */
+    Py_RETURN_NONE;
+}
+
+static PyObject *Encoder_encode_bit(EncoderObject *self, PyObject *args)
+{
+    PyObject *m;
+    unsigned int sym;
+    if (!PyArg_ParseTuple(args, "O!I", &BitModel_Type, &m, &sym)) return NULL;
+    if (sym > 1) {
+        PyErr_SetString(PyExc_ValueError, "bit must be 0 or 1");
+        return NULL;
+    }
+    if (encoder_ready(self) < 0) return NULL;
+    laz_encode_bit(&self->e, &((BitModelObject *)m)->m, sym);
+    if (self->stream->failed) return NULL;
+    Py_RETURN_NONE;
+}
+
+static PyObject *Encoder_encode_symbol(EncoderObject *self, PyObject *args)
+{
+    PyObject *m;
+    unsigned int sym;
+    LazSymbolModel *sm;
+    if (!PyArg_ParseTuple(args, "O!I", &SymbolModel_Type, &m, &sym)) return NULL;
+    sm = ((SymbolModelObject *)m)->m;
+    if (!sm->distribution) {
+        PyErr_SetString(PyExc_ValueError, "model not initialized");
+        return NULL;
+    }
+    if (sym >= sm->num_symbols) {
+        PyErr_SetString(PyExc_IndexError, "symbol out of range");
+        return NULL;
+    }
+    if (encoder_ready(self) < 0) return NULL;
+    laz_encode_symbol(&self->e, sm, sym);
+    if (self->stream->failed) return NULL;
+    Py_RETURN_NONE;
+}
+
+static PyObject *Encoder_write_bits(EncoderObject *self, PyObject *args)
+{
+    unsigned int bits, sym;
+    if (!PyArg_ParseTuple(args, "II", &bits, &sym)) return NULL;
+    if (bits == 0 || bits > 32) {
+        PyErr_SetString(PyExc_ValueError, "bits must be in 1..32");
+        return NULL;
+    }
+    if (bits < 32 && sym >= (1u << bits)) {
+        PyErr_SetString(PyExc_ValueError, "symbol does not fit in that many bits");
+        return NULL;
+    }
+    if (encoder_ready(self) < 0) return NULL;
+    laz_write_bits(&self->e, bits, sym);
+    if (self->stream->failed) return NULL;
+    Py_RETURN_NONE;
+}
+
+static PyObject *Encoder_write_int(EncoderObject *self, PyObject *args)
+{
+    unsigned int sym;
+    if (!PyArg_ParseTuple(args, "I", &sym)) return NULL;
+    if (encoder_ready(self) < 0) return NULL;
+    laz_write_int(&self->e, sym);
+    if (self->stream->failed) return NULL;
+    Py_RETURN_NONE;
+}
+
+/* Compression models never build a decoder table; that is the only way in
+ * which a model differs between the two directions. */
+static PyObject *Encoder_create_symbol_model(EncoderObject *self, PyObject *args)
+{
+    unsigned int num_symbols;
+    PyObject *argtuple, *model;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "I", &num_symbols)) return NULL;
+    argtuple = Py_BuildValue("(IO)", num_symbols, Py_True);
+    if (!argtuple) return NULL;
+    model = PyObject_CallObject((PyObject *)&SymbolModel_Type, argtuple);
+    Py_DECREF(argtuple);
+    return model;
+}
+
+static PyObject *Encoder_repr(EncoderObject *self)
+{
+    return PyUnicode_FromFormat("ArithmeticEncoder(base=%u, length=%u)",
+                                self->e.base, self->e.length);
+}
+
+static PyObject *Encoder_get_length(EncoderObject *self, void *c)
+{ (void)c; return PyLong_FromUnsignedLong(self->e.length); }
+
+static PyObject *Encoder_get_base(EncoderObject *self, void *c)
+{ (void)c; return PyLong_FromUnsignedLong(self->e.base); }
+
+static PyObject *Encoder_get_fp(EncoderObject *self, void *c)
+{ (void)c; Py_INCREF(self->fp); return self->fp; }
+
+static PyMethodDef Encoder_methods[] = {
+    {"start", (PyCFunction)Encoder_start, METH_NOARGS, NULL},
+    {"done", (PyCFunction)Encoder_done, METH_NOARGS, NULL},
+    {"encode_bit", (PyCFunction)Encoder_encode_bit, METH_VARARGS, NULL},
+    {"encode_symbol", (PyCFunction)Encoder_encode_symbol, METH_VARARGS, NULL},
+    {"write_bits", (PyCFunction)Encoder_write_bits, METH_VARARGS, NULL},
+    {"write_int", (PyCFunction)Encoder_write_int, METH_VARARGS, NULL},
+    {"create_symbol_model", (PyCFunction)Encoder_create_symbol_model, METH_VARARGS, NULL},
+    {NULL}
+};
+
+static PyGetSetDef Encoder_getset[] = {
+    {"length", (getter)Encoder_get_length, NULL, NULL, NULL},
+    {"base", (getter)Encoder_get_base, NULL, NULL, NULL},
+    {"fp", (getter)Encoder_get_fp, NULL, NULL, NULL},
+    {NULL}
+};
 
 static PyTypeObject Encoder_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
     .tp_name = "lazpy._cpylaz.ArithmeticEncoder",
-    .tp_basicsize = sizeof(PyObject),
+    .tp_basicsize = sizeof(EncoderObject),
     .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_new = Encoder_new,
-    .tp_dealloc = (destructor)PyObject_Del,
+    .tp_new = PyType_GenericNew,
+    .tp_init = (initproc)Encoder_tp_init,
+    .tp_dealloc = (destructor)Encoder_dealloc,
+    .tp_methods = Encoder_methods,
+    .tp_getset = Encoder_getset,
+    .tp_repr = (reprfunc)Encoder_repr,
 };
 
 /* ===================================================== ArithmeticDecoder == */
@@ -453,10 +624,12 @@ static PyTypeObject Decoder_Type = {
 
 /* ==================================================== IntegerCompressor == */
 
+/* Codes in one direction only: exactly one of dec/enc is non-NULL. */
 typedef struct {
     PyObject_HEAD
     LazIntCompressor ic;
     PyObject *dec;
+    PyObject *enc;
 } IntCompObject;
 
 static PyTypeObject IntComp_Type;
@@ -471,13 +644,21 @@ static int IntComp_tp_init(IntCompObject *self, PyObject *args, PyObject *kwds)
                                      &dec_or_enc, &bits, &contexts, &bits_high, &range))
         return -1;
 
-    if (!PyObject_TypeCheck(dec_or_enc, &Decoder_Type)) {
-        PyErr_SetString(PyExc_TypeError, "first argument must be an ArithmeticDecoder");
+    if (PyObject_TypeCheck(dec_or_enc, &Decoder_Type)) {
+        laz_ic_setup_dec(&self->ic, &((DecoderObject *)dec_or_enc)->d,
+                         bits, contexts, bits_high, range);
+        Py_INCREF(dec_or_enc);
+        self->dec = dec_or_enc;
+    } else if (PyObject_TypeCheck(dec_or_enc, &Encoder_Type)) {
+        laz_ic_setup_enc(&self->ic, &((EncoderObject *)dec_or_enc)->e,
+                         bits, contexts, bits_high, range);
+        Py_INCREF(dec_or_enc);
+        self->enc = dec_or_enc;
+    } else {
+        PyErr_SetString(PyExc_TypeError,
+                        "first argument must be an ArithmeticDecoder or ArithmeticEncoder");
         return -1;
     }
-    Py_INCREF(dec_or_enc);
-    self->dec = dec_or_enc;
-    laz_ic_setup(&self->ic, &((DecoderObject *)dec_or_enc)->d, bits, contexts, bits_high, range);
     return 0;
 }
 
@@ -485,12 +666,47 @@ static void IntComp_dealloc(IntCompObject *self)
 {
     laz_ic_free(&self->ic);
     Py_XDECREF(self->dec);
+    Py_XDECREF(self->enc);
     PyObject_Del(self);
+}
+
+/* Guards the direction and the argument range shared by (de)compress. */
+static int intcomp_ready(IntCompObject *self, PyObject *coder, U32 context,
+                         const char *init_name)
+{
+    if (coder == NULL) {
+        PyErr_SetString(PyExc_ValueError,
+                        "this IntegerCompressor codes in the other direction");
+        return -1;
+    }
+    if (!self->ic.models_created) {
+        PyErr_Format(PyExc_ValueError, "call %s() first", init_name);
+        return -1;
+    }
+    if (context >= self->ic.contexts) {
+        PyErr_SetString(PyExc_IndexError, "context out of range");
+        return -1;
+    }
+    return 0;
 }
 
 static PyObject *IntComp_init_decompressor(IntCompObject *self, PyObject *Py_UNUSED(i))
 {
+    if (self->dec == NULL) {
+        PyErr_SetString(PyExc_ValueError, "this IntegerCompressor has no decoder");
+        return NULL;
+    }
     if (!laz_ic_init_decompressor(&self->ic)) return PyErr_NoMemory();
+    Py_RETURN_NONE;
+}
+
+static PyObject *IntComp_init_compressor(IntCompObject *self, PyObject *Py_UNUSED(i))
+{
+    if (self->enc == NULL) {
+        PyErr_SetString(PyExc_ValueError, "this IntegerCompressor has no encoder");
+        return NULL;
+    }
+    if (!laz_ic_init_compressor(&self->ic)) return PyErr_NoMemory();
     Py_RETURN_NONE;
 }
 
@@ -499,15 +715,19 @@ static PyObject *IntComp_decompress(IntCompObject *self, PyObject *args)
     int pred;
     unsigned int context = 0;
     if (!PyArg_ParseTuple(args, "i|I", &pred, &context)) return NULL;
-    if (!self->ic.models_created) {
-        PyErr_SetString(PyExc_ValueError, "call init_decompressor() first");
-        return NULL;
-    }
-    if (context >= self->ic.contexts) {
-        PyErr_SetString(PyExc_IndexError, "context out of range");
-        return NULL;
-    }
+    if (intcomp_ready(self, self->dec, context, "init_decompressor") < 0) return NULL;
     return PyLong_FromLong(laz_ic_decompress(&self->ic, pred, context));
+}
+
+static PyObject *IntComp_compress(IntCompObject *self, PyObject *args)
+{
+    int pred, real;
+    unsigned int context = 0;
+    if (!PyArg_ParseTuple(args, "ii|I", &pred, &real, &context)) return NULL;
+    if (intcomp_ready(self, self->enc, context, "init_compressor") < 0) return NULL;
+    laz_ic_compress(&self->ic, pred, real, context);
+    if (((EncoderObject *)self->enc)->stream->failed) return NULL;
+    Py_RETURN_NONE;
 }
 
 static PyObject *IntComp_get_m_bits(IntCompObject *self, PyObject *args)
@@ -550,15 +770,28 @@ INTCOMP_GETTER(range, PyLong_FromUnsignedLong(self->ic.range))
 INTCOMP_GETTER(k, PyLong_FromUnsignedLong(self->ic.k))
 INTCOMP_GETTER(corr_bits, PyLong_FromUnsignedLong(self->ic.corr_bits))
 
+/* One of the two is always None: an IntegerCompressor codes in one direction. */
 static PyObject *IntComp_get_dec(IntCompObject *self, void *c)
-{ (void)c; Py_INCREF(self->dec); return self->dec; }
+{
+    (void)c;
+    if (self->dec == NULL) Py_RETURN_NONE;
+    Py_INCREF(self->dec);
+    return self->dec;
+}
 
 static PyObject *IntComp_get_enc(IntCompObject *self, void *c)
-{ (void)self; (void)c; Py_RETURN_NONE; }
+{
+    (void)c;
+    if (self->enc == NULL) Py_RETURN_NONE;
+    Py_INCREF(self->enc);
+    return self->enc;
+}
 
 static PyMethodDef IntComp_methods[] = {
     {"init_decompressor", (PyCFunction)IntComp_init_decompressor, METH_NOARGS, NULL},
+    {"init_compressor", (PyCFunction)IntComp_init_compressor, METH_NOARGS, NULL},
     {"decompress", (PyCFunction)IntComp_decompress, METH_VARARGS, NULL},
+    {"compress", (PyCFunction)IntComp_compress, METH_VARARGS, NULL},
     {"get_m_bits", (PyCFunction)IntComp_get_m_bits, METH_VARARGS, NULL},
     {"get_corrector", (PyCFunction)IntComp_get_corrector, METH_VARARGS, NULL},
     {NULL}

@@ -296,7 +296,7 @@ static BOOL read_chunk_table(LazReadPoint *rp)
         if (rp->number_chunks > 0) {
             LazIntCompressor ic;
             laz_decoder_init(&rp->dec, rp->instream, LAZ_TRUE);
-            laz_ic_setup(&ic, &rp->dec, 32, 2, 8, 0);
+            laz_ic_setup_dec(&ic, &rp->dec, 32, 2, 8, 0);
             if (!laz_ic_init_decompressor(&ic)) { laz_ic_free(&ic); failed = LAZ_TRUE; break; }
             for (i = 1; i <= rp->number_chunks; i++) {
                 if (rp->chunk_size == U32_MAX) {

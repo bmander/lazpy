@@ -1,6 +1,6 @@
 /*
- * Derived from LASzip (https://github.com/LASzip/LASzip), arithmeticmodel.cpp
- * and arithmeticdecoder.cpp.
+ * Derived from LASzip (https://github.com/LASzip/LASzip), arithmeticmodel.cpp,
+ * arithmeticdecoder.cpp and arithmeticencoder.cpp.
  * Copyright (c) 2007-2022, rapidlasso GmbH -- fast tools to catch reality
  * Licensed under the Apache License, Version 2.0; see LICENSE and NOTICE.
  *
@@ -279,4 +279,159 @@ U64 laz_read_int64(LazDecoder *d)
     U64 lower = laz_read_int(d);
     U64 upper = laz_read_int(d);
     return (upper << 32) | lower;
+}
+
+/* ---------------------------------------------------------------- encoder */
+
+BOOL laz_encoder_setup(LazEncoder *e)
+{
+    memset(e, 0, sizeof(*e));
+    e->outbuffer = (U8 *)malloc(2 * AC_BUFFER_SIZE);
+    if (e->outbuffer == NULL) return LAZ_FALSE;
+    e->endbuffer = e->outbuffer + 2 * AC_BUFFER_SIZE;
+    return LAZ_TRUE;
+}
+
+void laz_encoder_init(LazEncoder *e, LazOutStream *stream)
+{
+    e->stream = stream;
+    e->base = 0;
+    e->length = AC_MAX_LENGTH;
+    e->outbyte = e->outbuffer;
+    /* the first half to be handed off is the whole ring: nothing has been
+     * written yet, so there is no history to keep behind the cursor */
+    e->endbyte = e->endbuffer;
+}
+
+void laz_encoder_free(LazEncoder *e)
+{
+    free(e->outbuffer);
+    e->outbuffer = e->endbuffer = e->outbyte = e->endbyte = NULL;
+}
+
+/* Hands the just-filled half to the stream and starts filling the other. */
+static void manage_outbuffer(LazEncoder *e)
+{
+    if (e->outbyte == e->endbuffer) e->outbyte = e->outbuffer;
+    laz_outstream_put_bytes(e->stream, e->outbyte, AC_BUFFER_SIZE);
+    e->endbyte = e->outbyte + AC_BUFFER_SIZE;
+}
+
+/*
+ * Adds the carry out of `base` to the last byte produced, rippling back
+ * through a run of 0xFF. The run cannot be longer than the ring, because a
+ * byte only leaves the ring once AC_BUFFER_SIZE further bytes have been
+ * produced, and the interval width guarantees a non-0xFF byte long before then.
+ */
+static inline void propagate_carry(LazEncoder *e)
+{
+    U8 *p = (e->outbyte == e->outbuffer) ? e->endbuffer - 1 : e->outbyte - 1;
+    while (*p == 0xFFu) {
+        *p = 0;
+        if (p == e->outbuffer) p = e->endbuffer;
+        p--;
+    }
+    ++*p;
+}
+
+static inline void renorm_enc_interval(LazEncoder *e)
+{
+    do {                                    /* output and discard top byte */
+        *e->outbyte++ = (U8)(e->base >> 24);
+        if (e->outbyte == e->endbyte) manage_outbuffer(e);
+        e->base <<= 8;
+    } while ((e->length <<= 8) < AC_MIN_LENGTH);
+}
+
+void laz_encode_bit(LazEncoder *e, LazBitModel *m, U32 sym)
+{
+    U32 x = m->bit_0_prob * (e->length >> BM_LENGTH_SHIFT);   /* product l x p0 */
+
+    if (sym == 0) {
+        e->length = x;
+        ++m->bit_0_count;
+    } else {
+        U32 init_base = e->base;
+        e->base += x;
+        e->length -= x;
+        if (init_base > e->base) propagate_carry(e);          /* overflow = carry */
+    }
+
+    if (e->length < AC_MIN_LENGTH) renorm_enc_interval(e);
+    if (--m->bits_until_update == 0) laz_bit_model_update(m);
+}
+
+void laz_encode_symbol(LazEncoder *e, LazSymbolModel *m, U32 sym)
+{
+    U32 x, init_base = e->base;
+
+    if (sym == m->last_symbol) {
+        x = m->distribution[sym] * (e->length >> DM_LENGTH_SHIFT);
+        e->base += x;
+        e->length -= x;                     /* no second product needed */
+    } else {
+        x = m->distribution[sym] * (e->length >>= DM_LENGTH_SHIFT);
+        e->base += x;
+        e->length = m->distribution[sym + 1] * e->length - x;
+    }
+
+    if (init_base > e->base) propagate_carry(e);
+    if (e->length < AC_MIN_LENGTH) renorm_enc_interval(e);
+
+    ++m->symbol_count[sym];
+    if (--m->symbols_until_update == 0) laz_symbol_model_update(m);
+}
+
+void laz_write_bits(LazEncoder *e, U32 bits, U32 sym)
+{
+    U32 init_base;
+
+    /* mirrors laz_read_bits: the low 16 bits go first, then the rest */
+    if (bits > 19) {
+        laz_write_bits(e, 16, sym & 0xFFFFu);
+        sym >>= 16;
+        bits -= 16;
+    }
+
+    init_base = e->base;
+    e->base += sym * (e->length >>= bits);
+
+    if (init_base > e->base) propagate_carry(e);
+    if (e->length < AC_MIN_LENGTH) renorm_enc_interval(e);
+}
+
+void laz_encoder_done(LazEncoder *e)
+{
+    U32 init_base = e->base;
+    BOOL another_byte = LAZ_TRUE;
+
+    /* pick a final base inside the current interval that ends in zero bytes,
+     * so the decoder's four-byte initial fill sees what it expects */
+    if (e->length > 2 * AC_MIN_LENGTH) {
+        e->base += AC_MIN_LENGTH;
+        e->length = AC_MIN_LENGTH >> 1;             /* one more byte */
+    } else {
+        e->base += AC_MIN_LENGTH >> 1;
+        e->length = AC_MIN_LENGTH >> 9;             /* two more bytes */
+        another_byte = LAZ_FALSE;
+    }
+
+    if (init_base > e->base) propagate_carry(e);
+    renorm_enc_interval(e);                 /* flushes the remaining bytes */
+
+    /* endbyte still pointing at the end of the ring means nothing has been
+     * handed off yet; otherwise the far half holds the older bytes */
+    if (e->endbyte != e->endbuffer) {
+        laz_outstream_put_bytes(e->stream, e->outbuffer + AC_BUFFER_SIZE, AC_BUFFER_SIZE);
+    }
+    if (e->outbyte != e->outbuffer) {
+        laz_outstream_put_bytes(e->stream, e->outbuffer, e->outbyte - e->outbuffer);
+    }
+
+    /* two or three zero bytes, to stay in sync with the decoder */
+    laz_outstream_put_byte(e->stream, 0);
+    laz_outstream_put_byte(e->stream, 0);
+    if (another_byte) laz_outstream_put_byte(e->stream, 0);
+
+    e->stream = NULL;
 }

@@ -7,7 +7,7 @@
  */
 
 /*
- * laz_stream.h -- byte-oriented input streams.
+ * laz_stream.h -- byte-oriented input and output streams.
  *
  * Ported from LASzip's ByteStreamIn hierarchy. Two backings are needed:
  *
@@ -69,5 +69,41 @@ static inline BOOL laz_stream_eof(LazStream *s) { return s->eof; }
 
 U32 laz_stream_get32(LazStream *s);
 U64 laz_stream_get64(LazStream *s);
+
+/* ---------------------------------------------------------------- output */
+
+/*
+ * The write-side counterpart, ported from ByteStreamOut.
+ *
+ * Deliberately unbuffered: the arithmetic encoder keeps its own ring buffer
+ * (carry propagation has to be able to reach back into already-produced
+ * bytes), so it hands over whole 1024-byte blocks and only ever writes single
+ * bytes for the two or three terminators at the end of a stream. A second
+ * buffer underneath would earn nothing.
+ *
+ * As on the input side, a failed write sets `failed` and leaves the Python
+ * exception pending rather than raising through the C core.
+ */
+typedef struct LazOutStream LazOutStream;
+
+struct LazOutStream {
+    void (*put_bytes)(LazOutStream *s, const U8 *bytes, I64 num_bytes);
+    void (*destroy)(LazOutStream *s);
+
+    BOOL failed;
+
+    void *impl;
+};
+
+/* Wraps a Python file-like object (must supply write). Borrows a reference to
+ * fp for the lifetime of the stream. */
+LazOutStream *laz_outstream_new_file(void *py_fp);
+
+void laz_outstream_destroy(LazOutStream *s);
+
+static inline void laz_outstream_put_bytes(LazOutStream *s, const U8 *b, I64 n)
+{ s->put_bytes(s, b, n); }
+static inline void laz_outstream_put_byte(LazOutStream *s, U8 b)
+{ s->put_bytes(s, &b, 1); }
 
 #endif /* LAZ_STREAM_H */

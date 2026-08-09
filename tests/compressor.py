@@ -2,6 +2,16 @@ import encoder
 from lazpy import _cpylaz as cpylaz
 
 
+def i32(x):
+    """Wrap to a signed 32-bit integer.
+
+    Predictor and corrector arithmetic is I32 in the C version, and for
+    32-bit fields it genuinely relies on the wraparound: the corrector
+    between two values at opposite ends of the range is only small once it
+    has wrapped."""
+    return ((x + 0x80000000) & 0xFFFFFFFF) - 0x80000000
+
+
 class IntegerCompressor:
     def __init__(self, dec_or_enc, bits=16, contexts=1, bits_high=8, range=0):
         if type(dec_or_enc) in {cpylaz.ArithmeticDecoder, 
@@ -38,7 +48,7 @@ class IntegerCompressor:
         else:
             self.corr_bits = 32
             self.corr_range = 0
-            self.corr_min = -0x7FFFFFFF
+            self.corr_min = -0x80000000
             self.corr_max = 0x7FFFFFFF
 
         self.m_bits = None
@@ -46,31 +56,39 @@ class IntegerCompressor:
 
         self.k = 0
 
-    def init_decompressor(self):
-        assert self.dec
-
+    def _init_models(self, coder):
+        # the models differ between the two directions only in whether they
+        # build a decoder table, which create_symbol_model already knows
         if self.m_bits is None:
             self.m_bits = []
             for i in range(self.contexts):
-                model = self.dec.create_symbol_model(self.corr_bits+1)
+                model = coder.create_symbol_model(self.corr_bits+1)
                 self.m_bits.append(model)
 
             self.m_corrector = [cpylaz.ArithmeticBitModel()]
-            for i in range(1, self.corr_bits):
+            for i in range(1, self.corr_bits+1):
                 if i <= self.bits_high:
                     self.m_corrector.append(
-                        self.dec.create_symbol_model(1 << i))
+                        coder.create_symbol_model(1 << i))
                 else:
                     self.m_corrector.append(
-                        self.dec.create_symbol_model(1 << self.bits_high))
+                        coder.create_symbol_model(1 << self.bits_high))
 
         for i in range(self.contexts):
             self.m_bits[i].init()
 
         self.m_corrector[0].init()
 
-        for i in range(1, self.corr_bits):
+        for i in range(1, self.corr_bits+1):
             self.m_corrector[i].init()
+
+    def init_decompressor(self):
+        assert self.dec
+        self._init_models(self.dec)
+
+    def init_compressor(self):
+        assert self.enc
+        self._init_models(self.enc)
 
     def _read_corrector(self, model):
         self.k = self.dec.decode_symbol(model)
@@ -99,7 +117,7 @@ class IntegerCompressor:
     def decompress(self, pred, context=0):
         assert self.dec
 
-        real = pred + self._read_corrector(self.m_bits[context])
+        real = i32(pred + self._read_corrector(self.m_bits[context]))
 
         if real < 0:
             real += self.corr_range
@@ -107,6 +125,48 @@ class IntegerCompressor:
             real -= self.corr_range
 
         return real
+
+    def _write_corrector(self, c, model):
+        # find the tightest interval [-(2**k - 1), 2**k] that contains c
+        self.k = 0
+        c1 = -c if c <= 0 else c-1
+        while c1:
+            c1 >>= 1
+            self.k += 1
+
+        self.enc.encode_symbol(model, self.k)
+
+        if self.k != 0:
+            # k == 32 means c == corr_min, which the decoder recovers from k
+            if self.k < 32:
+                # translate c into the k-bit interval [0, 2**k - 1]
+                if c < 0:
+                    c += (1 << self.k)-1
+                else:
+                    c -= 1
+
+                if self.k <= self.bits_high:
+                    self.enc.encode_symbol(self.m_corrector[self.k], c)
+                else:
+                    k1 = self.k-self.bits_high
+                    c1 = c & ((1 << k1)-1)
+                    self.enc.encode_symbol(self.m_corrector[self.k], c >> k1)
+                    self.enc.write_bits(k1, c1)
+        else:
+            self.enc.encode_bit(self.m_corrector[0], c)
+
+    def compress(self, pred, real, context=0):
+        assert self.enc
+
+        # fold the corrector into [corr_min, corr_max] so that k stays within
+        # corr_bits
+        corr = i32(real - pred)
+        if corr < self.corr_min:
+            corr += self.corr_range
+        elif corr > self.corr_max:
+            corr -= self.corr_range
+
+        self._write_corrector(corr, self.m_bits[context])
 
     def get_m_bits(self, i):
         # matches C API
