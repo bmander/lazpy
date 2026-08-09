@@ -252,17 +252,17 @@ static void p14_create_and_init(Point14v3 *r, U32 context, const U8 *item)
         for (i = 0; i < 8; i++)
             laz_symbol_model_setup(&c->m_changed_values[i], 128, LAZ_FALSE);
         laz_symbol_model_setup(&c->m_scanner_channel, 3, LAZ_FALSE);
-        laz_bank_setup(c->m_number_of_returns, c->created_nor, 16, 16);
-        laz_bank_setup(c->m_return_number, c->created_rn, 16, 16);
+        laz_bank_setup(c->m_number_of_returns, c->created_nor, 16, 16, LAZ_FALSE);
+        laz_bank_setup(c->m_return_number, c->created_rn, 16, 16, LAZ_FALSE);
         laz_symbol_model_setup(&c->m_return_number_gps_same, 13, LAZ_FALSE);
 
         laz_ic_setup_dec(&c->ic_dX, &r->channel_returns_XY.dec, 32, 2, 8, 0);
         laz_ic_setup_dec(&c->ic_dY, &r->channel_returns_XY.dec, 32, 22, 8, 0);
         laz_ic_setup_dec(&c->ic_Z, &r->Z.dec, 32, 20, 8, 0);
 
-        laz_bank_setup(c->m_classification, c->created_cls, 64, 256);
-        laz_bank_setup(c->m_flags, c->created_flg, 64, 64);
-        laz_bank_setup(c->m_user_data, c->created_usr, 64, 256);
+        laz_bank_setup(c->m_classification, c->created_cls, 64, 256, LAZ_FALSE);
+        laz_bank_setup(c->m_flags, c->created_flg, 64, 64, LAZ_FALSE);
+        laz_bank_setup(c->m_user_data, c->created_usr, 64, 256, LAZ_FALSE);
 
         laz_ic_setup_dec(&c->ic_intensity, &r->intensity.dec, 16, 4, 8, 0);
         laz_ic_setup_dec(&c->ic_scan_angle, &r->scan_angle.dec, 16, 2, 8, 0);

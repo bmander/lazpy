@@ -1,6 +1,7 @@
 import io
 import os
 import random
+import struct
 
 import pytest
 
@@ -900,6 +901,221 @@ def test_reader_reports_its_position(name):
         assert reader.index == 10
         reader.read()
         assert reader.index == 11
+
+
+# ---------------------------------------------------------------------------
+# The item writers.
+#
+# testdata/ is an oracle for writing as well as reading: every ptN_v0.las holds
+# the same points as the ptN_v1/v2 .laz beside it, uncompressed, so feeding
+# those raw records to the writers should reproduce the compressed files laszip
+# produced -- byte for byte, because the encoder is deterministic. That is a
+# far stronger claim than a round trip, and it is what these tests make.
+#
+# cpylaz.compress_chunk() codes one chunk: the first point raw, then the rest
+# through the compressed writers over one arithmetic stream. Chunking and the
+# chunk table are the container's job and are still to come, so the tests
+# assemble the container themselves.
+# ---------------------------------------------------------------------------
+
+LEGACY_FORMATS = list(range(6))
+
+
+def las_records(name):
+    """The uncompressed point records of a .las fixture, as they sit on disk.
+
+    For point formats 0-5 a record is exactly the concatenation of its LAZ
+    items, so these go straight into compress_chunk.
+    """
+    with open(fixture(name), "rb") as fh:
+        data = fh.read()
+    offset = struct.unpack_from("<I", data, 96)[0]
+    length = struct.unpack_from("<H", data, 105)[0]
+    count = struct.unpack_from("<I", data, 107)[0]
+    return [data[offset + i * length: offset + (i + 1) * length]
+            for i in range(count)]
+
+
+def point_block(name):
+    """Everything a fixture holds from the first point onward."""
+    with open(fixture(name), "rb") as fh:
+        data = fh.read()
+    return data[struct.unpack_from("<I", data, 96)[0]:]
+
+
+def item_layout(name):
+    """The item layout a fixture declares, as compress_chunk wants it."""
+    with Reader(fixture(name)) as reader:
+        return [(int(t), size, version) for t, size, version in reader.items]
+
+
+def rebuilt(name, block, count):
+    """A fixture's header and VLRs, with our own point block behind them."""
+    with open(fixture(name), "rb") as fh:
+        data = fh.read()
+    header = bytearray(data[:struct.unpack_from("<I", data, 96)[0]])
+    struct.pack_into("<I", header, 107, count)
+    return io.BytesIO(bytes(header) + block)
+
+
+@pytest.mark.parametrize("point_format", LEGACY_FORMATS)
+def test_v1_output_is_byte_identical_to_laszip(point_format):
+    """The whole point block of a non-chunked v1 file, reproduced exactly."""
+    name = f"pt{point_format}_v1_pointwise.laz"
+    written = cpylaz.compress_chunk(item_layout(name),
+                                    las_records(f"pt{point_format}_v0.las"))
+    assert written == point_block(name)
+
+
+@pytest.mark.parametrize("point_format", LEGACY_FORMATS)
+def test_v2_output_is_byte_identical_to_laszip(point_format):
+    """Every chunk of a chunked v2 file, reproduced exactly.
+
+    Walking the chunks end to end also pins their lengths: the last one has to
+    finish exactly where the chunk table begins.
+    """
+    name = f"pt{point_format}_v2.laz"
+    records = las_records(f"pt{point_format}_v0.las")
+    items = item_layout(name)
+    with Reader(fixture(name)) as reader:
+        chunk_size = reader.chunk_size
+    block = point_block(name)
+
+    table_start = struct.unpack_from("<q", block, 0)[0]
+    with open(fixture(name), "rb") as fh:
+        block_offset = struct.unpack_from("<I", fh.read(100), 96)[0]
+
+    position = 8                                   # past the chunk table offset
+    for start in range(0, len(records), chunk_size):
+        written = cpylaz.compress_chunk(items, records[start:start + chunk_size])
+        assert block[position:position + len(written)] == written, \
+            f"chunk starting at point {start} differs"
+        position += len(written)
+
+    assert block_offset + position == table_start
+
+
+@pytest.mark.parametrize("point_format", LEGACY_FORMATS)
+def test_raw_output_is_byte_identical(point_format):
+    """Version 0 items write the record straight through."""
+    records = las_records(f"pt{point_format}_v0.las")
+    items = [(t, size, 0) for t, size, _ in item_layout(f"pt{point_format}_v2.laz")]
+    assert cpylaz.compress_chunk(items, records) == b"".join(records)
+
+
+def awkward_records(count, length):
+    """Points chosen to reach the branches the tidy fixtures never do.
+
+    Coordinates that jump the full I32 range, gps times that repeat, creep and
+    leap far enough to start a new time sequence, and colours, wavepackets and
+    extra bytes with no structure at all.
+    """
+    rand = random.Random(4)
+    records = []
+    gps_time = 1.0e9
+    for i in range(count):
+        r = bytearray(length)
+        struct.pack_into("<iii", r, 0,
+                         rand.randrange(-2**30, 2**30) if i % 7 == 0 else i * 13,
+                         i * -7 if i % 3 else rand.randrange(-2**30, 2**30),
+                         i * i % 90000)
+        struct.pack_into("<H", r, 12, rand.randrange(65536))
+        for offset in (14, 15, 16, 17):
+            r[offset] = rand.randrange(256)
+        struct.pack_into("<H", r, 18, rand.randrange(65536))
+        gps_time += (1e6 if i % 50 == 0 else
+                     0.0 if i % 11 == 0 else 0.001 * rand.randrange(1000))
+        struct.pack_into("<d", r, 20, gps_time)
+        struct.pack_into("<HHH", r, 28, *(rand.randrange(65536) for _ in range(3)))
+        r[34] = rand.randrange(256)
+        struct.pack_into("<QIifff", r, 35,
+                         rand.randrange(2**40), rand.randrange(2**20),
+                         rand.randrange(-2**20, 2**20),
+                         *(rand.uniform(-1, 1) for _ in range(3)))
+        for offset in range(63, length):
+            r[offset] = rand.randrange(256)
+        records.append(bytes(r))
+    return records
+
+
+@pytest.fixture(scope="module")
+def records():
+    with open(fixture("pt5_v0.las"), "rb") as fh:
+        length = struct.unpack_from("<H", fh.read(107), 105)[0]
+    return awkward_records(400, length)
+
+
+@pytest.fixture(scope="module")
+def expected(records):
+    """What those records decode to when nothing compresses them."""
+    with Reader(rebuilt("pt5_v0.las", b"".join(records), len(records))) as reader:
+        return reader.checksum()
+
+
+class TestWrittenPointsReadBack:
+    """
+    Byte-identity only covers the points laszip happened to generate. These
+    feed the writers deliberately awkward points, wrap the result in a real
+    container and read it back, which is the only check available where there
+    is no laszip reference to compare against.
+
+    Point format 5 carries every legacy item at once, so one format covers all
+    of them.
+    """
+
+    def test_v1_round_trips(self, records, expected):
+        name = "pt5_v1_pointwise.laz"
+        block = cpylaz.compress_chunk(item_layout(name), records)
+        with Reader(rebuilt(name, block, len(records))) as reader:
+            assert reader.checksum() == expected
+
+    def test_v2_round_trips_across_chunks(self, records, expected):
+        name = "pt5_v2.laz"
+        items = item_layout(name)
+        with Reader(fixture(name)) as reader:
+            chunk_size = reader.chunk_size
+        with open(fixture(name), "rb") as fh:
+            block_offset = struct.unpack_from("<I", fh.read(100), 96)[0]
+
+        body = b"".join(
+            cpylaz.compress_chunk(items, records[start:start + chunk_size])
+            for start in range(0, len(records), chunk_size))
+        assert len(body) > 0
+
+        # A chunk table offset pointing back at the point block is how laszip
+        # leaves a file it was interrupted writing; the reader then walks the
+        # chunks in order, which is all this needs.
+        block = struct.pack("<q", block_offset) + body
+        with Reader(rebuilt(name, block, len(records))) as reader:
+            assert reader.checksum() == expected
+
+
+class TestCompressChunkErrors:
+
+    def items(self):
+        return item_layout("pt1_v2.laz")
+
+    def test_rejects_mixed_raw_and_compressed_items(self):
+        items = self.items()
+        items[0] = (items[0][0], items[0][1], 0)
+        with pytest.raises(ValueError):
+            cpylaz.compress_chunk(items, las_records("pt1_v0.las"))
+
+    def test_rejects_a_record_of_the_wrong_size(self):
+        with pytest.raises(ValueError):
+            cpylaz.compress_chunk(self.items(), [b"\x00" * 3])
+
+    def test_rejects_an_unknown_item_version(self):
+        items = [(t, size, 7) for t, size, _ in self.items()]
+        with pytest.raises(ValueError):
+            cpylaz.compress_chunk(items, las_records("pt1_v0.las"))
+
+    def test_rejects_no_items(self):
+        with pytest.raises(ValueError):
+            cpylaz.compress_chunk([], [b""])
+
+    def test_writes_nothing_for_no_points(self):
+        assert cpylaz.compress_chunk(self.items(), []) == b""
 
 
 POINTWISE_FIXTURES = [n for n in FIXTURES if n.endswith("_pointwise.laz")]

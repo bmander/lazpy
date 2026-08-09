@@ -153,9 +153,9 @@ LazReadItem *laz_readitem_v1_point10(LazDecoder *dec)
     laz_ic_setup_dec(&r->ic_scan_angle_rank, dec, 8, 2, 8, 0);
     laz_ic_setup_dec(&r->ic_point_source_ID, dec, 16, 1, 8, 0);
     laz_symbol_model_setup(&r->m_changed_values, 64, LAZ_FALSE);
-    laz_bank_setup(r->m_bit_byte, r->created_bit_byte, 256, 256);
-    laz_bank_setup(r->m_classification, r->created_classification, 256, 256);
-    laz_bank_setup(r->m_user_data, r->created_user_data, 256, 256);
+    laz_bank_setup(r->m_bit_byte, r->created_bit_byte, 256, 256, LAZ_FALSE);
+    laz_bank_setup(r->m_classification, r->created_classification, 256, 256, LAZ_FALSE);
+    laz_bank_setup(r->m_user_data, r->created_user_data, 256, 256, LAZ_FALSE);
     return (LazReadItem *)r;
 }
 

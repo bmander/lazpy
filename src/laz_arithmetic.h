@@ -121,5 +121,6 @@ void laz_encode_bit(LazEncoder *e, LazBitModel *m, U32 sym);
 void laz_encode_symbol(LazEncoder *e, LazSymbolModel *m, U32 sym);
 void laz_write_bits(LazEncoder *e, U32 bits, U32 sym);
 static inline void laz_write_int(LazEncoder *e, U32 sym) { laz_write_bits(e, 32, sym); }
+void laz_write_int64(LazEncoder *e, U64 sym);
 
 #endif /* LAZ_ARITHMETIC_H */

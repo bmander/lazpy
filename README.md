@@ -22,10 +22,11 @@ with Reader("cloud.laz") as reader:
 
 ## Status
 
-Reading is complete. Writing is under way: the entropy coder is now
-bidirectional — `ArithmeticEncoder` and the `IntegerCompressor` compress path
-are implemented and round-trip against the decoder — but nothing above them
-writes a LAZ file yet.
+Reading is complete. Writing is under way: the entropy coder is
+bidirectional, and the item writers for point formats 0–5 (LAZ v1 and v2) are
+in place and produce byte-identical output to laszip. Still missing above them
+are the LAS 1.4 layered writers, the chunking container and a `Writer` front
+end, so lazpy cannot yet write a file end to end.
 
 | Point data format | Items | LAZ versions |
 |---|---|---|
@@ -82,6 +83,11 @@ against the pure-Python reference implementations in `tests/models.py`,
 `tests/encoder.py` and `tests/compressor.py`. The encoder has no committed
 vectors of its own: it is tested as the decoder's inverse, by round trip, and
 by requiring the C and pure-Python encoders to emit the same bytes.
+
+The item writers are pinned harder still. Each `ptN_v0.las` holds the same
+points as the `.laz` files beside it, so compressing those records has to
+reproduce those files byte for byte — which it does, for every legacy point
+format in both v1 and v2.
 
 The end-to-end tests read `testdata/`, which holds a small file for every point
 data format crossed with every item version that applies to it, and compare a
@@ -147,14 +153,18 @@ with Reader("cloud.laz", decompress_selective=mask) as reader:
 | `lazpy/__init__.py` | header and VLR parsing, the `Reader` API |
 | `lazpy/_utils.py` | bytestream parsing helpers |
 | `src/cpylazmodule.c` | Python bindings, built as `lazpy._cpylaz` |
-| `src/laz_stream.*` | buffered file and in-memory byte streams, and the output stream |
+| `src/laz_stream.*` | buffered file and in-memory byte streams, in and out |
 | `src/laz_arithmetic.*` | arithmetic models, decoder and encoder |
 | `src/laz_intcompressor.*` | entropy-coded integer (de)compressor |
+| `src/laz_item.h` | predictors and model banks shared by the readers and writers |
 | `src/laz_readitem_raw.c` | uncompressed item readers |
 | `src/laz_readitem_v1.c` | LASzip 1.0 item readers |
 | `src/laz_readitem_v2.c` | LASzip 2.0 item readers |
 | `src/laz_readitem_v3.c` | layered LAS 1.4 item readers, v3 and v4 |
 | `src/laz_readpoint.c` | chunking, chunk tables, seeking |
+| `src/laz_writeitem_raw.c` | uncompressed item writers |
+| `src/laz_writeitem_v1.c` | LASzip 1.0 item writers |
+| `src/laz_writeitem_v2.c` | LASzip 2.0 item writers |
 | `tests/test_lazpy.py` | the test suite |
 | `tests/models.py`, `tests/encoder.py`, `tests/compressor.py` | pure-Python reference implementations, used as a test oracle — not installed |
 | `pyproject.toml` | package metadata, the extension build, and the wheel matrix |
