@@ -35,51 +35,6 @@ void laz_readpoint_init_struct(LazReadPoint *rp, U32 decompress_selective)
     rp->decompress_selective = decompress_selective;
 }
 
-/*
- * Returns the offset within a LazPoint that item `type` decodes into.
- * BYTE/BYTE14 are the exception: extra bytes live in a caller-supplied buffer,
- * signalled by returning -1.
- */
-static I32 item_offset(U32 type)
-{
-    switch (type) {
-    case LAZ_ITEM_POINT10:
-    case LAZ_ITEM_POINT14:
-        return LAZ_POINT_OFFSET_XYZ;
-    case LAZ_ITEM_GPSTIME11:
-        return LAZ_POINT_OFFSET_GPSTIME;
-    case LAZ_ITEM_RGB12:
-    case LAZ_ITEM_RGB14:
-    case LAZ_ITEM_RGBNIR14:
-        return LAZ_POINT_OFFSET_RGB;
-    case LAZ_ITEM_WAVEPACKET13:
-    case LAZ_ITEM_WAVEPACKET14:
-        return LAZ_POINT_OFFSET_WAVEPACKET;
-    case LAZ_ITEM_BYTE:
-    case LAZ_ITEM_BYTE14:
-        return -1;
-    default:
-        return -2;      /* unsupported */
-    }
-}
-
-static LazReadItem *make_raw_reader(const LazItem *item, LazStream *in)
-{
-    switch (item->type) {
-    case LAZ_ITEM_POINT10:      return laz_readitem_raw_point10(in);
-    case LAZ_ITEM_GPSTIME11:    return laz_readitem_raw_gpstime11(in);
-    case LAZ_ITEM_RGB12:
-    case LAZ_ITEM_RGB14:        return laz_readitem_raw_rgb12(in);
-    case LAZ_ITEM_BYTE:
-    case LAZ_ITEM_BYTE14:       return laz_readitem_raw_byte(in, item->size);
-    case LAZ_ITEM_POINT14:      return laz_readitem_raw_point14(in);
-    case LAZ_ITEM_RGBNIR14:     return laz_readitem_raw_rgbnir14(in);
-    case LAZ_ITEM_WAVEPACKET13:
-    case LAZ_ITEM_WAVEPACKET14: return laz_readitem_raw_wavepacket13(in);
-    default:                    return NULL;
-    }
-}
-
 static LazReadItem *make_compressed_reader(const LazItem *item, LazDecoder *dec,
                                            U32 selective)
 {
@@ -167,13 +122,13 @@ BOOL laz_readpoint_setup(LazReadPoint *rp, U32 num_items, const LazItem *items,
     rp->readers_raw = (LazReadItem **)calloc(num_items, sizeof(LazReadItem *));
     if (!rp->readers_raw) { set_error(rp, "out of memory"); return LAZ_FALSE; }
     for (i = 0; i < num_items; i++) {
-        rp->item_offsets[i] = item_offset(items[i].type);
+        rp->item_offsets[i] = laz_item_offset(items[i].type);
         if (rp->item_offsets[i] == -2) {
             set_error(rp, "item type %u is not supported", items[i].type);
             return LAZ_FALSE;
         }
         if (rp->item_offsets[i] == -1) rp->num_extra_bytes += items[i].size;
-        rp->readers_raw[i] = make_raw_reader(&items[i], NULL);
+        rp->readers_raw[i] = laz_readitem_new_raw(&items[i], NULL);
         if (!rp->readers_raw[i]) {
             set_error(rp, "item type %u is not supported", items[i].type);
             return LAZ_FALSE;

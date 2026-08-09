@@ -22,11 +22,11 @@ with Reader("cloud.laz") as reader:
 
 ## Status
 
-Reading is complete. Writing is under way: the entropy coder is
-bidirectional, and the item writers for point formats 0–5 (LAZ v1 and v2) are
-in place and produce byte-identical output to laszip. Still missing above them
-are the LAS 1.4 layered writers, the chunking container and a `Writer` front
-end, so lazpy cannot yet write a file end to end.
+Reading is complete. Writing is under way: the entropy coder is bidirectional,
+and every item writer is in place — v1 and v2 for point formats 0–5, the
+layered v3 and v4 for 6–10 — each producing byte-identical output to laszip.
+Still missing above them are the chunking container and a `Writer` front end,
+so lazpy cannot yet write a file end to end.
 
 | Point data format | Items | LAZ versions |
 |---|---|---|

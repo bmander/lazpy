@@ -59,6 +59,15 @@ LazReadItem *laz_readitem_raw_wavepacket13(LazStream *in);
 LazReadItem *laz_readitem_raw_byte(LazStream *in, U32 number);
 LazReadItem *laz_readitem_raw_point14(LazStream *in);
 
+/*
+ * Picks the raw reader for one item of a LASzip VLR, the mirror of
+ * laz_writeitem_new_raw. Returns NULL for a type with no reader.
+ *
+ * Several 1.4 items share a legacy reader, because uncompressed they are the
+ * same bytes: RGB14 is an RGB12, WAVEPACKET14 a WAVEPACKET13, BYTE14 a BYTE.
+ */
+LazReadItem *laz_readitem_new_raw(const LazItem *item, LazStream *in);
+
 /* --- v1 compressed readers (lasreaditemcompressed_v1.cpp) --- */
 LazReadItem *laz_readitem_v1_point10(LazDecoder *dec);
 LazReadItem *laz_readitem_v1_gpstime11(LazDecoder *dec);

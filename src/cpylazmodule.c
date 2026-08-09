@@ -1335,58 +1335,85 @@ static PyTypeObject Reader_Type = {
 /* ========================================================= chunk writer == */
 
 /*
- * compress_chunk: run a sequence of point records through the item writers.
+ * compress_chunks: run a sequence of point records through the item writers.
  *
- * This is one chunk of LASzip's container and nothing else -- the first point
- * raw, then every other point through the compressed writers over a single
- * arithmetic stream -- with the chunking, the chunk table and the header left
- * out. It exists so the item writers can be pinned against real laszip output
- * before the point writer exists, and the point writer will subsume it.
+ * This is the point-coding half of LASzip's container and nothing else -- each
+ * chunk's first point raw, then the rest through the compressed writers -- with
+ * the chunk table and the header left out. It exists so the item writers can be
+ * pinned against real laszip output before the point writer exists, and the
+ * point writer will subsume it. The chunks come back separately because their
+ * boundaries are exactly what a caller wants to check.
  *
- * A record is the concatenation of its items, which for point formats 0-5 is
- * exactly the uncompressed LAS point record, so the fixtures in testdata/ can
- * be fed in as they sit on disk.
+ * One set of writers spans every chunk, as the container's will: a writer's
+ * init() has to put it back into the state a fresh one would be in, and a
+ * layered writer that failed to rewind its layer buffers would only show up on
+ * the second chunk.
+ *
+ * Records go in as they sit in the file. Each is scattered into a LazPoint by
+ * the raw *readers* before any writer sees it, because an item coder is handed
+ * a pointer into the point rather than into the record, and for the LAS 1.4
+ * point types the two are not the same: POINT14's 30-byte record splits across
+ * both the legacy and the extended fields of a point. For point formats 0-5
+ * the scatter is the identity.
+ *
+ * Layered (v3/v4) chunks close differently from pointwise ones. There is no
+ * single arithmetic stream to finish: instead the chunk's point count goes out,
+ * then every writer's per-layer byte counts, then every writer's layer bytes.
+ * The shared encoder is still init'd, because that is where the layered writers
+ * find the output stream, but nothing is ever encoded through it.
  */
-/* Writes one record through `w`, item by item. */
-static void write_record(LazWriteItem **w, const LazItem *items, U32 num_items,
-                         const U8 *data)
+/* Writes one point through `w`, item by item, from the offsets it decoded to. */
+static void write_record(LazWriteItem **w, U8 *const *src, U32 num_items)
 {
     U32 i, context = 0;
-    for (i = 0; i < num_items; i++) {
-        w[i]->write(w[i], data, &context);
-        data += items[i].size;
-    }
+    for (i = 0; i < num_items; i++) w[i]->write(w[i], src[i], &context);
 }
 
-static PyObject *cpylaz_compress_chunk(PyObject *self, PyObject *args)
+static PyObject *cpylaz_compress_chunks(PyObject *self, PyObject *args)
 {
     PyObject *item_seq, *record_seq, *records = NULL, *result = NULL;
     LazItem *items = NULL;
     LazWriteItem **raw = NULL, **compressed = NULL;
+    LazReadItem **scatter = NULL;
+    LazStream *in = NULL;
+    LazPoint point = {0};
+    I32 offsets[LAZ_MAX_ITEMS];
+    U8 *extra_bytes = NULL, *at[LAZ_MAX_ITEMS];
+    U32 num_extra_bytes = 0;
     U32 num_items = 0, i;
-    Py_ssize_t record_size = 0, num_records, r;
+    Py_ssize_t chunk_size = 0;
+    Py_ssize_t record_size = 0, num_records, r, chunk_start = 0;
     LazOutStream *out = NULL;
     LazEncoder enc = {0};       /* the cleanup path frees it however we get there */
-    BOOL have_enc;
-    const U8 *bytes;
-    I64 size;
+    BOOL have_enc, layered;
 
     (void)self;
-    if (!PyArg_ParseTuple(args, "OO", &item_seq, &record_seq)) return NULL;
+    memset(&point, 0, sizeof(point));
+    if (!PyArg_ParseTuple(args, "OO|n", &item_seq, &record_seq, &chunk_size))
+        return NULL;
     if (parse_items(item_seq, &items, &num_items) < 0) return NULL;
+
+    if (num_items > LAZ_MAX_ITEMS) {
+        PyErr_Format(PyExc_ValueError, "too many items (%u, maximum %u)",
+                     num_items, LAZ_MAX_ITEMS);
+        goto done;
+    }
 
     /* Items carry their own versions, exactly as the LASzip VLR declares them
      * -- WAVEPACKET13 stays at v1 inside a v2 file. What a chunk cannot mix is
-     * compressed and uncompressed items, because one encoder covers them all. */
+     * compressed and uncompressed items, because one encoder covers them all,
+     * nor layered and pointwise ones, because those close a chunk differently. */
     for (i = 0; i < num_items; i++) {
-        if ((items[i].version == 0) != (items[0].version == 0)) {
+        if ((items[i].version == 0) != (items[0].version == 0) ||
+            (items[i].version >= 3) != (items[0].version >= 3)) {
             PyErr_SetString(PyExc_ValueError,
-                            "items must be either all compressed or all raw");
+                            "items must all be raw, all pointwise or all layered");
             goto done;
         }
         record_size += items[i].size;
     }
     have_enc = (items[0].version != 0);
+    layered = (items[0].version >= 3);
 
     records = PySequence_Fast(record_seq, "records must be a sequence");
     if (!records) goto done;
@@ -1394,17 +1421,30 @@ static PyObject *cpylaz_compress_chunk(PyObject *self, PyObject *args)
 
     raw = (LazWriteItem **)PyMem_Calloc(num_items, sizeof(LazWriteItem *));
     compressed = (LazWriteItem **)PyMem_Calloc(num_items, sizeof(LazWriteItem *));
+    scatter = (LazReadItem **)PyMem_Calloc(num_items, sizeof(LazReadItem *));
     out = laz_outstream_new_array();
-    if (!raw || !compressed || !out || (have_enc && !laz_encoder_setup(&enc))) {
+    in = laz_stream_new_array(NULL, 0);
+    if (!raw || !compressed || !scatter || !out || !in ||
+        (have_enc && !laz_encoder_setup(&enc))) {
         PyErr_NoMemory();
         goto done;
     }
 
     /* Built once and reused, as laz_readpoint_setup builds its readers. */
     for (i = 0; i < num_items; i++) {
+        offsets[i] = laz_item_offset(items[i].type);
+        if (offsets[i] == -2) {
+            PyErr_Format(PyExc_ValueError, "item type %u is not supported",
+                         items[i].type);
+            goto done;
+        }
+        if (offsets[i] == -1) num_extra_bytes += items[i].size;
+        if (items[i].type == LAZ_ITEM_POINT14) point.extended_point_type = 1;
+
+        scatter[i] = laz_readitem_new_raw(&items[i], in);
         raw[i] = laz_writeitem_new_raw(&items[i], out);
-        if (!raw[i]) {
-            PyErr_Format(PyExc_ValueError, "no raw writer for item type %u",
+        if (!scatter[i] || !raw[i]) {
+            PyErr_Format(PyExc_ValueError, "no raw coder for item type %u",
                          items[i].type);
             goto done;
         }
@@ -1418,56 +1458,104 @@ static PyObject *cpylaz_compress_chunk(PyObject *self, PyObject *args)
         }
     }
 
-    for (r = 0; r < num_records; r++) {
-        PyObject *rec = PySequence_Fast_GET_ITEM(records, r);   /* borrowed */
-        char *data;
-        Py_ssize_t len;
+    /* deferred until num_extra_bytes is known, which is the only reason the
+     * item coders' targets are not resolved in the loop above */
+    extra_bytes = (U8 *)PyMem_Calloc(num_extra_bytes + 1, 1);
+    if (!extra_bytes) { PyErr_NoMemory(); goto done; }
+    for (i = 0; i < num_items; i++)
+        at[i] = (offsets[i] < 0) ? extra_bytes : (U8 *)&point + offsets[i];
 
-        if (PyBytes_AsStringAndSize(rec, &data, &len) < 0) goto done;
-        if (len != record_size) {
-            PyErr_Format(PyExc_ValueError,
-                         "record %zd is %zd bytes, expected %zd", r, len, record_size);
-            goto done;
-        }
+    /* a chunk size of zero means one chunk holding every record, which is what
+     * the non-chunked POINTWISE container does */
+    if (chunk_size <= 0 || chunk_size > num_records) chunk_size = num_records;
 
-        if (r == 0) {
-            /* the first point of a chunk is stored raw and seeds the predictors */
+    result = PyList_New(0);
+    if (!result) goto done;
+
+    for (chunk_start = 0; chunk_start < num_records; chunk_start += chunk_size) {
+        Py_ssize_t chunk_count = num_records - chunk_start;
+        PyObject *chunk;
+        const U8 *bytes;
+        I64 size;
+
+        if (chunk_count > chunk_size) chunk_count = chunk_size;
+        laz_outstream_array_rewind(out);
+
+        for (r = 0; r < chunk_count; r++) {
+            PyObject *rec = PySequence_Fast_GET_ITEM(records, chunk_start + r);
+            char *data;
+            Py_ssize_t len;
             U32 context = 0;
-            const U8 *at = (const U8 *)data;
-            write_record(raw, items, num_items, at);
-            if (have_enc) {
-                for (i = 0; i < num_items; i++) {
-                    compressed[i]->init(compressed[i], at, &context);
-                    at += items[i].size;
-                }
-                laz_encoder_init(&enc, out);
+
+            if (PyBytes_AsStringAndSize(rec, &data, &len) < 0) goto fail;
+            if (len != record_size) {
+                PyErr_Format(PyExc_ValueError, "record %zd is %zd bytes, expected %zd",
+                             chunk_start + r, len, record_size);
+                goto fail;
             }
-        } else {
-            write_record(have_enc ? compressed : raw, items, num_items,
-                         (const U8 *)data);
+
+            laz_stream_array_reset(in, (const U8 *)data, len);
+            for (i = 0; i < num_items; i++)
+                scatter[i]->read(scatter[i], at[i], &context);
+
+            context = 0;
+            if (r == 0) {
+                /* a chunk's first point is stored raw and seeds the predictors */
+                write_record(raw, at, num_items);
+                if (have_enc) {
+                    for (i = 0; i < num_items; i++)
+                        compressed[i]->init(compressed[i], at[i], &context);
+                    /* pointwise: the stream the encoder emits into; layered:
+                     * only how the writers reach the chunk's output */
+                    laz_encoder_init(&enc, out);
+                }
+            } else {
+                write_record(have_enc ? compressed : raw, at, num_items);
+            }
         }
-    }
 
-    if (have_enc && num_records > 0) laz_encoder_done(&enc);
-    if (out->failed) {
-        /* the array sink only fails on allocation; a file sink would have left
-         * the file object's own exception pending */
-        if (!PyErr_Occurred()) PyErr_NoMemory();
-        goto done;
-    }
+        if (have_enc) {
+            if (layered) {
+                laz_outstream_put32(out, (U32)chunk_count);
+                for (i = 0; i < num_items; i++)
+                    compressed[i]->chunk_sizes(compressed[i]);
+                for (i = 0; i < num_items; i++)
+                    compressed[i]->chunk_bytes(compressed[i]);
+            } else {
+                laz_encoder_done(&enc);
+            }
+        }
+        if (out->failed) {
+            /* the array sink only fails on allocation; a file sink would have
+             * left the file object's own exception pending */
+            if (!PyErr_Occurred()) PyErr_NoMemory();
+            goto fail;
+        }
 
-    bytes = laz_outstream_array_data(out, &size);
-    result = PyBytes_FromStringAndSize((const char *)bytes, (Py_ssize_t)size);
+        bytes = laz_outstream_array_data(out, &size);
+        chunk = PyBytes_FromStringAndSize((const char *)bytes, (Py_ssize_t)size);
+        if (!chunk) goto fail;
+        if (PyList_Append(result, chunk) < 0) { Py_DECREF(chunk); goto fail; }
+        Py_DECREF(chunk);
+    }
+    goto done;
+
+fail:
+    Py_CLEAR(result);
 
 done:
     for (i = 0; i < num_items; i++) {
         if (raw) laz_writeitem_destroy(raw[i]);
         if (compressed) laz_writeitem_destroy(compressed[i]);
+        if (scatter) laz_readitem_destroy(scatter[i]);
     }
     PyMem_Free(raw);
     PyMem_Free(compressed);
+    PyMem_Free(scatter);
+    PyMem_Free(extra_bytes);
     laz_encoder_free(&enc);
     laz_outstream_destroy(out);
+    laz_stream_destroy(in);
     PyMem_Free(items);
     Py_XDECREF(records);
     return result;
@@ -1476,8 +1564,8 @@ done:
 /* ================================================================ module == */
 
 static PyMethodDef cpylaz_methods[] = {
-    {"compress_chunk", cpylaz_compress_chunk, METH_VARARGS,
-     "compress_chunk(items, records) -> bytes"},
+    {"compress_chunks", cpylaz_compress_chunks, METH_VARARGS,
+     "compress_chunks(items, records, chunk_size=0) -> list[bytes]"},
     {NULL, NULL}
 };
 

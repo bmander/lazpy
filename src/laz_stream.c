@@ -405,6 +405,11 @@ const U8 *laz_outstream_array_data(LazOutStream *s, I64 *size)
     return a->data;
 }
 
+void laz_outstream_array_rewind(LazOutStream *s)
+{
+    ((ArrayOutImpl *)s->impl)->size = 0;
+}
+
 /* ----------------------------------------------------------------- shared */
 
 void laz_outstream_destroy(LazOutStream *s)
@@ -433,4 +438,14 @@ U64 laz_stream_get64(LazStream *s)
     U64 lo = laz_stream_get32(s);
     U64 hi = laz_stream_get32(s);
     return lo | (hi << 32);
+}
+
+void laz_outstream_put32(LazOutStream *s, U32 value)
+{
+    U8 b[4];
+    b[0] = (U8)(value & 0xFF);
+    b[1] = (U8)((value >> 8) & 0xFF);
+    b[2] = (U8)((value >> 16) & 0xFF);
+    b[3] = (U8)((value >> 24) & 0xFF);
+    s->put_bytes(s, b, 4);
 }
