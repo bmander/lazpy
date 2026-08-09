@@ -40,6 +40,7 @@ static RawWriter *raw_new(LazOutStream *out,
     w->base.write = write;
     w->base.init = raw_init_noop;
     w->base.chunk_sizes = NULL;
+    w->base.chunk_bytes = NULL;
     w->base.destroy = NULL;
     w->base.outstream = out;
     w->number = number;

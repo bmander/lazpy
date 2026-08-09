@@ -1,3 +1,5 @@
+import collections
+import functools
 import io
 import os
 import random
@@ -918,7 +920,31 @@ def test_reader_reports_its_position(name):
 # assemble the container themselves.
 # ---------------------------------------------------------------------------
 
-LEGACY_FORMATS = list(range(6))
+LEGACY_FORMATS = range(6)
+
+# The one field lazpy does not hand back: patching a fixture's point count
+# means writing it where the LAS header keeps it.
+LEGACY_POINT_COUNT_OFFSET = 107
+
+FixtureFile = collections.namedtuple(
+    "FixtureFile", "data header num_points items chunk_size")
+
+
+@functools.lru_cache(maxsize=None)
+def load(name):
+    """A fixture's bytes, plus what lazpy parses out of its header.
+
+    Going through Reader rather than unpacking header offsets by hand keeps
+    these helpers honest about the fields that moved in LAS 1.4 -- num_points
+    is the extended count where there is one.
+    """
+    with open(fixture(name), "rb") as fh:
+        data = fh.read()
+    with Reader(io.BytesIO(data)) as reader:
+        return FixtureFile(data, reader.header, reader.num_points,
+                           tuple((int(t), size, version)
+                                 for t, size, version in reader.items),
+                           reader.chunk_size)
 
 
 def las_records(name):
@@ -927,42 +953,39 @@ def las_records(name):
     For point formats 0-5 a record is exactly the concatenation of its LAZ
     items, so these go straight into compress_chunk.
     """
-    with open(fixture(name), "rb") as fh:
-        data = fh.read()
-    offset = struct.unpack_from("<I", data, 96)[0]
-    length = struct.unpack_from("<H", data, 105)[0]
-    count = struct.unpack_from("<I", data, 107)[0]
-    return [data[offset + i * length: offset + (i + 1) * length]
-            for i in range(count)]
+    f = load(name)
+    start = f.header["offset_to_point_data"]
+    length = f.header["point_data_record_length"]
+    return [f.data[start + i * length: start + (i + 1) * length]
+            for i in range(f.num_points)]
 
 
 def point_block(name):
     """Everything a fixture holds from the first point onward."""
-    with open(fixture(name), "rb") as fh:
-        data = fh.read()
-    return data[struct.unpack_from("<I", data, 96)[0]:]
-
-
-def item_layout(name):
-    """The item layout a fixture declares, as compress_chunk wants it."""
-    with Reader(fixture(name)) as reader:
-        return [(int(t), size, version) for t, size, version in reader.items]
+    f = load(name)
+    return f.data[f.header["offset_to_point_data"]:]
 
 
 def rebuilt(name, block, count):
     """A fixture's header and VLRs, with our own point block behind them."""
-    with open(fixture(name), "rb") as fh:
-        data = fh.read()
-    header = bytearray(data[:struct.unpack_from("<I", data, 96)[0]])
-    struct.pack_into("<I", header, 107, count)
+    f = load(name)
+    header = bytearray(f.data[:f.header["offset_to_point_data"]])
+    struct.pack_into("<I", header, LEGACY_POINT_COUNT_OFFSET, count)
     return io.BytesIO(bytes(header) + block)
+
+
+def compressed_chunks(name, records):
+    """Every chunk of `records`, at the chunk size `name` declares."""
+    items, chunk_size = load(name).items, load(name).chunk_size
+    return [cpylaz.compress_chunk(items, records[start:start + chunk_size])
+            for start in range(0, len(records), chunk_size)]
 
 
 @pytest.mark.parametrize("point_format", LEGACY_FORMATS)
 def test_v1_output_is_byte_identical_to_laszip(point_format):
     """The whole point block of a non-chunked v1 file, reproduced exactly."""
     name = f"pt{point_format}_v1_pointwise.laz"
-    written = cpylaz.compress_chunk(item_layout(name),
+    written = cpylaz.compress_chunk(load(name).items,
                                     las_records(f"pt{point_format}_v0.las"))
     assert written == point_block(name)
 
@@ -975,31 +998,24 @@ def test_v2_output_is_byte_identical_to_laszip(point_format):
     finish exactly where the chunk table begins.
     """
     name = f"pt{point_format}_v2.laz"
-    records = las_records(f"pt{point_format}_v0.las")
-    items = item_layout(name)
-    with Reader(fixture(name)) as reader:
-        chunk_size = reader.chunk_size
     block = point_block(name)
-
     table_start = struct.unpack_from("<q", block, 0)[0]
-    with open(fixture(name), "rb") as fh:
-        block_offset = struct.unpack_from("<I", fh.read(100), 96)[0]
 
     position = 8                                   # past the chunk table offset
-    for start in range(0, len(records), chunk_size):
-        written = cpylaz.compress_chunk(items, records[start:start + chunk_size])
+    for index, written in enumerate(
+            compressed_chunks(name, las_records(f"pt{point_format}_v0.las"))):
         assert block[position:position + len(written)] == written, \
-            f"chunk starting at point {start} differs"
+            f"chunk {index} differs"
         position += len(written)
 
-    assert block_offset + position == table_start
+    assert load(name).header["offset_to_point_data"] + position == table_start
 
 
 @pytest.mark.parametrize("point_format", LEGACY_FORMATS)
 def test_raw_output_is_byte_identical(point_format):
     """Version 0 items write the record straight through."""
     records = las_records(f"pt{point_format}_v0.las")
-    items = [(t, size, 0) for t, size, _ in item_layout(f"pt{point_format}_v2.laz")]
+    items = [(t, size, 0) for t, size, _ in load(f"pt{point_format}_v2.laz").items]
     assert cpylaz.compress_chunk(items, records) == b"".join(records)
 
 
@@ -1040,9 +1056,7 @@ def awkward_records(count, length):
 
 @pytest.fixture(scope="module")
 def records():
-    with open(fixture("pt5_v0.las"), "rb") as fh:
-        length = struct.unpack_from("<H", fh.read(107), 105)[0]
-    return awkward_records(400, length)
+    return awkward_records(400, load("pt5_v0.las").header["point_data_record_length"])
 
 
 @pytest.fixture(scope="module")
@@ -1065,27 +1079,20 @@ class TestWrittenPointsReadBack:
 
     def test_v1_round_trips(self, records, expected):
         name = "pt5_v1_pointwise.laz"
-        block = cpylaz.compress_chunk(item_layout(name), records)
+        block = cpylaz.compress_chunk(load(name).items, records)
         with Reader(rebuilt(name, block, len(records))) as reader:
             assert reader.checksum() == expected
 
     def test_v2_round_trips_across_chunks(self, records, expected):
         name = "pt5_v2.laz"
-        items = item_layout(name)
-        with Reader(fixture(name)) as reader:
-            chunk_size = reader.chunk_size
-        with open(fixture(name), "rb") as fh:
-            block_offset = struct.unpack_from("<I", fh.read(100), 96)[0]
-
-        body = b"".join(
-            cpylaz.compress_chunk(items, records[start:start + chunk_size])
-            for start in range(0, len(records), chunk_size))
-        assert len(body) > 0
+        chunks = compressed_chunks(name, records)
+        assert len(chunks) > 1
 
         # A chunk table offset pointing back at the point block is how laszip
         # leaves a file it was interrupted writing; the reader then walks the
         # chunks in order, which is all this needs.
-        block = struct.pack("<q", block_offset) + body
+        block = (struct.pack("<q", load(name).header["offset_to_point_data"])
+                 + b"".join(chunks))
         with Reader(rebuilt(name, block, len(records))) as reader:
             assert reader.checksum() == expected
 
@@ -1093,10 +1100,10 @@ class TestWrittenPointsReadBack:
 class TestCompressChunkErrors:
 
     def items(self):
-        return item_layout("pt1_v2.laz")
+        return load("pt1_v2.laz").items
 
     def test_rejects_mixed_raw_and_compressed_items(self):
-        items = self.items()
+        items = list(self.items())
         items[0] = (items[0][0], items[0][1], 0)
         with pytest.raises(ValueError):
             cpylaz.compress_chunk(items, las_records("pt1_v0.las"))

@@ -32,20 +32,6 @@ typedef struct {
     U8 last_item[20];
 } Point10v1;
 
-/* Median of the three preceding differences, branch-for-branch as LASzip. */
-static I32 median3(const I32 *d)
-{
-    if (d[0] < d[1]) {
-        if (d[1] < d[2]) return d[1];
-        else if (d[0] < d[2]) return d[2];
-        else return d[0];
-    } else {
-        if (d[0] < d[2]) return d[0];
-        else if (d[1] < d[2]) return d[2];
-        else return d[1];
-    }
-}
-
 static BOOL p10v1_init(LazReadItem *self, const U8 *item, U32 *context)
 {
     Point10v1 *r = (Point10v1 *)self;
@@ -78,8 +64,8 @@ static void p10v1_read(LazReadItem *self, U8 *item, U32 *context)
     U32 k_bits;
 
     (void)context;
-    median_x = median3(r->last_x_diff);
-    median_y = median3(r->last_y_diff);
+    median_x = laz_median3(r->last_x_diff);
+    median_y = laz_median3(r->last_y_diff);
 
     /* x, y, z first in v1 -- the opposite order from v2 */
     x_diff = laz_ic_decompress(&r->ic_dx, median_x, 0);
@@ -382,39 +368,8 @@ LazReadItem *laz_readitem_v1_byte(LazDecoder *dec, U32 number)
 /*
  * The 29-byte wavepacket item is [index:1][offset:8][size:4][return:4][x,y,z:12].
  * Only the trailing 28 bytes are predicted; the leading index byte gets its own
- * symbol model. LASzip packs/unpacks through a struct; here the fields are read
- * and written explicitly so the layout does not depend on struct padding.
+ * symbol model. See LazWavepacket13 in laz_item.h.
  */
-typedef struct {
-    U64 offset;
-    U32 packet_size;
-    I32 return_point;
-    I32 x, y, z;
-} Wavepacket13;
-
-static Wavepacket13 wp_unpack(const U8 *item)
-{
-    Wavepacket13 w;
-    w.offset = (U64)laz_wp_get32(item) | ((U64)laz_wp_get32(item + 4) << 32);
-    w.packet_size = laz_wp_get32(item + 8);
-    w.return_point = (I32)laz_wp_get32(item + 12);
-    w.x = (I32)laz_wp_get32(item + 16);
-    w.y = (I32)laz_wp_get32(item + 20);
-    w.z = (I32)laz_wp_get32(item + 24);
-    return w;
-}
-
-static void wp_pack(const Wavepacket13 *w, U8 *item)
-{
-    laz_wp_put32((U32)(w->offset & 0xFFFFFFFF), item);
-    laz_wp_put32((U32)(w->offset >> 32), item + 4);
-    laz_wp_put32(w->packet_size, item + 8);
-    laz_wp_put32((U32)w->return_point, item + 12);
-    laz_wp_put32((U32)w->x, item + 16);
-    laz_wp_put32((U32)w->y, item + 20);
-    laz_wp_put32((U32)w->z, item + 24);
-}
-
 typedef struct {
     LazReadItem base;
     LazSymbolModel m_packet_index;
@@ -448,13 +403,13 @@ static BOOL wp13v1_init(LazReadItem *self, const U8 *item, U32 *context)
 static void wp13v1_read(LazReadItem *self, U8 *item, U32 *context)
 {
     Wavepacket13v1 *r = (Wavepacket13v1 *)self;
-    Wavepacket13 cur, last;
+    LazWavepacket13 cur, last;
 
     (void)context;
     item[0] = (U8)laz_decode_symbol(self->dec, &r->m_packet_index);
     item++;
 
-    last = wp_unpack(r->last_item);
+    last = laz_wp_unpack(r->last_item);
 
     r->sym_last_offset_diff = laz_decode_symbol(self->dec,
                                                 &r->m_offset_diff[r->sym_last_offset_diff]);
@@ -476,7 +431,7 @@ static void wp13v1_read(LazReadItem *self, U8 *item, U32 *context)
     cur.y = laz_ic_decompress(&r->ic_xyz, last.y, 1);
     cur.z = laz_ic_decompress(&r->ic_xyz, last.z, 2);
 
-    wp_pack(&cur, item);
+    laz_wp_pack(&cur, item);
     memcpy(r->last_item, item, 28);
 }
 

@@ -43,6 +43,7 @@ sources = [
     "src/laz_stream.c",
     "src/laz_arithmetic.c",
     "src/laz_intcompressor.c",
+    "src/laz_writeitem.c",
     "src/laz_writeitem_raw.c",
     "src/laz_writeitem_v1.c",
     "src/laz_writeitem_v2.c",

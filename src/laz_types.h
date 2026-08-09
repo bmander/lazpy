@@ -50,6 +50,7 @@ typedef int      BOOL;
 #define U8_CLAMP(n) (((n) <= 0) ? U8_MIN : (((n) >= 255) ? U8_MAX : ((U8)(n))))
 #define I8_CLAMP(n) (((n) <= I8_MIN) ? I8_MIN : (((n) >= I8_MAX) ? I8_MAX : ((I8)(n))))
 #define I16_QUANTIZE(n) (((n) >= 0) ? (I16)((n) + 0.5) : (I16)((n) - 0.5))
+#define I32_QUANTIZE(n) (((n) >= 0) ? (I32)((n) + 0.5f) : (I32)((n) - 0.5f))
 #define U32_ZERO_BIT_0(n) ((n) & (U32)0xFFFFFFFE)
 
 /* LASzip item types, as stored in the LASzip VLR. */

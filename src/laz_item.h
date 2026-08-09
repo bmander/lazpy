@@ -43,6 +43,26 @@
 #define P10_INTENSITY_IN(p)       (*(const U16 *)((const U8 *)(p) + 12))
 #define P10_POINT_SOURCE_ID_IN(p) (*(const U16 *)((const U8 *)(p) + 18))
 
+/* Fields of the 20-byte record that live inside the bit-packed byte 14. */
+#define P10_RETURN_NUMBER(li)     ((li)[14] & 0x07)
+#define P10_NUMBER_OF_RETURNS(li) (((li)[14] >> 3) & 0x07)
+#define P10_SCAN_DIR_FLAG(li)     (((li)[14] >> 6) & 0x01)
+
+/* Median of the three preceding differences, branch-for-branch as LASzip.
+ * Predicts x and y in the POINT10 v1 coders. */
+static inline I32 laz_median3(const I32 *d)
+{
+    if (d[0] < d[1]) {
+        if (d[1] < d[2]) return d[1];
+        else if (d[0] < d[2]) return d[2];
+        else return d[0];
+    } else {
+        if (d[0] < d[2]) return d[0];
+        else if (d[1] < d[2]) return d[2];
+        else return d[1];
+    }
+}
+
 /* Little-endian 32-bit access inside a packed wavepacket record. Shared by the
  * WAVEPACKET13 v1 and WAVEPACKET14 v3/v4 readers, which pack identically. */
 static inline U32 laz_wp_get32(const U8 *p)
@@ -56,6 +76,41 @@ static inline void laz_wp_put32(U32 v, U8 *p)
     p[1] = (U8)((v >> 8) & 0xFF);
     p[2] = (U8)((v >> 16) & 0xFF);
     p[3] = (U8)((v >> 24) & 0xFF);
+}
+
+/*
+ * The predicted part of a wavepacket item: the 28 bytes after the packet index,
+ * laid out as [offset:8][size:4][return:4][x,y,z:12]. Unpacked field by field
+ * rather than through a cast, so the layout does not depend on struct padding.
+ */
+typedef struct {
+    U64 offset;
+    U32 packet_size;
+    I32 return_point;
+    I32 x, y, z;
+} LazWavepacket13;
+
+static inline LazWavepacket13 laz_wp_unpack(const U8 *item)
+{
+    LazWavepacket13 w;
+    w.offset = (U64)laz_wp_get32(item) | ((U64)laz_wp_get32(item + 4) << 32);
+    w.packet_size = laz_wp_get32(item + 8);
+    w.return_point = (I32)laz_wp_get32(item + 12);
+    w.x = (I32)laz_wp_get32(item + 16);
+    w.y = (I32)laz_wp_get32(item + 20);
+    w.z = (I32)laz_wp_get32(item + 24);
+    return w;
+}
+
+static inline void laz_wp_pack(const LazWavepacket13 *w, U8 *item)
+{
+    laz_wp_put32((U32)(w->offset & 0xFFFFFFFF), item);
+    laz_wp_put32((U32)(w->offset >> 32), item + 4);
+    laz_wp_put32(w->packet_size, item + 8);
+    laz_wp_put32((U32)w->return_point, item + 12);
+    laz_wp_put32((U32)w->x, item + 16);
+    laz_wp_put32((U32)w->y, item + 20);
+    laz_wp_put32((U32)w->z, item + 24);
 }
 
 /*

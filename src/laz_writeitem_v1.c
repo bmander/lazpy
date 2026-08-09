@@ -33,20 +33,6 @@ typedef struct {
     U8 last_item[20];
 } Point10v1;
 
-/* Median of the three preceding differences, branch-for-branch as LASzip. */
-static I32 median3(const I32 *d)
-{
-    if (d[0] < d[1]) {
-        if (d[1] < d[2]) return d[1];
-        else if (d[0] < d[2]) return d[2];
-        else return d[0];
-    } else {
-        if (d[0] < d[2]) return d[0];
-        else if (d[1] < d[2]) return d[2];
-        else return d[1];
-    }
-}
-
 static BOOL p10v1_init(LazWriteItem *self, const U8 *item, U32 *context)
 {
     Point10v1 *w = (Point10v1 *)self;
@@ -79,8 +65,8 @@ static BOOL p10v1_write(LazWriteItem *self, const U8 *item, U32 *context)
     U32 k_bits;
 
     (void)context;
-    median_x = median3(w->last_x_diff);
-    median_y = median3(w->last_y_diff);
+    median_x = laz_median3(w->last_x_diff);
+    median_y = laz_median3(w->last_y_diff);
 
     /* x, y, z first in v1 -- the opposite order from v2 */
     x_diff = P10_X_IN(item) - P10_X(li);
@@ -202,12 +188,6 @@ static BOOL gps11v1_init(LazWriteItem *self, const U8 *item, U32 *context)
     return LAZ_TRUE;
 }
 
-/* Rounds to nearest, as LASzip's I32_QUANTIZE does. */
-static I32 quantize_f32(F32 v)
-{
-    return (v >= 0.0f) ? (I32)(v + 0.5f) : (I32)(v - 0.5f);
-}
-
 static BOOL gps11v1_write(LazWriteItem *self, const U8 *item, U32 *context)
 {
     Gpstime11v1 *w = (Gpstime11v1 *)self;
@@ -249,7 +229,7 @@ static BOOL gps11v1_write(LazWriteItem *self, const U8 *item, U32 *context)
     if (diff64 == (I64)diff32) {
         /* how many times the last difference this one is, clamped into the
          * range the symbol alphabet can carry */
-        I32 multi = quantize_f32((F32)diff32 / (F32)w->last_gpstime_diff);
+        I32 multi = I32_QUANTIZE((F32)diff32 / (F32)w->last_gpstime_diff);
         if (multi >= LASZIP_GPSTIME_MULTIMAX - 3) multi = LASZIP_GPSTIME_MULTIMAX - 3;
         else if (multi <= 0) multi = 0;
 
@@ -436,28 +416,8 @@ LazWriteItem *laz_writeitem_v1_byte(LazEncoder *enc, U32 number)
 /*
  * The 29-byte wavepacket item is [index:1][offset:8][size:4][return:4][x,y,z:12].
  * Only the trailing 28 bytes are predicted; the leading index byte gets its own
- * symbol model. Fields are read explicitly rather than through a struct so the
- * layout does not depend on struct padding.
+ * symbol model. See LazWavepacket13 in laz_item.h.
  */
-typedef struct {
-    U64 offset;
-    U32 packet_size;
-    I32 return_point;
-    I32 x, y, z;
-} Wavepacket13;
-
-static Wavepacket13 wp_unpack(const U8 *item)
-{
-    Wavepacket13 v;
-    v.offset = (U64)laz_wp_get32(item) | ((U64)laz_wp_get32(item + 4) << 32);
-    v.packet_size = laz_wp_get32(item + 8);
-    v.return_point = (I32)laz_wp_get32(item + 12);
-    v.x = (I32)laz_wp_get32(item + 16);
-    v.y = (I32)laz_wp_get32(item + 20);
-    v.z = (I32)laz_wp_get32(item + 24);
-    return v;
-}
-
 typedef struct {
     LazWriteItem base;
     LazSymbolModel m_packet_index;
@@ -491,7 +451,7 @@ static BOOL wp13v1_init(LazWriteItem *self, const U8 *item, U32 *context)
 static BOOL wp13v1_write(LazWriteItem *self, const U8 *item, U32 *context)
 {
     Wavepacket13v1 *w = (Wavepacket13v1 *)self;
-    Wavepacket13 cur, last;
+    LazWavepacket13 cur, last;
     I64 diff64;
     I32 diff32;
 
@@ -499,8 +459,8 @@ static BOOL wp13v1_write(LazWriteItem *self, const U8 *item, U32 *context)
     laz_encode_symbol(self->enc, &w->m_packet_index, item[0]);
     item++;
 
-    cur = wp_unpack(item);
-    last = wp_unpack(w->last_item);
+    cur = laz_wp_unpack(item);
+    last = laz_wp_unpack(w->last_item);
 
     diff64 = (I64)(cur.offset - last.offset);
     diff32 = (I32)diff64;

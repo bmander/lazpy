@@ -34,8 +34,15 @@ struct LazWriteItem {
     BOOL (*write)(LazWriteItem *self, const U8 *item, U32 *context);
     /* compressed writers only: seed state from the chunk's first (raw) point */
     BOOL (*init)(LazWriteItem *self, const U8 *item, U32 *context);
-    /* layered (v3/v4) writers only: emit this item's per-layer byte counts */
+    /*
+     * Layered (v3/v4) writers only, and always as a pair: a layered writer
+     * buffers each layer separately, so closing a chunk takes two passes over
+     * the writers -- every writer emits its per-layer byte counts, then every
+     * writer emits the layers themselves. That is the order laz_readpoint.c
+     * reads them back in, and it is why one hook cannot do the job.
+     */
     BOOL (*chunk_sizes)(LazWriteItem *self);
+    BOOL (*chunk_bytes)(LazWriteItem *self);
     void (*destroy)(LazWriteItem *self);
 
     LazOutStream *outstream;  /* raw writers: borrowed */
@@ -68,5 +75,16 @@ LazWriteItem *laz_writeitem_v2_point10(LazEncoder *enc);
 LazWriteItem *laz_writeitem_v2_gpstime11(LazEncoder *enc);
 LazWriteItem *laz_writeitem_v2_rgb12(LazEncoder *enc);
 LazWriteItem *laz_writeitem_v2_byte(LazEncoder *enc, U32 number);
+
+/*
+ * Picks the writer for one item of a LASzip VLR, mirroring make_raw_reader and
+ * make_compressed_reader in laz_readpoint.c. Returns NULL for a type or
+ * version with no writer, which the caller reports.
+ *
+ * item->version selects the encoding, exactly as the VLR declares it: 0 means
+ * the item is stored raw, and WAVEPACKET13 stays at 1 even inside a v2 file.
+ */
+LazWriteItem *laz_writeitem_new_raw(const LazItem *item, LazOutStream *out);
+LazWriteItem *laz_writeitem_new_compressed(const LazItem *item, LazEncoder *enc);
 
 #endif /* LAZ_WRITEITEM_H */

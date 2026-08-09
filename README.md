@@ -162,6 +162,7 @@ with Reader("cloud.laz", decompress_selective=mask) as reader:
 | `src/laz_readitem_v2.c` | LASzip 2.0 item readers |
 | `src/laz_readitem_v3.c` | layered LAS 1.4 item readers, v3 and v4 |
 | `src/laz_readpoint.c` | chunking, chunk tables, seeking |
+| `src/laz_writeitem.c` | picks the writer for an item, given its type and version |
 | `src/laz_writeitem_raw.c` | uncompressed item writers |
 | `src/laz_writeitem_v1.c` | LASzip 1.0 item writers |
 | `src/laz_writeitem_v2.c` | LASzip 2.0 item writers |

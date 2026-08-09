@@ -16,11 +16,6 @@
 
 /* ======================================================== POINT10 v2 ===== */
 
-/* Field accessors for the 20-byte legacy point record. */
-#define P10_RETURN_NUMBER(li)     ((li)[14] & 0x07)
-#define P10_NUMBER_OF_RETURNS(li) (((li)[14] >> 3) & 0x07)
-#define P10_SCAN_DIR_FLAG(li)     (((li)[14] >> 6) & 0x01)
-
 typedef struct {
     LazWriteItem base;
     LazSymbolModel m_changed_values;
@@ -228,12 +223,6 @@ static BOOL gps11v2_init(LazWriteItem *self, const U8 *item, U32 *context)
     return LAZ_TRUE;
 }
 
-/* Rounds to nearest, as LASzip's I32_QUANTIZE does. */
-static I32 quantize_f32(F32 v)
-{
-    return (v >= 0.0f) ? (I32)(v + 0.5f) : (I32)(v - 0.5f);
-}
-
 /*
  * Looks for a stored sequence whose last time is within 32 bits of this one.
  * Returns the offset from `last` (1..3), or 0 if none qualifies. Four
@@ -310,7 +299,7 @@ static BOOL gps11v2_write(LazWriteItem *self, const U8 *item, U32 *context)
     if (diff64 == (I64)diff32) {
         /* how many times the last difference this one is */
         I32 last_diff = w->last_gpstime_diff[w->last];
-        I32 multi = quantize_f32((F32)diff32 / (F32)last_diff);
+        I32 multi = I32_QUANTIZE((F32)diff32 / (F32)last_diff);
 
         if (multi == 1) {
             /* the case we expect most often, for regularly spaced pulses */

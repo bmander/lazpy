@@ -37,11 +37,6 @@ const U8 laz_number_return_level[8][8] = {
 
 /* ======================================================== POINT10 v2 ===== */
 
-/* Field accessors for the 20-byte legacy point record held in last_item. */
-#define P10_RETURN_NUMBER(li)    ((li)[14] & 0x07)
-#define P10_NUMBER_OF_RETURNS(li) (((li)[14] >> 3) & 0x07)
-#define P10_SCAN_DIR_FLAG(li)    (((li)[14] >> 6) & 0x01)
-
 typedef struct {
     LazReadItem base;
     LazSymbolModel m_changed_values;
