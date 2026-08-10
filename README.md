@@ -4,17 +4,13 @@ LAS and LAZ point clouds, read and written: a port of
 [LASzip](https://github.com/LASzip/LASzip) to C, with a Python front end.
 
 Every LAZ point format and every LASzip item version is supported in both
-directions, and both are verified against laszip itself, field for field.
+directions.
 
 ## Installing
 
 ```bash
 pip install lazpy
 ```
-
-Wheels are published for Linux, macOS and Windows on 64-bit CPython 3.10 and
-up. Anywhere else, `pip` builds from the source distribution; the extension is
-plain C with no external dependencies. Little-endian hosts only.
 
 ## Reading
 
@@ -32,14 +28,7 @@ with Reader("cloud.laz") as reader:
     x, y, z = reader.scale(point)   # georeferenced floats
 ```
 
-`Reader.read()` returns the reader's own `Point`, refilled in place, so
-iterating a large file allocates nothing per point — call `point.copy()` to
-keep one.
-
 ## Reading as arrays
-
-Whole columns, decoded in C straight into numpy arrays, which is both faster
-than iterating and what the rest of the scientific stack wants:
 
 ```python
 with Reader("cloud.laz") as reader:
@@ -51,21 +40,13 @@ with Reader("cloud.laz") as reader:
     a = reader.arrays("X", "Y", "gps_time", start=0)     # or just these
 ```
 
-Both take `start=` and `count=`, defaulting to the whole file from wherever
-the reader is. A `count` runs the reader forward, so successive calls read a
-file too big to hold in one array:
+Both take `start=` and `count=`:
 
 ```python
 while reader.index < reader.num_points:
     block = reader.arrays("X", "Y", "Z", count=10_000_000)
     ...
 ```
-
-Decoding is the floor here, not the Python loop: the array path saves the
-object per point and the attribute lookup per field, not the entropy coding.
-On two million points that is about 1.5× against a bare `for point in reader`,
-and about 3× against one that calls `scale()` on every point — which is what
-`xyz()` replaces.
 
 numpy is an optional dependency — `pip install lazpy[numpy]` — and is imported
 only when one of these is called.
@@ -105,9 +86,9 @@ version follows the point format, as laszip's own default does: v2 for formats
 0–5, v3 for 6–10. `laz_version=` overrides it. `chunk_size=` sets how many
 points share a chunk, which is what random access on the way back in costs.
 
-## LAZ to GeoTIFF
+## Example: LAZ to GeoTIFF
 
-A worked example: rasterize a point cloud to a 1-metre digital surface model,
+Rasterize a point cloud to a 1-metre digital surface model,
 taking the highest return in each cell, and write it with
 [rasterio](https://rasterio.readthedocs.io/).
 
@@ -136,17 +117,6 @@ with rasterio.open("dsm.tif", "w", driver="GTiff",
     dst.write(dsm, 1)
 ```
 
-The CRS has to come from somewhere; here it is hard-coded. A LAS 1.4 file
-usually carries its own as WKT, in record 2112:
-
-```python
-crs = reader.header["variable_length_records"][2112]["data"].decode()
-```
-
-Older files use GeoTIFF keys in records 34735–34737 instead, and LAS 1.4 is
-allowed to keep the WKT behind the point data as an extended record — see
-below.
-
 ## What is supported
 
 | Point data format | Items | LAZ versions |
@@ -168,10 +138,6 @@ since LAS namespaces records by user id:
 wkt = reader.header["extended_variable_length_records"][(b"LASF_Projection", 2112)]
 wkt["data"]     # read from the file here, not when it was opened
 ```
-
-Opening a file reads their 60-byte headers and nothing else; a payload arrives
-only when something asks for it, because one is allowed to be enormous, so it
-needs the reader still open.
 
 Not yet: *writing* extended variable-length records, spatial indexing, and LAS
 1.4 compatibility mode.
