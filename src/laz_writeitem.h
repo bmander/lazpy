@@ -13,6 +13,13 @@
  * head of each concrete writer, so a concrete writer can always be cast to
  * LazWriteItem*.
  *
+ * One asymmetry: write() reports a failed point through its return value,
+ * where read() returns void and the reader raises a flag the container picks
+ * up afterwards. That is the read side's established convention -- see
+ * overran() and alloc_failed in laz_readitem.h -- and it exists because a
+ * writer is driven a point at a time by a caller who can stop, while a reader
+ * is on the decode path LASzip threw exceptions from.
+ *
  * `item` points at this item's bytes inside the caller's point -- for the
  * compressed writers that is the same host-order layout the matching reader
  * produces, so writer(reader(x)) is the identity on the byte stream.
@@ -109,9 +116,6 @@ LazWriteItem *laz_writeitem_v4_byte14(LazEncoder *enc, U32 number);
  * the item is stored raw, and WAVEPACKET13 stays at 1 even inside a v2 file.
  */
 LazWriteItem *laz_writeitem_new_raw(const LazItem *item, LazOutStream *out);
-/* *unsupported distinguishes a type or version with no writer from one whose
- * writer could not be allocated; both come back as NULL. */
-LazWriteItem *laz_writeitem_new_compressed(const LazItem *item, LazEncoder *enc,
-                                           BOOL *unsupported);
+LazWriteItem *laz_writeitem_new_compressed(const LazItem *item, LazEncoder *enc);
 
 #endif /* LAZ_WRITEITEM_H */

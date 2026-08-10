@@ -78,16 +78,10 @@ BOOL laz_writepoint_setup(LazWritePoint *wp, U32 num_items, const LazItem *items
         wp->writers_compressed = (LazWriteItem **)calloc(num_items, sizeof(LazWriteItem *));
         if (!wp->writers_compressed) { set_error(wp, "out of memory"); return LAZ_FALSE; }
         for (i = 0; i < num_items; i++) {
-            BOOL unsupported;
-            wp->writers_compressed[i] =
-                laz_writeitem_new_compressed(&items[i], &wp->enc, &unsupported);
+            wp->writers_compressed[i] = laz_writeitem_new_compressed(&items[i], &wp->enc);
             if (!wp->writers_compressed[i]) {
-                if (unsupported) {
-                    set_error(wp, "item type %u version %u is not supported",
-                              items[i].type, items[i].version);
-                } else {
-                    set_error(wp, "out of memory");
-                }
+                set_error(wp, "item type %u version %u is not supported",
+                          items[i].type, items[i].version);
                 return LAZ_FALSE;
             }
             /*

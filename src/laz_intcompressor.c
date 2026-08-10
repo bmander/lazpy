@@ -62,8 +62,8 @@ static BOOL ic_init_models(LazIntCompressor *ic, BOOL compress)
     U32 i;
 
     if (!ic->models_created) {
-        /* each half is skipped if a previous, failed call already made it, so
-         * that retrying after an allocation failure does not leak the other */
+        /* m_bits may have survived a call that failed on m_corrector, so it is
+         * allocated only once however often this is retried */
         if (!ic->m_bits) {
             ic->m_bits = laz_symbol_models_new(ic->contexts, ic->corr_bits + 1, compress);
             if (!ic->m_bits) return LAZ_FALSE;

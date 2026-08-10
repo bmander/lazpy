@@ -35,63 +35,54 @@ void laz_readpoint_init_struct(LazReadPoint *rp, U32 decompress_selective)
     rp->decompress_selective = decompress_selective;
 }
 
-/*
- * Sets *unsupported when the item type and version have no reader at all, so
- * that the caller can tell that apart from a reader that exists but could not
- * be allocated -- the two look the same from here, and only one of them is
- * the file's fault.
- */
 static LazReadItem *make_compressed_reader(const LazItem *item, LazDecoder *dec,
-                                           U32 selective, BOOL *unsupported)
+                                           U32 selective)
 {
     U32 v = item->version;
-    *unsupported = LAZ_FALSE;
     switch (item->type) {
     case LAZ_ITEM_POINT10:
         if (v == 1) return laz_readitem_v1_point10(dec);
         if (v == 2) return laz_readitem_v2_point10(dec);
-        break;
+        return NULL;
     case LAZ_ITEM_GPSTIME11:
         if (v == 1) return laz_readitem_v1_gpstime11(dec);
         if (v == 2) return laz_readitem_v2_gpstime11(dec);
-        break;
+        return NULL;
     case LAZ_ITEM_RGB12:
         if (v == 1) return laz_readitem_v1_rgb12(dec);
         if (v == 2) return laz_readitem_v2_rgb12(dec);
-        break;
+        return NULL;
     case LAZ_ITEM_BYTE:
         if (v == 1) return laz_readitem_v1_byte(dec, item->size);
         if (v == 2) return laz_readitem_v2_byte(dec, item->size);
-        break;
+        return NULL;
     /* version 2 is accepted for the 1.4 items because lasproto wrote it */
     case LAZ_ITEM_POINT14:
         if (v == 2 || v == 3) return laz_readitem_v3_point14(dec, selective);
         if (v == 4) return laz_readitem_v4_point14(dec, selective);
-        break;
+        return NULL;
     case LAZ_ITEM_RGB14:
         if (v == 2 || v == 3) return laz_readitem_v3_rgb14(dec, selective);
         if (v == 4) return laz_readitem_v4_rgb14(dec, selective);
-        break;
+        return NULL;
     case LAZ_ITEM_RGBNIR14:
         if (v == 2 || v == 3) return laz_readitem_v3_rgbnir14(dec, selective);
         if (v == 4) return laz_readitem_v4_rgbnir14(dec, selective);
-        break;
+        return NULL;
     case LAZ_ITEM_BYTE14:
         if (v == 2 || v == 3) return laz_readitem_v3_byte14(dec, item->size, selective);
         if (v == 4) return laz_readitem_v4_byte14(dec, item->size, selective);
-        break;
+        return NULL;
     case LAZ_ITEM_WAVEPACKET13:
         if (v == 1) return laz_readitem_v1_wavepacket13(dec);
-        break;
+        return NULL;
     case LAZ_ITEM_WAVEPACKET14:
         if (v == 3) return laz_readitem_v3_wavepacket14(dec, selective);
         if (v == 4) return laz_readitem_v4_wavepacket14(dec, selective);
-        break;
+        return NULL;
     default:
-        break;
+        return NULL;
     }
-    *unsupported = LAZ_TRUE;
-    return NULL;
 }
 
 BOOL laz_readpoint_setup(LazReadPoint *rp, U32 num_items, const LazItem *items,
@@ -150,16 +141,11 @@ BOOL laz_readpoint_setup(LazReadPoint *rp, U32 num_items, const LazItem *items,
         rp->readers_compressed = (LazReadItem **)calloc(num_items, sizeof(LazReadItem *));
         if (!rp->readers_compressed) { set_error(rp, "out of memory"); return LAZ_FALSE; }
         for (i = 0; i < num_items; i++) {
-            BOOL unsupported;
-            rp->readers_compressed[i] = make_compressed_reader(
-                &items[i], &rp->dec, rp->decompress_selective, &unsupported);
+            rp->readers_compressed[i] =
+                make_compressed_reader(&items[i], &rp->dec, rp->decompress_selective);
             if (!rp->readers_compressed[i]) {
-                if (unsupported) {
-                    set_error(rp, "item type %u version %u is not supported",
-                              items[i].type, items[i].version);
-                } else {
-                    set_error(rp, "out of memory");
-                }
+                set_error(rp, "item type %u version %u is not supported",
+                          items[i].type, items[i].version);
                 return LAZ_FALSE;
             }
         }
@@ -379,7 +365,14 @@ BOOL laz_readpoint_read(LazReadPoint *rp, LazPoint *point, U8 *extra_bytes)
 
         if (rp->readers) {
             for (i = 0; i < rp->num_readers; i++) {
-                rp->readers[i]->read(rp->readers[i], dst[i], &context);
+                LazReadItem *rd = rp->readers[i];
+                rd->read(rd, dst[i], &context);
+                /* a model this reader had to create partway through the chunk
+                 * could not be allocated, so the point is only half decoded */
+                if (rd->alloc_failed) {
+                    set_error(rp, "out of memory");
+                    return LAZ_FALSE;
+                }
             }
         } else {
             /* first point of a chunk is stored raw and seeds the predictors */
@@ -424,15 +417,12 @@ BOOL laz_readpoint_read(LazReadPoint *rp, LazPoint *point, U8 *extra_bytes)
         set_error(rp, "end-of-file during chunk with index %u", rp->current_chunk);
         return LAZ_FALSE;
     }
-    if (rp->readers == rp->readers_compressed) {
+    /* a layered reader that ran off the end of one of its layers means the
+     * chunk is corrupt, not that the point decoded to zeros */
+    if (rp->layered_las14_compression && rp->readers == rp->readers_compressed) {
         for (i = 0; i < rp->num_readers; i++) {
             LazReadItem *rd = rp->readers_compressed[i];
-            /* a model the reader had to create partway through the chunk could
-             * not be allocated, so this point is only half decoded */
-            if (rd->alloc_failed) { set_error(rp, "out of memory"); return LAZ_FALSE; }
-            /* a layered reader that ran off the end of one of its layers means
-             * the chunk is corrupt, not that the point decoded to zeros */
-            if (rp->layered_las14_compression && rd->overran && rd->overran(rd)) {
+            if (rd->overran && rd->overran(rd)) {
                 set_error(rp, "chunk with index %u is corrupt (layer truncated)",
                           rp->current_chunk);
                 return LAZ_FALSE;

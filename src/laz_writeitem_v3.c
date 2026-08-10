@@ -1196,16 +1196,14 @@ static BOOL byte14_create_and_init(Byte14v3 *w, U32 context, const U8 *item)
     U32 i;
 
     if (!c->created) {
-        /* each allocation is skipped if a previous, failed call already made
-         * it, so that retrying does not leak the one that succeeded */
+        /* m_bytes may have survived a call that failed after it, so it is
+         * allocated only once however often this is retried */
         if (!c->m_bytes) {
             c->m_bytes = laz_symbol_models_new(w->number, 256, LAZ_TRUE);
             if (!c->m_bytes) return LAZ_FALSE;
         }
-        if (!c->last_item) {
-            c->last_item = (U8 *)laz_model_calloc(w->number ? w->number : 1, 1);
-            if (!c->last_item) return LAZ_FALSE;
-        }
+        c->last_item = (U8 *)calloc(w->number ? w->number : 1, 1);
+        if (!c->last_item) return LAZ_FALSE;
         c->created = LAZ_TRUE;
     }
 

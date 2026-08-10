@@ -2342,13 +2342,7 @@ static PyTypeObject Index_Type = {
 
 /* ================================================================ module == */
 
-/*
- * Test hook: arm the model allocator to start failing. Every model in a LAZ
- * decoder is allocated the first time it is used, which for the on-demand
- * banks is partway through a chunk, so the out-of-memory paths through the
- * item readers and writers are unreachable from any input file -- only from
- * an allocator that runs out. See laz_alloc_fail_after in laz_arithmetic.h.
- */
+/* Test hook; see laz_alloc_fail_after in laz_arithmetic.h for what it is for. */
 static PyObject *cpylaz_alloc_fail_after(PyObject *self, PyObject *arg)
 {
     long long n = PyLong_AsLongLong(arg);
