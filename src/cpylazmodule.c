@@ -2254,6 +2254,7 @@ static PyObject *Index_intervals(IndexObject *self, PyObject *args)
 {
     double min_x, min_y, max_x, max_y;
     PyObject *list;
+    BOOL ok;
     U32 i;
 
     if (!PyArg_ParseTuple(args, "dddd", &min_x, &min_y, &max_x, &max_y))
@@ -2262,7 +2263,14 @@ static PyObject *Index_intervals(IndexObject *self, PyObject *args)
         PyErr_SetString(PyExc_ValueError, "index is not initialised");
         return NULL;
     }
-    if (!laz_index_intersect_rectangle(&self->ix, min_x, min_y, max_x, max_y)) {
+
+    /* the descent and the merge touch no Python object, as the seek and the
+     * checksum above do not */
+    Py_BEGIN_ALLOW_THREADS
+    ok = laz_index_intersect_rectangle(&self->ix, min_x, min_y, max_x, max_y);
+    Py_END_ALLOW_THREADS
+
+    if (!ok) {
         PyErr_SetString(LazErrorType, self->ix.has_error
                         ? self->ix.last_error : "spatial index query failed");
         return NULL;

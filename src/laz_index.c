@@ -361,8 +361,9 @@ static BOOL interval_read(LazIndex *ix, LazStream *s)
 
         cell->index = (I32)laz_stream_get32(s);
         number_intervals = laz_stream_get32(s);
-        cell->full = wide ? laz_stream_get64(s) : laz_stream_get32(s);
-        cell->total = 0;
+        /* how many points fell in the cell, as against how many the intervals
+         * span; read past because nothing here has a use for it */
+        if (wide) (void)laz_stream_get64(s); else (void)laz_stream_get32(s);
         cell->first = ix->num_intervals;
         cell->count = 0;
 
@@ -396,7 +397,6 @@ static BOOL interval_read(LazIndex *ix, LazStream *s)
                           (unsigned long long)iv->start);
                 return LAZ_FALSE;
             }
-            cell->total += iv->end - iv->start + 1;
             cell->count++;
             ix->num_intervals++;
         }
@@ -464,8 +464,12 @@ BOOL laz_index_read(LazIndex *ix, LazStream *stream)
 
 static BOOL merged_reserve(LazIndex *ix, U32 needed)
 {
-    LazInterval *grown = (LazInterval *)grow(ix->merged, &ix->merged_alloc,
-                                             needed, sizeof(LazInterval));
+    LazInterval *grown;
+    /* Asking for nothing is not a failure, though grow() cannot say so: it
+     * hands back the base pointer, which is NULL until the first allocation. */
+    if (needed == 0) return LAZ_TRUE;
+    grown = (LazInterval *)grow(ix->merged, &ix->merged_alloc,
+                                needed, sizeof(LazInterval));
     if (!grown) {
         set_error(ix, "out of memory answering a spatial index query");
         return LAZ_FALSE;
@@ -486,60 +490,37 @@ static BOOL merged_reserve(LazIndex *ix, U32 needed)
 static BOOL merge_hits(LazIndex *ix)
 {
     const LazQuadtree *q = &ix->quadtree;
-    const LazIndexCell *only = NULL;
-    U32 used = 0, i, n = 0;
+    U32 used = 0, kept = 0, i;
 
     ix->num_merged = 0;
-    ix->full = 0;
-    ix->total = 0;
 
     for (i = 0; i < q->num_hits; i++) {
         const LazIndexCell *cell = find_cell(ix, q->hits[i]);
-        if (!cell) continue;
+        if (!cell) continue;                 /* a cell the query reached but
+                                              * that holds no points */
         used++;
-        only = cell;
-        n += cell->count;
-    }
-    if (!used) return LAZ_TRUE;
-
-    if (used == 1) {
-        if (!merged_reserve(ix, only->count ? only->count : 1))
+        if (!merged_reserve(ix, ix->num_merged + cell->count))
             return LAZ_FALSE;
-        memcpy(ix->merged, ix->intervals + only->first,
-               (size_t)only->count * sizeof(LazInterval));
-        ix->num_merged = only->count;
-        ix->full = only->full;
-        ix->total = only->total;
-        return LAZ_TRUE;
-    }
-
-    if (!merged_reserve(ix, n ? n : 1)) return LAZ_FALSE;
-    for (i = 0; i < q->num_hits; i++) {
-        const LazIndexCell *cell = find_cell(ix, q->hits[i]);
-        if (!cell) continue;
         memcpy(ix->merged + ix->num_merged, ix->intervals + cell->first,
                (size_t)cell->count * sizeof(LazInterval));
         ix->num_merged += cell->count;
-        ix->full += cell->full;
     }
-    if (!ix->num_merged) return LAZ_TRUE;
+    /* One cell is already in order and already far enough apart, and the
+     * reference leaves it alone; running it through the threshold below would
+     * join intervals it kept separate. */
+    if (used < 2 || ix->num_merged < 2) return LAZ_TRUE;
 
     qsort(ix->merged, ix->num_merged, sizeof(LazInterval), interval_cmp);
 
-    n = 0;
-    ix->total = ix->merged[0].end - ix->merged[0].start + 1;
     for (i = 1; i < ix->num_merged; i++) {
-        LazInterval *last = &ix->merged[n];
+        LazInterval *last = &ix->merged[kept];
         LazInterval next = ix->merged[i];
-        if ((I64)next.start - (I64)last->end > MERGE_THRESHOLD) {
-            ix->merged[++n] = next;
-            ix->total += next.end - next.start + 1;
-        } else if (next.end > last->end) {
-            ix->total += next.end - last->end;
+        if ((I64)next.start - (I64)last->end > MERGE_THRESHOLD)
+            ix->merged[++kept] = next;
+        else if (next.end > last->end)
             last->end = next.end;
-        }
     }
-    ix->num_merged = n + 1;
+    ix->num_merged = kept + 1;
     return LAZ_TRUE;
 }
 
@@ -547,8 +528,6 @@ BOOL laz_index_intersect_rectangle(LazIndex *ix, F64 min_x, F64 min_y,
                                    F64 max_x, F64 max_y)
 {
     ix->num_merged = 0;
-    ix->full = 0;
-    ix->total = 0;
     /* An inverted rectangle holds nothing. Said here because the descent's
      * comparisons assume otherwise -- a rectangle can be below a split and
      * above it at once only if it is empty. */

@@ -102,7 +102,7 @@ int main(int argc, char** argv)
     int hash_mode = (strcmp(argv[2], "--hash") == 0);
     int inside_mode = (strcmp(argv[2], "--inside") == 0);
     double r[4] = {0, 0, 0, 0};
-    long long max_points = (argc > 3) ? atoll(argv[3]) : -1;
+    long long max_points = -1;
 
     if (inside_mode) {
         if (argc < 7) {
@@ -110,7 +110,8 @@ int main(int argc, char** argv)
             return 1;
         }
         for (int i = 0; i < 4; i++) r[i] = atof(argv[3 + i]);
-        max_points = -1;
+    } else if (argc > 3) {
+        max_points = atoll(argv[3]);
     }
 
     laszip_POINTER reader;
@@ -241,14 +242,14 @@ int main(int argc, char** argv)
             fprintf(stderr, "read failed at %lld: %s\n", (long long)i, err ? err : "?");
             return 1;
         }
-        /* gps_time is printed as raw IEEE754 bits so comparison is exact */
-        unsigned long long gps_bits;
-        memcpy(&gps_bits, &point->gps_time, 8);
-
         if (hash_mode) {
             hash = hash_point(hash, point, num_extra_bytes);
             continue;
         }
+
+        /* gps_time is printed as raw IEEE754 bits so comparison is exact */
+        unsigned long long gps_bits;
+        memcpy(&gps_bits, &point->gps_time, 8);
 
         fprintf(out,
             "%lld %d %d %d %u %u %u %u %u %u %u %u %u %d %u %u %llu "

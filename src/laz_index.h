@@ -76,13 +76,12 @@ typedef struct {
     U32 hits_alloc;
 } LazQuadtree;
 
-/* One cell of the index: which intervals of `LazIndex.intervals` are its own,
- * how many points fell in it (`full`), and how many the intervals span
- * (`total`, which is larger when an interval also covers other cells' points). */
+/* One cell of the index: which run of `LazIndex.intervals` is its own. The
+ * file also states how many points fell in the cell, which is smaller than the
+ * intervals span whenever an interval also covers a neighbour's points; no
+ * query needs the difference, so it is read past rather than kept. */
 typedef struct {
     I32 index;
-    U64 full;
-    U64 total;
     U32 first;
     U32 count;
 } LazIndexCell;
@@ -94,12 +93,12 @@ typedef struct {
     LazInterval *intervals;     /* every cell's, cell-major */
     U32 num_intervals;
 
-    /* what the last intersect_rectangle found */
+    /* What the last intersect_rectangle found. The buffer is kept between
+     * queries rather than freed, so a reader querying repeatedly allocates
+     * once. */
     LazInterval *merged;
     U32 num_merged;
     U32 merged_alloc;
-    U64 full;                   /* points inside the cells the query hit */
-    U64 total;                  /* points the merged intervals span */
 
     char last_error[192];
     char last_warning[192];

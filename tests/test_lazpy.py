@@ -3139,6 +3139,9 @@ def load_reference_queries():
 
 
 REFERENCE_QUERIES = load_reference_queries()
+# the file and rectangle alone, for the tests that check against a full scan
+# of the same file rather than against the reference numbers
+QUERY_CASES = [(name, rect) for name, rect, _, _ in REFERENCE_QUERIES]
 QUERY_IDS = [f"{name}-{'_'.join(str(v) for v in rect)}"
              for name, rect, _, _ in REFERENCE_QUERIES]
 INDEXED_FIXTURES = list(dict.fromkeys(name for name, _, _, _
@@ -3167,11 +3170,13 @@ def index_hash(indices):
 
 @functools.lru_cache(maxsize=None)
 def scaled_xy(name):
-    """Every point's georeferenced x and y, in file order."""
+    """Every point's georeferenced x and y, in file order.
+
+    Through Reader.scale, which is the coordinate points_within documents its
+    rectangle in.
+    """
     with Reader(fixture(name)) as reader:
-        sx, sy = reader.scales[0], reader.scales[1]
-        ox, oy = reader.offsets[0], reader.offsets[1]
-        return [(point.X * sx + ox, point.Y * sy + oy) for point in reader]
+        return [reader.scale(point)[:2] for point in reader]
 
 
 def inside_by_scan(name, rect):
@@ -3224,22 +3229,17 @@ class TestSpatialIndexAgainstLaszip:
 
 class TestRectangleQueries:
 
-    @pytest.mark.parametrize("name,rect,count,digest", REFERENCE_QUERIES,
-                             ids=QUERY_IDS)
-    def test_the_points_are_the_ones_a_full_scan_finds(
-            self, name, rect, count, digest):
+    @pytest.mark.parametrize("name,rect", QUERY_CASES, ids=QUERY_IDS)
+    def test_the_points_are_the_ones_a_full_scan_finds(self, name, rect):
         """Same points, not merely the same number of them: a seek that
         landed one chunk over would still count right."""
         expected = inside_by_scan(name, rect)
         xy = scaled_xy(name)
         with Reader(fixture(name)) as reader:
-            found = [(reader.index - 1, point.X, point.Y)
+            found = [(reader.index - 1, reader.scale(point)[:2])
                      for point in reader.points_within(*rect)]
-        assert [i for i, _, _ in found] == expected
-        sx, sy = reader.scales[0], reader.scales[1]
-        ox, oy = reader.offsets[0], reader.offsets[1]
-        assert [(x * sx + ox, y * sy + oy) for _, x, y in found] == \
-            [xy[i] for i in expected]
+        assert [i for i, _ in found] == expected
+        assert [p for _, p in found] == [xy[i] for i in expected]
 
     def test_the_rectangle_is_half_open(self):
         """A point on the lower edge is in and one on the upper edge is out,
@@ -3334,7 +3334,7 @@ class TestFindingTheIndex:
                 assert query_indices(reader, (1498, 1699, 1500, 1701)) == \
                     inside_by_scan("pt1_v2.laz", (1498, 1699, 1500, 1701))
 
-    def test_the_index_is_only_looked_for_once(self, tmp_path):
+    def test_the_index_is_only_looked_for_once(self):
         """Asked for twice, the same object comes back -- a query does not
         re-read the sidecar."""
         with Reader(fixture("pt1_v2.laz")) as reader:
@@ -3351,6 +3351,17 @@ class TestFindingTheIndex:
         reader.close()
         with reader.open(fixture("pt1_v2.laz")) as reopened:
             assert reopened.has_spatial_index
+
+    def test_an_index_the_file_promises_but_cuts_short_is_not_passed_over(
+            self, tmp_path):
+        """Unlike a record the header merely counted, this one was pointed
+        at, so a record that is not all there is worth saying so about."""
+        copy = tmp_path / "pt1_v2_appended.laz"
+        data = open(fixture("pt1_v2_appended.laz"), "rb").read()
+        copy.write_bytes(data[:-16])
+        with Reader(str(copy)) as reader:
+            with pytest.raises(LazError, match="runs past the end"):
+                reader.spatial_index
 
     def test_an_unreadable_index_is_not_passed_over(self, tmp_path):
         """Falling back to a full scan would answer the same question far

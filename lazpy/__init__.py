@@ -406,10 +406,11 @@ EVLR_HEADER_FORMAT = (
 
 # The LASzip VLR's payload, followed by one triple per item in the layout.
 #
-# number_of_special_evlrs and offset_to_special_evlrs are parsed and then left
-# alone. They were meant to address extended records held apart from the rest,
-# which no version of laszip has ever written: it writes -1 in both, and so
-# does lazpy.
+# number_of_special_evlrs and offset_to_special_evlrs address extended records
+# held apart from the rest, which the LAS header does not count and nothing
+# else points at. laszip writes -1 in both, and so does lazpy; what does write
+# them is `lasindex -append`, and following them is how an index appended to a
+# file is found. See Reader._appended_index_data.
 LASZIP_RECORD_FORMAT = (
     ('compressor', 2, unsigned_int),
     ('coder', 2, unsigned_int),
@@ -970,21 +971,13 @@ class Reader:
             # aimed at the wrong place can cause is bounded by what is behind
             # the offset, which is to say by the size of the file.
             for _ in range(declared):
-                data = fp.read(EVLR_HEADER_SIZE)
-                if len(data) < EVLR_HEADER_SIZE:
+                record = Reader._evlr_at(fp, end_of_file)
+                if record is None:
                     break
-                fields, _ = unpack_format(EVLR_HEADER_FORMAT, data)
-                fields['offset_to_data'] = fp.tell()
-                # checked here rather than where the payload is read, so that a
-                # record that is not all there is left out rather than handed
-                # over and found short later
-                length = fields['record_length_after_header']
-                if fields['offset_to_data'] + length > end_of_file:
-                    break
-                key = (fields['user_id'], fields['record_id'])
-                records[key] = ExtendedVariableLengthRecord(fields, fp)
+                records[(record['user_id'], record['record_id'])] = record
                 found += 1
-                fp.seek(length, io.SEEK_CUR)     # past it, not through it
+                # past the payload, not through it
+                fp.seek(record['record_length_after_header'], io.SEEK_CUR)
         finally:
             fp.seek(resume)
 
@@ -992,6 +985,27 @@ class Reader:
             return records, (f"file declares {declared} extended variable "
                              f"length records but holds {found}")
         return records, None
+
+    @staticmethod
+    def _evlr_at(fp, end_of_file):
+        """One extended record, read from where `fp` is, or None.
+
+        None means there is not a whole record here: either the 60-byte header
+        is short or the payload it declares runs past the end of the file. That
+        is checked here rather than where the payload is read, so a record that
+        is not all there is left out rather than handed over and found short
+        later. Leaves `fp` on the payload, which is where the next record's
+        header begins once the payload is skipped.
+        """
+        data = fp.read(EVLR_HEADER_SIZE)
+        if len(data) < EVLR_HEADER_SIZE:
+            return None
+        fields, _ = unpack_format(EVLR_HEADER_FORMAT, data)
+        fields['offset_to_data'] = fp.tell()
+        if (fields['offset_to_data'] + fields['record_length_after_header']
+                > end_of_file):
+            return None
+        return ExtendedVariableLengthRecord(fields, fp)
 
     @staticmethod
     def _parse_laszip_record(data):
@@ -1146,21 +1160,21 @@ class Reader:
             self.fp.seek(0, io.SEEK_END)
             end_of_file = self.fp.tell()
             self.fp.seek(offset)
-            head = self.fp.read(EVLR_HEADER_SIZE)
-            if len(head) < EVLR_HEADER_SIZE:
-                return None
-            fields, _ = unpack_format(EVLR_HEADER_FORMAT, head)
-            if (fields['user_id'], fields['record_id']) != LASINDEX_EVLR_KEY:
-                return None
-            length = fields['record_length_after_header']
-            # the length is a U64 out of the file and worth no more trust than
-            # that; a record that overruns the file is not one to allocate for
-            if offset + EVLR_HEADER_SIZE + length > end_of_file:
-                raise LazError("the spatial index inside this file runs past "
-                               "the end of it")
-            return self.fp.read(length)
+            record = Reader._evlr_at(self.fp, end_of_file)
         finally:
             self.fp.seek(resume)
+
+        if record is None:
+            # unlike a record the header merely counted, this one was pointed
+            # at: something said an index is here, so a record that is not all
+            # there is worth saying so about
+            raise LazError("the record the LASzip header points at for the "
+                           "spatial index runs past the end of the file")
+        # the chain is for special records in general rather than for indexes,
+        # so something else sitting there is not an error
+        if (record['user_id'], record['record_id']) != LASINDEX_EVLR_KEY:
+            return None
+        return record['data']
 
     def _sidecar_index_data(self):
         """The index in the ".lax" beside this file, or None.
