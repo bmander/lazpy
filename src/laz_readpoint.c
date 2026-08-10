@@ -164,7 +164,7 @@ BOOL laz_readpoint_setup(LazReadPoint *rp, U32 num_items, const LazItem *items,
 
 void laz_readpoint_init_point(const LazReadPoint *rp, LazPoint *point)
 {
-    if (rp->has_point14) point->extended_point_type = 1;
+    if (rp->has_point14) laz_point_set_extended_point_type(point, 1);
 }
 
 BOOL laz_readpoint_init(LazReadPoint *rp, LazStream *instream)

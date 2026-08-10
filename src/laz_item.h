@@ -188,20 +188,64 @@ static inline I32 laz_median3(const I32 *d)
     }
 }
 
-/* Little-endian 32-bit access inside a packed wavepacket record. Shared by the
- * WAVEPACKET13 v1 and WAVEPACKET14 v3/v4 readers, which pack identically. */
-static inline U32 laz_wp_get32(const U8 *p)
+/*
+ * 32-bit access inside a packed wavepacket record. Shared by the WAVEPACKET13
+ * v1 and WAVEPACKET14 v3/v4 readers, which pack identically.
+ *
+ * A wavepacket is a blob in the sense laz_types.h describes, so it keeps its
+ * on-disk order in the point buffer and the conversion lives here, in the only
+ * two functions that look inside it.
+ */
+static inline U32 laz_wp_get32(const U8 *p) { return laz_le_get32(p); }
+
+static inline void laz_wp_put32(U32 v, U8 *p) { laz_le_put32(p, v); }
+
+#if LAZ_BIG_ENDIAN
+/*
+ * Byte order for the fixed-layout items, in place.
+ *
+ * A byte swap is its own inverse, so one set serves both directions: the raw
+ * reader swaps the record it just read, and the raw writer copies the point
+ * into scratch and swaps that. Stating each item's layout once is the point --
+ * two copies, one per direction, could disagree and only a big-endian run
+ * would notice.
+ *
+ * Only multi-byte fields appear. POINT10's bytes 14-17 -- the two packed flag
+ * bytes, the scan angle rank and the user data -- are single bytes, and single
+ * bytes have no byte order.
+ */
+static inline void laz_bswap(U8 *p, size_t n)
 {
-    return (U32)p[0] | ((U32)p[1] << 8) | ((U32)p[2] << 16) | ((U32)p[3] << 24);
+    size_t i;
+    for (i = 0; i < n / 2; i++) {
+        U8 t = p[i];
+        p[i] = p[n - 1 - i];
+        p[n - 1 - i] = t;
+    }
 }
 
-static inline void laz_wp_put32(U32 v, U8 *p)
+static inline void laz_swap_u16s(U8 *item, size_t count)
 {
-    p[0] = (U8)(v & 0xFF);
-    p[1] = (U8)((v >> 8) & 0xFF);
-    p[2] = (U8)((v >> 16) & 0xFF);
-    p[3] = (U8)((v >> 24) & 0xFF);
+    size_t i;
+    for (i = 0; i < count; i++) laz_bswap(item + 2 * i, 2);
 }
+
+static inline void laz_swap_point10(U8 *item)
+{
+    laz_bswap(item + 0, 4);         /* X */
+    laz_bswap(item + 4, 4);         /* Y */
+    laz_bswap(item + 8, 4);         /* Z */
+    laz_bswap(item + 12, 2);        /* intensity */
+    laz_bswap(item + 18, 2);        /* point_source_ID */
+}
+
+static inline void laz_swap_gpstime11(U8 *item) { laz_bswap(item, 8); }
+static inline void laz_swap_rgb12(U8 *item)     { laz_swap_u16s(item, 3); }
+static inline void laz_swap_rgbnir14(U8 *item)  { laz_swap_u16s(item, 4); }
+
+/* A wavepacket is a blob: on-disk order in the buffer, so nothing to do. */
+static inline void laz_swap_wavepacket13(U8 *item) { (void)item; }
+#endif
 
 /*
  * The predicted part of a wavepacket item: the 28 bytes after the packet index,

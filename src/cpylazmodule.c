@@ -944,24 +944,24 @@ POINT_IGETTER(X, self->p->X)
 POINT_IGETTER(Y, self->p->Y)
 POINT_IGETTER(Z, self->p->Z)
 POINT_UGETTER(intensity, self->p->intensity)
-POINT_UGETTER(return_number, self->p->return_number)
-POINT_UGETTER(number_of_returns, self->p->number_of_returns)
-POINT_UGETTER(scan_direction_flag, self->p->scan_direction_flag)
-POINT_UGETTER(edge_of_flight_line, self->p->edge_of_flight_line)
-POINT_UGETTER(classification, self->p->classification)
-POINT_UGETTER(synthetic_flag, self->p->synthetic_flag)
-POINT_UGETTER(keypoint_flag, self->p->keypoint_flag)
-POINT_UGETTER(withheld_flag, self->p->withheld_flag)
+POINT_UGETTER(return_number, laz_point_return_number(self->p))
+POINT_UGETTER(number_of_returns, laz_point_number_of_returns(self->p))
+POINT_UGETTER(scan_direction_flag, laz_point_scan_direction_flag(self->p))
+POINT_UGETTER(edge_of_flight_line, laz_point_edge_of_flight_line(self->p))
+POINT_UGETTER(classification, laz_point_classification(self->p))
+POINT_UGETTER(synthetic_flag, laz_point_synthetic_flag(self->p))
+POINT_UGETTER(keypoint_flag, laz_point_keypoint_flag(self->p))
+POINT_UGETTER(withheld_flag, laz_point_withheld_flag(self->p))
 POINT_IGETTER(scan_angle_rank, self->p->scan_angle_rank)
 POINT_UGETTER(user_data, self->p->user_data)
 POINT_UGETTER(point_source_ID, self->p->point_source_ID)
 POINT_IGETTER(extended_scan_angle, self->p->extended_scan_angle)
-POINT_UGETTER(extended_point_type, self->p->extended_point_type)
-POINT_UGETTER(extended_scanner_channel, self->p->extended_scanner_channel)
-POINT_UGETTER(extended_classification_flags, self->p->extended_classification_flags)
+POINT_UGETTER(extended_point_type, laz_point_extended_point_type(self->p))
+POINT_UGETTER(extended_scanner_channel, laz_point_extended_scanner_channel(self->p))
+POINT_UGETTER(extended_classification_flags, laz_point_extended_classification_flags(self->p))
 POINT_UGETTER(extended_classification, self->p->extended_classification)
-POINT_UGETTER(extended_return_number, self->p->extended_return_number)
-POINT_UGETTER(extended_number_of_returns, self->p->extended_number_of_returns)
+POINT_UGETTER(extended_return_number, laz_point_extended_return_number(self->p))
+POINT_UGETTER(extended_number_of_returns, laz_point_extended_number_of_returns(self->p))
 
 static PyObject *Point_get_gps_time(PointObject *self, void *c)
 { (void)c; return PyFloat_FromDouble(self->p->gps_time); }
@@ -1058,29 +1058,42 @@ static int point_ivalue(PyObject *v, long min, long max, long *out)
         self->p->name = value;                                                 \
         return 0;                                                              \
     }
+/* The bit-packed fields go through laz_types.h's accessors rather than an
+ * assignment, so the packing is stated in one place -- including the bound,
+ * which is the field's own mask and so comes from the same table rather than
+ * being restated per field here. */
+#define POINT_PSETTER(name)                                                    \
+    static int Point_set_##name(PointObject *self, PyObject *v, void *c)       \
+    {                                                                          \
+        unsigned long value;                                                   \
+        (void)c;                                                               \
+        if (point_uvalue(v, LAZ_POINT_MAX_##name, &value) < 0) return -1;      \
+        laz_point_set_##name(self->p, (U8)value);                              \
+        return 0;                                                              \
+    }
 
 POINT_ISETTER(X, I32_MIN, I32_MAX)
 POINT_ISETTER(Y, I32_MIN, I32_MAX)
 POINT_ISETTER(Z, I32_MIN, I32_MAX)
 POINT_USETTER(intensity, 0xFFFF)
-POINT_USETTER(return_number, 0x7)
-POINT_USETTER(number_of_returns, 0x7)
-POINT_USETTER(scan_direction_flag, 1)
-POINT_USETTER(edge_of_flight_line, 1)
-POINT_USETTER(classification, 0x1F)
-POINT_USETTER(synthetic_flag, 1)
-POINT_USETTER(keypoint_flag, 1)
-POINT_USETTER(withheld_flag, 1)
+POINT_PSETTER(return_number)
+POINT_PSETTER(number_of_returns)
+POINT_PSETTER(scan_direction_flag)
+POINT_PSETTER(edge_of_flight_line)
+POINT_PSETTER(classification)
+POINT_PSETTER(synthetic_flag)
+POINT_PSETTER(keypoint_flag)
+POINT_PSETTER(withheld_flag)
 POINT_ISETTER(scan_angle_rank, -128, 127)
 POINT_USETTER(user_data, 0xFF)
 POINT_USETTER(point_source_ID, 0xFFFF)
 POINT_ISETTER(extended_scan_angle, -32768, 32767)
 /* no setter for extended_point_type: see the getset table */
-POINT_USETTER(extended_scanner_channel, 0x3)
-POINT_USETTER(extended_classification_flags, 0xF)
+POINT_PSETTER(extended_scanner_channel)
+POINT_PSETTER(extended_classification_flags)
 POINT_USETTER(extended_classification, 0xFF)
-POINT_USETTER(extended_return_number, 0xF)
-POINT_USETTER(extended_number_of_returns, 0xF)
+POINT_PSETTER(extended_return_number)
+POINT_PSETTER(extended_number_of_returns)
 
 static int Point_set_gps_time(PointObject *self, PyObject *v, void *c)
 {
@@ -1260,8 +1273,9 @@ static PyObject *Point_repr(PointObject *self)
         "Point(X=%i, Y=%i, Z=%i, intensity=%u, return_number=%u, "
         "number_of_returns=%u, classification=%u)",
         self->p->X, self->p->Y, self->p->Z, (unsigned)self->p->intensity,
-        (unsigned)self->p->return_number, (unsigned)self->p->number_of_returns,
-        (unsigned)self->p->classification);
+        (unsigned)laz_point_return_number(self->p),
+        (unsigned)laz_point_number_of_returns(self->p),
+        (unsigned)laz_point_classification(self->p));
 }
 
 static PyTypeObject Point_Type = {
@@ -1348,21 +1362,26 @@ static void reader_recode_compat(ReaderObject *self)
     U8 classification = extra[at[COMPAT_CLASSIFICATION]];
     U8 flags_and_channel = extra[at[COMPAT_FLAGS_AND_CHANNEL]];
 
-    memcpy(&scan_angle_remainder, extra + at[COMPAT_SCAN_ANGLE], 2);
+    /* the extra bytes are on-disk data, so little-endian whatever the host */
+    scan_angle_remainder = (I16)laz_le_get16(extra + at[COMPAT_SCAN_ANGLE]);
     if (at[COMPAT_NIR] >= 0)
-        memcpy(&p->rgb[3], extra + at[COMPAT_NIR], 2);
+        p->rgb[3] = laz_le_get16(extra + at[COMPAT_NIR]);
 
     p->extended_scan_angle = (I16)(scan_angle_remainder +
         self->scan_angle_of_rank[(U8)p->scan_angle_rank]);
-    p->extended_return_number =
-        ((extended_returns >> 4) & 0x0F) + p->return_number;
-    p->extended_number_of_returns =
-        (extended_returns & 0x0F) + p->number_of_returns;
-    p->extended_classification = classification + p->classification;
-    p->extended_scanner_channel = (flags_and_channel >> 1) & 0x03;
-    p->extended_classification_flags = ((flags_and_channel & 0x01) << 3)
-        | (p->withheld_flag << 2) | (p->keypoint_flag << 1) | p->synthetic_flag;
-    p->extended_point_type = 1;
+    laz_point_set_extended_return_number(
+        p, (U8)(((extended_returns >> 4) & 0x0F) + laz_point_return_number(p)));
+    laz_point_set_extended_number_of_returns(
+        p, (U8)((extended_returns & 0x0F) + laz_point_number_of_returns(p)));
+    p->extended_classification =
+        (U8)(classification + laz_point_classification(p));
+    laz_point_set_extended_scanner_channel(p, (flags_and_channel >> 1) & 0x03);
+    laz_point_set_extended_classification_flags(
+        p, (U8)(((flags_and_channel & 0x01) << 3)
+                | (laz_point_withheld_flag(p) << 2)
+                | (laz_point_keypoint_flag(p) << 1)
+                | laz_point_synthetic_flag(p)));
+    laz_point_set_extended_point_type(p, 1);
 }
 
 /*
@@ -1580,7 +1599,10 @@ static PyObject *Reader_read(ReaderObject *self, PyObject *Py_UNUSED(i))
  * without building a Python object per point. This exists so a whole file can
  * be checked against a laszip reference (tools/lazdump.c --hash) -- at tens of
  * millions of points, hashing in Python is the bottleneck, not decoding.
- * The record layout must match lazdump.c and compare_with_laszip.py exactly.
+ * The record layout must match lazdump.c and compare_with_laszip.py exactly,
+ * which is why it is laid out little-endian rather than copied out of the
+ * point: the hashes in testdata/reference_hashes.txt are a property of the
+ * file, and must not depend on the host that computed them.
  */
 static PyObject *Reader_checksum(ReaderObject *self, PyObject *args)
 {
@@ -1599,21 +1621,21 @@ static PyObject *Reader_checksum(ReaderObject *self, PyObject *args)
 
         if (!reader_next(self)) { ok = LAZ_FALSE; break; }
 
-        memcpy(rec + 0, &p->X, 4);
-        memcpy(rec + 4, &p->Y, 4);
-        memcpy(rec + 8, &p->Z, 4);
-        memcpy(rec + 12, &p->intensity, 2);
-        rec[14] = ((U8 *)p)[14];
-        rec[15] = ((U8 *)p)[15];
+        laz_le_put32(rec + 0, (U32)p->X);
+        laz_le_put32(rec + 4, (U32)p->Y);
+        laz_le_put32(rec + 8, (U32)p->Z);
+        laz_le_put16(rec + 12, p->intensity);
+        rec[14] = p->returns_and_flags;
+        rec[15] = p->classification_bits;
         rec[16] = (U8)p->scan_angle_rank;
         rec[17] = p->user_data;
-        memcpy(rec + 18, &p->point_source_ID, 2);
-        memcpy(rec + 20, &p->gps_time, 8);
-        memcpy(rec + 28, p->rgb, 8);
-        memcpy(rec + 36, &p->extended_scan_angle, 2);
-        rec[38] = ((U8 *)p)[22];
+        laz_le_put16(rec + 18, p->point_source_ID);
+        laz_le_put_f64(rec + 20, p->gps_time);
+        for (i = 0; i < 4; i++) laz_le_put16(rec + 28 + 2 * i, p->rgb[i]);
+        laz_le_put16(rec + 36, (U16)p->extended_scan_angle);
+        rec[38] = p->extended_flags;
         rec[39] = p->extended_classification;
-        rec[40] = ((U8 *)p)[24];
+        rec[40] = p->extended_returns;
         memcpy(rec + 41, p->wave_packet, 23);
 
         for (i = 0; i < 64; i++) { h ^= rec[i]; h *= 1099511628211ULL; }
@@ -2056,9 +2078,9 @@ static void writer_tally(WriterObject *self)
         }
     }
 
-    return_number = self->point.extended_point_type
-                    ? self->point.extended_return_number
-                    : self->point.return_number;
+    return_number = laz_point_extended_point_type(&self->point)
+                    ? laz_point_extended_return_number(&self->point)
+                    : laz_point_return_number(&self->point);
     self->by_return[return_number & 0xF]++;
 }
 
@@ -2181,8 +2203,16 @@ PyDoc_STRVAR(module_doc, "C backend for lazpy: LAZ entropy coding and point deco
 
 static int cpylaz_exec(PyObject *m)
 {
-    /* The point layout and host endianness are enforced at compile time by
-     * static assertions in src/laz_types.h, next to the struct they constrain. */
+    /* The point layout is enforced at compile time by static assertions in
+     * src/laz_types.h, next to the struct they constrain. Byte order cannot be
+     * settled there -- either order decodes the same file to the same values,
+     * so what matters is not which one this host is but whether the build
+     * guessed it right. Wrong, and every point mis-decodes silently. */
+    if (!laz_host_order_ok()) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "lazpy was built for the wrong host byte order");
+        return -1;
+    }
 
 #define ADD_TYPE(var, name)                                                    \
     do {                                                                       \

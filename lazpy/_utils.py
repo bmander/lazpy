@@ -24,7 +24,10 @@ def u64_array(bytes):
 
 
 def double(bytes):
-    return struct.unpack('d', bytes)[0]
+    # '<d', not 'd': the header is little-endian on disk, and 'd' would mean
+    # whatever the host is. The two agree on a little-endian host, which is why
+    # this went unnoticed until the suite ran on s390x.
+    return struct.unpack('<d', bytes)[0]
 
 
 def cstr(bytes):

@@ -9,13 +9,16 @@
 /*
  * Raw (uncompressed) item writers -- ported from LASzip's laswriteitemraw.hpp.
  *
- * Only the little-endian variants are ported; the module refuses to load on a
- * big-endian host rather than silently mis-encoding.
+ * The mirror of laz_readitem_raw.c, and with it the only place the host byte
+ * order and the on-disk one meet; see the comment there.
  *
- * Most items are a straight byte copy because the LazPoint layout matches the
- * on-disk layout at that offset. POINT14 is the exception: the 30-byte LAS 1.4
+ * Most items are a byte copy because the LazPoint layout matches the on-disk
+ * layout at that offset -- on a big-endian host, a copy into a scratch buffer
+ * that is then swapped, through the same swaps the reader uses, since a byte
+ * swap is its own inverse. POINT14 is the exception: the 30-byte LAS 1.4
  * record has to be gathered from both the legacy and extended fields of
- * LazPoint, the exact inverse of raw_read_point14 in laz_readitem_raw.c.
+ * LazPoint, the exact inverse of raw_read_point14 in laz_readitem_raw.c, and
+ * it writes every field explicitly so it needs no swap.
  *
  * These are not only for uncompressed files: every compressed chunk begins
  * with one raw point, which is what seeds the predictors of the compressed
@@ -50,19 +53,38 @@ static RawWriter *raw_new(LazOutStream *out,
     return w;
 }
 
-#define RAW_FIXED_WRITER(name, nbytes)                                        \
+/*
+ * The mirror of RAW_FIXED_READER. The item is const and cannot be swapped
+ * where it lies, so the big-endian body copies it into the writer's scratch
+ * buffer and swaps that; the little-endian body never mentions `swap` and puts
+ * the item straight out, as it always did.
+ */
+#if LAZ_BIG_ENDIAN
+#define RAW_FIXED_WRITER(name, nbytes, swap)                                  \
+    static BOOL name(LazWriteItem *self, const U8 *item, U32 *context)        \
+    {                                                                         \
+        U8 *buf = ((RawWriter *)self)->buffer;                                \
+        (void)context;                                                        \
+        memcpy(buf, item, nbytes);                                            \
+        swap(buf);                                                            \
+        laz_outstream_put_bytes(self->outstream, buf, nbytes);                \
+        return LAZ_TRUE;                                                      \
+    }
+#else
+#define RAW_FIXED_WRITER(name, nbytes, swap)                                  \
     static BOOL name(LazWriteItem *self, const U8 *item, U32 *context)        \
     {                                                                         \
         (void)context;                                                        \
         laz_outstream_put_bytes(self->outstream, item, nbytes);               \
         return LAZ_TRUE;                                                      \
     }
+#endif
 
-RAW_FIXED_WRITER(raw_write_point10,     20)
-RAW_FIXED_WRITER(raw_write_gpstime11,    8)
-RAW_FIXED_WRITER(raw_write_rgb12,        6)
-RAW_FIXED_WRITER(raw_write_rgbnir14,     8)
-RAW_FIXED_WRITER(raw_write_wavepacket13, 29)
+RAW_FIXED_WRITER(raw_write_point10,     20, laz_swap_point10)
+RAW_FIXED_WRITER(raw_write_gpstime11,    8, laz_swap_gpstime11)
+RAW_FIXED_WRITER(raw_write_rgb12,        6, laz_swap_rgb12)
+RAW_FIXED_WRITER(raw_write_rgbnir14,     8, laz_swap_rgbnir14)
+RAW_FIXED_WRITER(raw_write_wavepacket13, 29, laz_swap_wavepacket13)
 
 static BOOL raw_write_byte(LazWriteItem *self, const U8 *item, U32 *context)
 {
@@ -88,35 +110,40 @@ static BOOL raw_write_point14(LazWriteItem *self, const U8 *item, U32 *context)
     I16 scan_angle;
 
     (void)context;
-    memcpy(b + 0, item, 14);            /* X, Y, Z, intensity */
+    laz_le_put32(b + 0, (U32)p->X);
+    laz_le_put32(b + 4, (U32)p->Y);
+    laz_le_put32(b + 8, (U32)p->Z);
+    laz_le_put16(b + 12, p->intensity);
 
     /* the low three flag bits are the legacy ones either way; only overlap,
      * the fourth, exists solely in the extended field */
-    class_flags = (U8)(p->synthetic_flag | (p->keypoint_flag << 1) |
-                       (p->withheld_flag << 2));
-    classification = p->classification;
-    if (p->extended_point_type) {
-        class_flags |= (U8)(p->extended_classification_flags & 0x08);
+    class_flags = (U8)(laz_point_synthetic_flag(p) |
+                       (laz_point_keypoint_flag(p) << 1) |
+                       (laz_point_withheld_flag(p) << 2));
+    classification = laz_point_classification(p);
+    if (laz_point_extended_point_type(p)) {
+        class_flags |= (U8)(laz_point_extended_classification_flags(p) & 0x08);
         if (classification == 0) classification = p->extended_classification;
-        scanner_channel = p->extended_scanner_channel;
-        return_number = p->extended_return_number;
-        number_of_returns = p->extended_number_of_returns;
+        scanner_channel = laz_point_extended_scanner_channel(p);
+        return_number = laz_point_extended_return_number(p);
+        number_of_returns = laz_point_extended_number_of_returns(p);
         scan_angle = p->extended_scan_angle;
     } else {
         scanner_channel = 0;
-        return_number = p->return_number;
-        number_of_returns = p->number_of_returns;
+        return_number = laz_point_return_number(p);
+        number_of_returns = laz_point_number_of_returns(p);
         scan_angle = I16_QUANTIZE(p->scan_angle_rank / 0.006f);
     }
 
     b[14] = (U8)(return_number | (number_of_returns << 4));
     b[15] = (U8)(class_flags | (scanner_channel << 4) |
-                 (p->scan_direction_flag << 6) | (p->edge_of_flight_line << 7));
+                 (laz_point_scan_direction_flag(p) << 6) |
+                 (laz_point_edge_of_flight_line(p) << 7));
     b[16] = classification;
     b[17] = p->user_data;
-    memcpy(b + 18, &scan_angle, 2);
-    memcpy(b + 20, &p->point_source_ID, 2);
-    memcpy(b + 22, &p->gps_time, 8);
+    laz_le_put16(b + 18, (U16)scan_angle);
+    laz_le_put16(b + 20, p->point_source_ID);
+    laz_le_put_f64(b + 22, p->gps_time);
 
     laz_outstream_put_bytes(self->outstream, b, 30);
     return LAZ_TRUE;

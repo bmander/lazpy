@@ -20,8 +20,28 @@ static unsigned long long fnv1a(unsigned long long h, const unsigned char* p, in
     return h;
 }
 
-static void put_i32(unsigned char* p, int v) { memcpy(p, &v, 4); }
-static void put_u16(unsigned char* p, unsigned v) { unsigned short s = (unsigned short)v; memcpy(p, &s, 2); }
+/* Little-endian, not host order: the hash of a file must be the same number
+ * wherever it is computed, so that testdata/reference_hashes.txt can be
+ * compared against a lazpy built for any host. */
+static void put_u16(unsigned char* p, unsigned v)
+{
+    p[0] = (unsigned char)(v & 0xFF);
+    p[1] = (unsigned char)((v >> 8) & 0xFF);
+}
+
+static void put_u32(unsigned char* p, unsigned v)
+{
+    put_u16(p, v & 0xFFFF);
+    put_u16(p + 2, (v >> 16) & 0xFFFF);
+}
+
+static void put_i32(unsigned char* p, int v) { put_u32(p, (unsigned)v); }
+
+static void put_u64(unsigned char* p, unsigned long long v)
+{
+    put_u32(p, (unsigned)(v & 0xFFFFFFFFu));
+    put_u32(p + 4, (unsigned)(v >> 32));
+}
 
 int main(int argc, char** argv)
 {
@@ -124,7 +144,7 @@ int main(int argc, char** argv)
             rec[16] = (unsigned char)point->scan_angle_rank;
             rec[17] = point->user_data;
             put_u16(rec + 18, point->point_source_ID);
-            memcpy(rec + 20, &gps_bits, 8);
+            put_u64(rec + 20, gps_bits);
             put_u16(rec + 28, point->rgb[0]);
             put_u16(rec + 30, point->rgb[1]);
             put_u16(rec + 32, point->rgb[2]);

@@ -4,6 +4,13 @@ These tools exist to prove lazpy decodes exactly what LASzip decodes. They are
 only needed to regenerate or extend `testdata/` — running `pytest` does not
 require any of them, because the reference hashes are committed.
 
+Run them on a little-endian host. `lazpy` itself works on either (see the
+byte-order note in the top-level README), and `lazdump --hash` is byte-order
+independent by construction, so the committed hashes are comparable anywhere.
+`mklaz` is not: it fills a LASzip point buffer, which is in host order, with
+values it writes little-endian, and on a big-endian host would emit garbage
+rather than fail. Nobody has needed it there, and `testdata/` is committed.
+
 All three need a LASzip checkout built as a shared library:
 
 ```bash

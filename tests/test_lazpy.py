@@ -2284,8 +2284,9 @@ def test_arrays_match_reading_point_by_point(name):
     """Every column, every point, against the API already pinned to laszip.
 
     This is what makes the bit-unpacking trustworthy: return number and the
-    classification flags are shifts and masks over a byte on the array path
-    and C bitfields on the point path, and they have to agree.
+    classification flags are shifts and masks over a byte on both paths --
+    _ARRAY_FIELDS on one, LAZ_POINT_PACKED_FIELDS in src/laz_types.h on the
+    other -- and the two statements of those shifts have to agree.
     """
     with Reader(fixture(name)) as reader:
         columns = reader.arrays()

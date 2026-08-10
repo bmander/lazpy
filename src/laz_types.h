@@ -86,6 +86,119 @@ typedef struct {
 #define LAZ_CODER_ARITHMETIC 0
 
 /*
+ * Host byte order.
+ *
+ * LAS and LAZ are little-endian on disk; the decoded point below holds host
+ * order. On a little-endian host the two coincide and every conversion here
+ * folds away, which is why the raw item coders used to be plain byte copies.
+ * On a big-endian host they do not, and the conversions are what stands
+ * between the disk and the point.
+ */
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__)
+#define LAZ_BIG_ENDIAN (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+#else
+/* MSVC defines no such macro and every target it compiles for is
+ * little-endian, so assume that rather than refuse to build. It is an
+ * assumption and not a fact, which is why laz_host_order_ok() below exists for
+ * a caller to check once at start-up. */
+#define LAZ_BIG_ENDIAN 0
+#endif
+
+/*
+ * Little-endian scalars in a byte buffer.
+ *
+ * The rule these serve, which the whole codebase follows:
+ *
+ *  - A scalar field of the decoded point is in host order. The raw item coders
+ *    convert on the way in and out (laz_readitem_raw.c, laz_writeitem_raw.c);
+ *    everything between -- the compressed coders, the array API -- just reads
+ *    and writes the point and never thinks about byte order at all.
+ *  - A blob keeps its on-disk order wherever it goes. There are two, both
+ *    opaque to the point: `wave_packet`, unpacked only by laz_wp_get32 in
+ *    laz_item.h, and the extra bytes, whose typing lives in a VLR no item coder
+ *    can see. Both reach Python as bytes, so leaving them alone is also what
+ *    makes those bytes the same on every host.
+ *  - Anything emitting a byte stream that must not depend on the host converts
+ *    explicitly. That is the on-disk format, and also Reader_checksum, whose
+ *    hash is compared against values laszip computed elsewhere.
+ *
+ * So these are for the third case and for reading into or out of the second.
+ * Written as shifts rather than a cast plus a conditional swap so the same code
+ * is correct either way, and so neither alignment nor strict aliasing comes
+ * into it; a compiler folds them back into a single load or store.
+ */
+static inline U16 laz_le_get16(const U8 *p)
+{
+    return (U16)((U16)p[0] | ((U16)p[1] << 8));
+}
+
+static inline U32 laz_le_get32(const U8 *p)
+{
+    return (U32)p[0] | ((U32)p[1] << 8) | ((U32)p[2] << 16) | ((U32)p[3] << 24);
+}
+
+static inline U64 laz_le_get64(const U8 *p)
+{
+    return (U64)laz_le_get32(p) | ((U64)laz_le_get32(p + 4) << 32);
+}
+
+static inline void laz_le_put16(U8 *p, U16 v)
+{
+    p[0] = (U8)(v & 0xFF);
+    p[1] = (U8)(v >> 8);
+}
+
+static inline void laz_le_put32(U8 *p, U32 v)
+{
+    p[0] = (U8)(v & 0xFF);
+    p[1] = (U8)((v >> 8) & 0xFF);
+    p[2] = (U8)((v >> 16) & 0xFF);
+    p[3] = (U8)((v >> 24) & 0xFF);
+}
+
+static inline void laz_le_put64(U8 *p, U64 v)
+{
+    laz_le_put32(p, (U32)(v & 0xFFFFFFFFu));
+    laz_le_put32(p + 4, (U32)(v >> 32));
+}
+
+/* A double travels as its IEEE 754 bit pattern, which is what the LAS gps_time
+ * and the LAZ coders both treat it as. */
+static inline F64 laz_le_get_f64(const U8 *p)
+{
+    U64 bits = laz_le_get64(p);
+    F64 v;
+    memcpy(&v, &bits, 8);
+    return v;
+}
+
+static inline void laz_le_put_f64(U8 *p, F64 v)
+{
+    U64 bits;
+    memcpy(&bits, &v, 8);
+    laz_le_put64(p, bits);
+}
+
+/*
+ * Is LAZ_BIG_ENDIAN right about this host?
+ *
+ * Everything above rests on that macro, and on a compiler that defines no
+ * __BYTE_ORDER__ it is a guess rather than a fact. Rather than refuse to build
+ * on such a compiler -- which is what the old little-endian-only check did, and
+ * which would now reject a host that works -- lay a known value down both ways
+ * and see whether they agree. A caller checks once at start-up; getting this
+ * wrong mis-decodes every point, so it is worth not assuming.
+ */
+static inline BOOL laz_host_order_ok(void)
+{
+    const U32 probe = 0x01020304u;
+    U8 first;
+    memcpy(&first, &probe, 1);
+    /* the most significant byte is stored first only on a big-endian host */
+    return (first == 0x01) == (LAZ_BIG_ENDIAN != 0);
+}
+
+/*
  * The canonical decoded point.
  *
  * This deliberately mirrors LASzip's laszip_point_struct byte-for-byte,
@@ -94,31 +207,33 @@ typedef struct {
  * writes at offset 32 (gps_time), RGB12/RGB14/RGBNIR14 at offset 40 (rgb),
  * and WAVEPACKET13/14 at offset 48 (wave_packet). Reordering these fields
  * silently corrupts decoding.
+ *
+ * Scalars are in host order and wave_packet is a blob, both per the rule on
+ * laz_le_get16 above.
+ *
+ * The bytes LAS packs several fields into are plain U8 here rather than C
+ * bitfields: the item coders reach those same bytes through fixed shifts
+ * (P10_RETURN_NUMBER and friends in laz_item.h), and bitfield allocation runs
+ * from the most significant bit on the big-endian ABIs, so the two would agree
+ * only by accident. Packing them by hand, through the accessors below, makes
+ * one rule hold on every host -- and is why no assertion here has anything to
+ * say about bit positions: they are no longer the compiler's to choose.
  */
 typedef struct {
     I32 X;                              /* offset  0 */
     I32 Y;                              /* offset  4 */
     I32 Z;                              /* offset  8 */
     U16 intensity;                      /* offset 12 */
-    U8 return_number : 3;               /* offset 14 (bitfield byte) */
-    U8 number_of_returns : 3;
-    U8 scan_direction_flag : 1;
-    U8 edge_of_flight_line : 1;
-    U8 classification : 5;              /* offset 15 */
-    U8 synthetic_flag : 1;
-    U8 keypoint_flag : 1;
-    U8 withheld_flag : 1;
+    U8 returns_and_flags;               /* offset 14 (packed, see below) */
+    U8 classification_bits;             /* offset 15 (packed) */
     I8 scan_angle_rank;                 /* offset 16 */
     U8 user_data;                       /* offset 17 */
     U16 point_source_ID;                /* offset 18 */
 
     I16 extended_scan_angle;            /* offset 20 */
-    U8 extended_point_type : 2;         /* offset 22 */
-    U8 extended_scanner_channel : 2;
-    U8 extended_classification_flags : 4;
+    U8 extended_flags;                  /* offset 22 (packed) */
     U8 extended_classification;         /* offset 23 */
-    U8 extended_return_number : 4;      /* offset 24 */
-    U8 extended_number_of_returns : 4;
+    U8 extended_returns;                /* offset 24 (packed) */
 
     U8 dummy[7];                        /* offset 25, aligns gps_time to 32 */
 
@@ -129,6 +244,46 @@ typedef struct {
     I32 num_extra_bytes;
     U8 *extra_bytes;
 } LazPoint;
+
+/*
+ * The packed fields, as (name, containing byte, shift, mask).
+ *
+ * The bit positions are the on-disk ones, so the raw coders can copy those
+ * bytes through untouched, and they are the positions the P10_/P14_ macros in
+ * laz_item.h already assume. lazpy/__init__.py's _ARRAY_FIELDS restates the
+ * same shifts for numpy; test_arrays_match_reading_point_by_point pins the two
+ * together.
+ */
+#define LAZ_POINT_PACKED_FIELDS(_)                                            \
+    _(return_number,                 returns_and_flags,    0, 0x07)           \
+    _(number_of_returns,             returns_and_flags,    3, 0x07)           \
+    _(scan_direction_flag,           returns_and_flags,    6, 0x01)           \
+    _(edge_of_flight_line,           returns_and_flags,    7, 0x01)           \
+    _(classification,                classification_bits,  0, 0x1F)           \
+    _(synthetic_flag,                classification_bits,  5, 0x01)           \
+    _(keypoint_flag,                 classification_bits,  6, 0x01)           \
+    _(withheld_flag,                 classification_bits,  7, 0x01)           \
+    _(extended_point_type,           extended_flags,       0, 0x03)           \
+    _(extended_scanner_channel,      extended_flags,       2, 0x03)           \
+    _(extended_classification_flags, extended_flags,       4, 0x0F)           \
+    _(extended_return_number,        extended_returns,     0, 0x0F)           \
+    _(extended_number_of_returns,    extended_returns,     4, 0x0F)
+
+/*
+ * Each field gets a getter, a setter, and LAZ_POINT_MAX_<name> -- its mask,
+ * which is also the largest value it can hold. Anything that has to range-check
+ * a value takes the bound from here rather than restating it; see POINT_PSETTER
+ * in cpylazmodule.c.
+ */
+#define LAZ_DEFINE_PACKED_ACCESSORS(name, byte, shift, mask)                  \
+    enum { LAZ_POINT_MAX_##name = (mask) };                                   \
+    static inline U8 laz_point_##name(const LazPoint *p)                      \
+    { return (U8)((p->byte >> (shift)) & (mask)); }                           \
+    static inline void laz_point_set_##name(LazPoint *p, U8 v)                \
+    { p->byte = (U8)((p->byte & ~((mask) << (shift)))                         \
+                     | (((v) & (mask)) << (shift))); }
+LAZ_POINT_PACKED_FIELDS(LAZ_DEFINE_PACKED_ACCESSORS)
+#undef LAZ_DEFINE_PACKED_ACCESSORS
 
 /* Offsets the item readers write to. */
 #define LAZ_POINT_OFFSET_XYZ         0
@@ -160,24 +315,25 @@ LAZ_ASSERT_OFFSET(X, LAZ_POINT_OFFSET_XYZ);
 LAZ_ASSERT_OFFSET(Y, 4);
 LAZ_ASSERT_OFFSET(Z, 8);
 LAZ_ASSERT_OFFSET(intensity, 12);
+LAZ_ASSERT_OFFSET(returns_and_flags, 14);
+LAZ_ASSERT_OFFSET(classification_bits, 15);
 LAZ_ASSERT_OFFSET(scan_angle_rank, 16);
 LAZ_ASSERT_OFFSET(user_data, 17);
 LAZ_ASSERT_OFFSET(point_source_ID, 18);
 LAZ_ASSERT_OFFSET(extended_scan_angle, 20);
+LAZ_ASSERT_OFFSET(extended_flags, 22);
 LAZ_ASSERT_OFFSET(extended_classification, 23);
+LAZ_ASSERT_OFFSET(extended_returns, 24);
 LAZ_ASSERT_OFFSET(gps_time, LAZ_POINT_OFFSET_GPSTIME);
 LAZ_ASSERT_OFFSET(rgb, LAZ_POINT_OFFSET_RGB);
 LAZ_ASSERT_OFFSET(wave_packet, LAZ_POINT_OFFSET_WAVEPACKET);
 /* the POINT14 copy must not reach into the wavepacket slot */
 _Static_assert(LAZ_POINT14_WRITE_EXTENT <= LAZ_POINT_OFFSET_WAVEPACKET,
                "POINT14 write extent overlaps the wavepacket item");
+/* the gps time is coded as the eight bytes of an IEEE 754 double, both on disk
+ * and by the coders that treat it as an I64 */
+_Static_assert(sizeof(F64) == 8, "gps_time must be an 8-byte double");
 #undef LAZ_ASSERT_OFFSET
-#endif
-
-/* Little-endian hosts only: the readers reinterpret bytes in place. */
-#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && \
-    __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-#error "lazpy only supports little-endian hosts"
 #endif
 
 #endif /* LAZ_TYPES_H */
