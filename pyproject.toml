@@ -59,6 +59,7 @@ sources = [
     "src/laz_readitem_v3.c",
     "src/laz_readpoint.c",
     "src/laz_writepoint.c",
+    "src/laz_index.c",
 ]
 include-dirs = ["src"]
 

@@ -43,18 +43,85 @@ static void put_u64(unsigned char* p, unsigned long long v)
     put_u32(p + 4, (unsigned)(v >> 32));
 }
 
+/*
+ * The canonical 64-byte record a point hashes as; must match
+ * tools/compare_with_laszip.py and Reader_checksum in src/cpylazmodule.c.
+ */
+static unsigned long long hash_point(unsigned long long hash,
+                                     const laszip_point_struct* point,
+                                     int num_extra_bytes)
+{
+    unsigned long long gps_bits;
+    unsigned char rec[64];
+
+    memcpy(&gps_bits, &point->gps_time, 8);
+    memset(rec, 0, sizeof(rec));
+    put_i32(rec + 0, point->X);
+    put_i32(rec + 4, point->Y);
+    put_i32(rec + 8, point->Z);
+    put_u16(rec + 12, point->intensity);
+    rec[14] = (unsigned char)(point->return_number
+               | (point->number_of_returns << 3)
+               | (point->scan_direction_flag << 6)
+               | (point->edge_of_flight_line << 7));
+    rec[15] = (unsigned char)(point->classification
+               | (point->synthetic_flag << 5)
+               | (point->keypoint_flag << 6)
+               | (point->withheld_flag << 7));
+    rec[16] = (unsigned char)point->scan_angle_rank;
+    rec[17] = point->user_data;
+    put_u16(rec + 18, point->point_source_ID);
+    put_u64(rec + 20, gps_bits);
+    put_u16(rec + 28, point->rgb[0]);
+    put_u16(rec + 30, point->rgb[1]);
+    put_u16(rec + 32, point->rgb[2]);
+    put_u16(rec + 34, point->rgb[3]);
+    put_u16(rec + 36, (unsigned)(unsigned short)point->extended_scan_angle);
+    rec[38] = (unsigned char)(point->extended_point_type
+               | (point->extended_scanner_channel << 2)
+               | (point->extended_classification_flags << 4));
+    rec[39] = point->extended_classification;
+    rec[40] = (unsigned char)(point->extended_return_number
+               | (point->extended_number_of_returns << 4));
+    memcpy(rec + 41, point->wave_packet, 23);   /* first 23 of 29 */
+    hash = fnv1a(hash, rec, 64);
+    hash = fnv1a(hash, point->wave_packet + 23, 6);
+    if (num_extra_bytes > 0)
+        hash = fnv1a(hash, point->extra_bytes, num_extra_bytes);
+    return hash;
+}
+
 int main(int argc, char** argv)
 {
     if (argc < 3) {
         fprintf(stderr, "usage: lazdump in.laz out.txt [max_points]\n");
         fprintf(stderr, "       lazdump in.laz --hash\n");
+        fprintf(stderr, "       lazdump in.laz --inside minx miny maxx maxy\n");
         return 1;
     }
     int hash_mode = (strcmp(argv[2], "--hash") == 0);
+    int inside_mode = (strcmp(argv[2], "--inside") == 0);
+    double r[4] = {0, 0, 0, 0};
     long long max_points = (argc > 3) ? atoll(argv[3]) : -1;
+
+    if (inside_mode) {
+        if (argc < 7) {
+            fprintf(stderr, "--inside needs minx miny maxx maxy\n");
+            return 1;
+        }
+        for (int i = 0; i < 4; i++) r[i] = atof(argv[3 + i]);
+        max_points = -1;
+    }
 
     laszip_POINTER reader;
     if (laszip_create(&reader)) { fprintf(stderr, "create failed\n"); return 1; }
+
+    /* The spatial index has to be asked for before the file is opened, since
+     * that is when the sidecar ".lax" is looked for. */
+    if (inside_mode && laszip_exploit_spatial_index(reader, 1)) {
+        fprintf(stderr, "requesting the spatial index failed\n");
+        return 1;
+    }
 
     /* Ask for LAS 1.4 compatibility mode, which lazpy always applies: a legacy
      * file that turns out to be a disguised LAS 1.4 one is then reported as
@@ -98,6 +165,61 @@ int main(int argc, char** argv)
         if (num_extra_bytes < 0) num_extra_bytes = 0;
     }
 
+    unsigned long long hash = 14695981039346656037ULL;
+
+    /*
+     * Which points are inside the rectangle, as a hash of their indices in the
+     * order laszip hands them over. With a spatial index this visits only the
+     * chunks the index names; without one it is a filtered full scan, and both
+     * must pick the same points.
+     *
+     * The indices rather than the points, because what a rectangle query has
+     * to get right is which points it selects -- that every field of every
+     * point decodes correctly is what the whole-file hashes already say.
+     *
+     * The point count is watched because laszip_read_inside_point's unindexed
+     * branch does not: nothing under it knows where the points end, so it
+     * decodes past the last one and hands back whatever the bytes behind it
+     * happen to say. Stopping at the count the header states is what the
+     * question means anyway.
+     */
+    if (inside_mode) {
+        laszip_BOOL is_indexed = 0, is_empty = 0, is_done = 0;
+        long long found = 0;
+
+        if (laszip_has_spatial_index(reader, &is_indexed, NULL)) {
+            laszip_CHAR* err; laszip_get_error(reader, &err);
+            fprintf(stderr, "spatial index query failed: %s\n", err ? err : "?");
+            return 1;
+        }
+        if (laszip_inside_rectangle(reader, r[0], r[1], r[2], r[3], &is_empty)) {
+            laszip_CHAR* err; laszip_get_error(reader, &err);
+            fprintf(stderr, "inside_rectangle failed: %s\n", err ? err : "?");
+            return 1;
+        }
+        while (!is_empty) {
+            laszip_I64 read_so_far = 0;
+            unsigned char index[8];
+            if (laszip_read_inside_point(reader, &is_done)) {
+                laszip_CHAR* err; laszip_get_error(reader, &err);
+                fprintf(stderr, "read_inside_point failed: %s\n", err ? err : "?");
+                return 1;
+            }
+            if (is_done) break;
+            laszip_get_point_count(reader, &read_so_far);
+            if (read_so_far > npoints) break;
+            put_u64(index, (unsigned long long)(read_so_far - 1));
+            hash = fnv1a(hash, index, 8);
+            found++;
+        }
+        printf("%llu %lld\n", hash, found);
+        fprintf(stderr, "%lld points inside %g %g %g %g (indexed %d)\n",
+                found, r[0], r[1], r[2], r[3], (int)is_indexed);
+        laszip_close_reader(reader);
+        laszip_destroy(reader);
+        return 0;
+    }
+
     FILE* out = NULL;
     if (!hash_mode) {
         out = fopen(argv[2], "w");
@@ -113,8 +235,6 @@ int main(int argc, char** argv)
     laszip_I64 limit = npoints;
     if (max_points >= 0 && max_points < limit) limit = max_points;
 
-    unsigned long long hash = 14695981039346656037ULL;
-
     for (laszip_I64 i = 0; i < limit; i++) {
         if (laszip_read_point(reader)) {
             laszip_CHAR* err; laszip_get_error(reader, &err);
@@ -126,41 +246,7 @@ int main(int argc, char** argv)
         memcpy(&gps_bits, &point->gps_time, 8);
 
         if (hash_mode) {
-            /* canonical 64-byte record; must match compare_with_laszip.py */
-            unsigned char rec[64];
-            memset(rec, 0, sizeof(rec));
-            put_i32(rec + 0, point->X);
-            put_i32(rec + 4, point->Y);
-            put_i32(rec + 8, point->Z);
-            put_u16(rec + 12, point->intensity);
-            rec[14] = (unsigned char)(point->return_number
-                       | (point->number_of_returns << 3)
-                       | (point->scan_direction_flag << 6)
-                       | (point->edge_of_flight_line << 7));
-            rec[15] = (unsigned char)(point->classification
-                       | (point->synthetic_flag << 5)
-                       | (point->keypoint_flag << 6)
-                       | (point->withheld_flag << 7));
-            rec[16] = (unsigned char)point->scan_angle_rank;
-            rec[17] = point->user_data;
-            put_u16(rec + 18, point->point_source_ID);
-            put_u64(rec + 20, gps_bits);
-            put_u16(rec + 28, point->rgb[0]);
-            put_u16(rec + 30, point->rgb[1]);
-            put_u16(rec + 32, point->rgb[2]);
-            put_u16(rec + 34, point->rgb[3]);
-            put_u16(rec + 36, (unsigned)(unsigned short)point->extended_scan_angle);
-            rec[38] = (unsigned char)(point->extended_point_type
-                       | (point->extended_scanner_channel << 2)
-                       | (point->extended_classification_flags << 4));
-            rec[39] = point->extended_classification;
-            rec[40] = (unsigned char)(point->extended_return_number
-                       | (point->extended_number_of_returns << 4));
-            memcpy(rec + 41, point->wave_packet, 23);   /* first 23 of 29 */
-            hash = fnv1a(hash, rec, 64);
-            hash = fnv1a(hash, point->wave_packet + 23, 6);
-            if (num_extra_bytes > 0)
-                hash = fnv1a(hash, point->extra_bytes, num_extra_bytes);
+            hash = hash_point(hash, point, num_extra_bytes);
             continue;
         }
 

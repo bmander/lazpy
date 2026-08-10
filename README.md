@@ -50,6 +50,38 @@ while reader.index < reader.num_points:
 numpy is an optional dependency — `pip install lazpy[numpy]` — and is imported
 only when one of these is called.
 
+## Reading a region
+
+```python
+with Reader("cloud.laz") as reader:
+    for point in reader.points_within(min_x, min_y, max_x, max_y):
+        ...
+```
+
+The rectangle is half-open — a point counts when `min_x <= x < max_x` and
+`min_y <= y < max_y` — in the georeferenced coordinates `scale()` returns, so
+adjoining rectangles partition the points rather than sharing the ones on the
+seam. This is what laszip's own rectangle query does.
+
+If the file has a LASzip spatial index, this decodes only the chunks the index
+says could hold a point in the rectangle. A 40-metre square of a
+million-point file decodes about 49,000 points instead of all of them, and
+takes a twentieth of the time. Without an index it is a filtered full scan:
+the same points, at the cost of reading everything.
+
+An index is looked for in the `.lax` file beside the cloud, and inside the file
+itself for one that `lasindex -append` put there — that one wins, since it
+cannot be stale. `reader.has_spatial_index` says which happened.
+
+```python
+reader.spatial_index.bounds        # the indexed area
+reader.spatial_index.intervals(min_x, min_y, max_x, max_y)
+```
+
+`intervals()` is the index itself: the runs of point indices a rectangle
+reaches, which is what `points_within` seeks between. Writing a `.lax` is not
+supported; `lasindex` from LAStools writes them.
+
 ## Writing
 
 ```python
@@ -152,8 +184,11 @@ it. The one variant left alone is the LAS 1.5 form, which lazpy has no header
 for. Note that `header_size` and `offset_to_point_data` then describe the LAS
 1.4 file being reported rather than the bytes on disk, as they do in laszip.
 
-Not yet: *writing* extended variable-length records or compatibility-mode
-files, and spatial indexing.
+The LASzip spatial index is read, both as a sidecar `.lax` and as the extended
+record an appended one lives in; see "Reading a region" above.
+
+Not yet: *writing* extended variable-length records, compatibility-mode files,
+or spatial indexes.
 
 Both host byte orders work. LAS and LAZ are little-endian on disk and a
 decoded point is in host order, so a big-endian host converts between the two
