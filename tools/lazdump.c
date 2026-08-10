@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "laszip_api.h"
+#include "point_sizes.h"
 
 /*
  * FNV-1a over a canonical per-point byte record. Both this tool and
@@ -70,12 +71,10 @@ int main(int argc, char** argv)
      * header is what reports the extra bytes the file is actually about, and
      * is what lazpy hands back.
      */
-    static const int base_size[11] =
-        { 20, 28, 26, 34, 57, 63, 30, 36, 38, 59, 67 };
     int num_extra_bytes = point->num_extra_bytes;
     if (header->point_data_format <= 10) {
         num_extra_bytes = (int)header->point_data_record_length
-                          - base_size[header->point_data_format];
+                          - point_base_size[header->point_data_format];
         if (num_extra_bytes < 0) num_extra_bytes = 0;
     }
 

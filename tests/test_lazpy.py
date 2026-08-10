@@ -12,12 +12,9 @@ import encoder
 import lazpy
 import models
 from lazpy import _cpylaz as cpylaz
-from lazpy import (Compressor, LASZIP_VLR_RECORD_ID, LASZIP_VLR_USER_ID,
-                   Point, Reader, Selective, ItemType, LazError,
-                   UnsupportedFileError, Writer)
-
-# How a variable length record is keyed in header["variable_length_records"].
-LASZIP_VLR_KEY = (LASZIP_VLR_USER_ID, LASZIP_VLR_RECORD_ID)
+from lazpy import (Compressor, LASZIP_VLR_KEY, LASZIP_VLR_RECORD_ID,
+                   LASZIP_VLR_USER_ID, Point, Reader, Selective, ItemType,
+                   LazError, UnsupportedFileError, Writer)
 
 
 class TestArithmeticModel:
@@ -1189,6 +1186,26 @@ def test_a_payload_cannot_be_read_once_the_file_is_closed(tmp_path):
         record["data"]
 
 
+def field_span(name, version_minor):
+    """Where a header field sits, from the same tables that define it."""
+    offset = 0
+    for fmt in lazpy.header_formats(version_minor):
+        for field, size, _ in fmt:
+            if field == name:
+                return offset, size
+            offset += size
+    raise KeyError(name)
+
+
+def header_field(data, name, version_minor=2):
+    """The value of an unsigned header field, straight out of a file's bytes.
+
+    For reading what a file says about itself before lazpy has had its say.
+    """
+    offset, size = field_span(name, version_minor)
+    return int.from_bytes(data[offset:offset + size], "little")
+
+
 # ---------------------------------------------------------------------------
 # LAS 1.4 compatibility mode.
 #
@@ -1201,57 +1218,56 @@ def test_a_payload_cannot_be_read_once_the_file_is_closed(tmp_path):
 # being true once the points are put back together.
 # ---------------------------------------------------------------------------
 
-# Every compatibility-mode fixture: which legacy point format and LAS version
-# it wears, how many bytes it hides per point -- five, or seven where there is
-# a NIR band to hide too -- and how many extra bytes it has of its own.
+# Every compatibility-mode fixture: the legacy point format and LAS version it
+# wears, the format it stands in for, how many bytes it hides per point --
+# five, or seven where there is a NIR band to hide too -- and how many extra
+# bytes it has of its own.
 CompatFixture = collections.namedtuple(
-    "CompatFixture", "stem legacy minor hidden extra")
-COMPAT_FIXTURES = [
-    CompatFixture("pt6_compat", 1, 2, 5, 6),
-    CompatFixture("pt7_compat", 3, 2, 5, 6),
-    CompatFixture("pt8_compat", 3, 2, 7, 6),
-    CompatFixture("pt9_compat", 4, 3, 5, 6),
-    CompatFixture("pt10_compat", 5, 3, 7, 6),
-    # no extra bytes of its own, which is the ordinary shape of one of these:
-    # nothing is left for the "extra bytes" record to describe
-    CompatFixture("pt8_compat_noextra", 3, 2, 7, 0),
-]
-COMPAT_NAMES = [f"{f.stem}_v{v}.{ext}" for f in COMPAT_FIXTURES
-                for v, ext in ((0, "las"), (2, "laz"))]
-COMPAT_BY_NAME = {f"{f.stem}_v{v}.{ext}": f for f in COMPAT_FIXTURES
-                  for v, ext in ((0, "las"), (2, "laz"))}
-
-LASCOMPATIBLE_KEY = (b"lascompatible", 22204)
-EXTRA_BYTES_KEY = (b"LASF_Spec", 4)
+    "CompatFixture", "stem legacy minor upgraded hidden extra")
+COMPAT_BY_NAME = {
+    f"{f.stem}_v{v}.{ext}": f
+    for f in [
+        CompatFixture("pt6_compat", 1, 2, 6, 5, 6),
+        CompatFixture("pt7_compat", 3, 2, 7, 5, 6),
+        CompatFixture("pt8_compat", 3, 2, 8, 7, 6),
+        CompatFixture("pt9_compat", 4, 3, 9, 5, 6),
+        CompatFixture("pt10_compat", 5, 3, 10, 7, 6),
+        # no extra bytes of its own, which is the ordinary shape of one of
+        # these: nothing is left for the "extra bytes" record to describe
+        CompatFixture("pt8_compat_noextra", 3, 2, 8, 7, 0),
+    ]
+    for v, ext in ((0, "las"), (2, "laz"))
+}
+COMPAT_NAMES = list(COMPAT_BY_NAME)
 
 
 @pytest.mark.parametrize("name", COMPAT_NAMES)
 def test_a_compatibility_file_reads_as_the_las_14_file_it_stands_in(name):
     """The version, point format and record length laszip would report."""
     f = COMPAT_BY_NAME[name]
-    legacy, minor, hidden, extra = f.legacy, f.minor, f.hidden, f.extra
-    upgraded = {1: 6, 3: 7 if hidden == 5 else 8, 4: 9, 5: 10}[legacy]
     data = load(name).data
 
-    # what the file says about itself before any of this
-    assert data[25] == minor
-    assert data[104] & 0x7F == legacy
-    on_disk_header_size, on_disk_offset = struct.unpack_from("<HI", data, 94)
+    # what the file says about itself before lazpy has had its say
+    assert header_field(data, "version_minor") == f.minor
+    assert header_field(data, "point_data_format_id") & 0x7F == f.legacy
 
     with Reader(fixture(name)) as reader:
         header = reader.header
         assert header["version_minor"] == 4
-        assert reader.point_format == upgraded
-        assert reader.num_extra_bytes == extra
+        assert reader.point_format == f.upgraded
+        assert reader.num_extra_bytes == f.extra
         # the hidden bytes are gone and the wider LAS 1.4 fields are there
-        assert struct.unpack_from("<H", data, 105)[0] == (
-            lazpy._POINT_FORMATS[legacy][0] + extra + hidden)
+        assert header_field(data, "point_data_record_length") == (
+            lazpy._POINT_FORMATS[f.legacy][0] + f.extra + f.hidden)
         assert header["point_data_record_length"] == (
-            lazpy._POINT_FORMATS[upgraded][0] + extra)
-        # a LAS 1.2 header is 148 bytes shorter than a 1.4 one, a 1.3 one 140
-        grew = 148 if minor == 2 else 140
-        assert header["header_size"] == on_disk_header_size + grew == 375
-        assert header["offset_to_point_data"] == on_disk_offset + grew
+            lazpy._POINT_FORMATS[f.upgraded][0] + f.extra)
+        # the header grows by exactly the tables LAS 1.4 has and 1.2/1.3 do not
+        grew = lazpy._header_size(4) - lazpy._header_size(f.minor)
+        assert header["header_size"] == lazpy._header_size(4)
+        assert header["header_size"] == (
+            header_field(data, "header_size") + grew)
+        assert header["offset_to_point_data"] == (
+            header_field(data, "offset_to_point_data") + grew)
 
 
 @pytest.mark.parametrize("name", COMPAT_NAMES)
@@ -1287,16 +1303,16 @@ def test_the_records_describing_the_disguise_are_gone(name):
         vlrs = reader.header["variable_length_records"]
         declared = reader.header["number_of_variable_length_records"]
 
-    assert LASCOMPATIBLE_KEY not in vlrs
+    assert lazpy.LASCOMPATIBLE_VLR_KEY not in vlrs
     assert len(vlrs) == declared
     if not extra:
-        assert EXTRA_BYTES_KEY not in vlrs
+        assert lazpy.EXTRA_BYTES_VLR_KEY not in vlrs
         return
-    attributes = vlrs[EXTRA_BYTES_KEY]
-    names = [name for name, _, _, _
-             in lazpy._extra_bytes_attributes(attributes["data"])]
-    assert not any(n.startswith(b"LAS 1.4 ") for n in names)
-    assert len(names) == extra
+    attributes = vlrs[lazpy.EXTRA_BYTES_VLR_KEY]
+    attribute_names = [a.name for a
+                       in lazpy._extra_bytes_attributes(attributes["data"])]
+    assert not any(n.startswith(b"LAS 1.4 ") for n in attribute_names)
+    assert len(attribute_names) == extra
     assert attributes["record_length_after_header"] == len(attributes["data"])
 
 
@@ -1323,9 +1339,9 @@ def test_the_laszip_record_survives_sharing_an_id_with_the_other_one():
         header = Reader._read_las_header(fh)
 
     ids = [record_id for _, record_id in header["variable_length_records"]]
-    assert ids.count(22204) == 2
+    assert ids.count(LASZIP_VLR_RECORD_ID) == 2
     assert Reader._find_laz_header(header) is not None
-    assert (b"lascompatible", 22204) in header["variable_length_records"]
+    assert lazpy.LASCOMPATIBLE_VLR_KEY in header["variable_length_records"]
 
 
 def without_compatibility_record(name):
@@ -1334,8 +1350,9 @@ def without_compatibility_record(name):
     The record is left in place rather than cut out, so the file is otherwise
     byte for byte what it was: only the user id that identifies it changes.
     """
+    user_id = lazpy.LASCOMPATIBLE_VLR_KEY[0]
     data = bytearray(load(name).data)
-    data[data.index(b"lascompatible")] = ord("x")
+    data[data.index(user_id)] = ord("x")
     return io.BytesIO(bytes(data))
 
 
@@ -1357,7 +1374,7 @@ def test_an_ordinary_file_is_left_alone(name):
     """Everything that is not a compatibility-mode file reads as before."""
     with Reader(fixture(name)) as reader:
         vlrs = reader.header["variable_length_records"]
-        assert LASCOMPATIBLE_KEY not in vlrs
+        assert lazpy.LASCOMPATIBLE_VLR_KEY not in vlrs
         assert lazpy._compatibility_layout(reader.header) is None
 
 
@@ -1449,17 +1466,6 @@ class TestExtraBytesAttributes:
 
 LEGACY_FORMATS = range(6)
 LAS14_FORMATS = range(6, 11)
-
-
-def field_span(name, version_minor):
-    """Where a header field sits, from the same tables that define it."""
-    offset = 0
-    for fmt in lazpy.header_formats(version_minor):
-        for field, size, _ in fmt:
-            if field == name:
-                return offset, size
-            offset += size
-    raise KeyError(name)
 
 
 # The fields lazpy does not hand back, and that a rebuilt header has to be

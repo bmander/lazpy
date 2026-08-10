@@ -1286,23 +1286,41 @@ typedef struct {
     PyObject *fp;
     LazPoint point;
     U8 *extra_bytes;
-    U32 raw_extra_bytes;    /* what the item layout decodes */
-    U32 num_extra_bytes;    /* what a caller sees; less in compatibility mode */
+    /* what a caller sees, which in compatibility mode is less than the item
+     * layout decodes -- that is self->rp.num_extra_bytes */
+    U32 num_extra_bytes;
     /* LAS 1.4 compatibility mode: where in the extra bytes the packed-away
-     * 1.4 fields live, or -1 for start_NIR_band when there is no NIR band.
-     * compat is false and the starts are meaningless for an ordinary file. */
+     * 1.4 fields live, in the order CompatibilityLayout names them, with -1
+     * for COMPAT_NIR when there is no NIR band. compat is false and the starts
+     * are meaningless for an ordinary file. */
     BOOL compat;
-    I32 start_scan_angle;
-    I32 start_extended_returns;
-    I32 start_classification;
-    I32 start_flags_and_channel;
-    I32 start_NIR_band;
+    I32 compat_starts[5];
+    /* the quantized scan angle rank for every rank there is; see
+     * reader_recode_compat, which would otherwise divide once per point */
+    I16 scan_angle_of_rank[256];
     PyObject *point_view;
     BOOL ready;
     U64 index;              /* number of points read so far */
 } ReaderObject;
 
 static PyTypeObject Reader_Type;
+
+/*
+ * Where the hidden LAS 1.4 fields sit in compat_starts, in the order
+ * lazpy/__init__.py's CompatibilityLayout hands them over, and how wide each
+ * one is. One statement of that order, rather than one per use.
+ */
+enum {
+    COMPAT_SCAN_ANGLE, COMPAT_EXTENDED_RETURNS, COMPAT_CLASSIFICATION,
+    COMPAT_FLAGS_AND_CHANNEL, COMPAT_NIR, COMPAT_ATTRIBUTES
+};
+static const U32 compat_widths[COMPAT_ATTRIBUTES] = {2, 1, 1, 1, 2};
+
+/* laszip's own expression for the scan angle a rank stands for, kept as it is
+ * written in laszip_dll.cpp so the two can be compared; lifted out because
+ * reader_recode_compat wants it tabulated rather than evaluated per point. */
+#define COMPAT_SCAN_ANGLE_OF_RANK(rank) \
+    I16_QUANTIZE(((F32)(rank)) / 0.006f)
 
 /*
  * Reconstitute a LAS 1.4 point that was written as a legacy one.
@@ -1324,17 +1342,18 @@ static void reader_recode_compat(ReaderObject *self)
 {
     LazPoint *p = &self->point;
     const U8 *extra = self->extra_bytes;
+    const I32 *at = self->compat_starts;
     I16 scan_angle_remainder;
-    U8 extended_returns = extra[self->start_extended_returns];
-    U8 classification = extra[self->start_classification];
-    U8 flags_and_channel = extra[self->start_flags_and_channel];
+    U8 extended_returns = extra[at[COMPAT_EXTENDED_RETURNS]];
+    U8 classification = extra[at[COMPAT_CLASSIFICATION]];
+    U8 flags_and_channel = extra[at[COMPAT_FLAGS_AND_CHANNEL]];
 
-    memcpy(&scan_angle_remainder, extra + self->start_scan_angle, 2);
-    if (self->start_NIR_band >= 0)
-        memcpy(&p->rgb[3], extra + self->start_NIR_band, 2);
+    memcpy(&scan_angle_remainder, extra + at[COMPAT_SCAN_ANGLE], 2);
+    if (at[COMPAT_NIR] >= 0)
+        memcpy(&p->rgb[3], extra + at[COMPAT_NIR], 2);
 
     p->extended_scan_angle = (I16)(scan_angle_remainder +
-        I16_QUANTIZE(((F32)p->scan_angle_rank) / 0.006f));
+        self->scan_angle_of_rank[(U8)p->scan_angle_rank]);
     p->extended_return_number =
         ((extended_returns >> 4) & 0x0F) + p->return_number;
     p->extended_number_of_returns =
@@ -1344,6 +1363,23 @@ static void reader_recode_compat(ReaderObject *self)
     p->extended_classification_flags = ((flags_and_channel & 0x01) << 3)
         | (p->withheld_flag << 2) | (p->keypoint_flag << 1) | p->synthetic_flag;
     p->extended_point_type = 1;
+}
+
+/*
+ * Decode the next point, whole.
+ *
+ * Every path that hands a point to a caller goes through here, so that "a
+ * decoded point has had its LAS 1.4 fields put back" is one statement rather
+ * than one per read loop. Seeking decodes points too (laz_readpoint_seek) and
+ * deliberately does not come this way: those points are passed over, not
+ * handed out.
+ */
+static BOOL reader_next(ReaderObject *self)
+{
+    if (!laz_readpoint_read(&self->rp, &self->point, self->extra_bytes))
+        return LAZ_FALSE;
+    if (self->compat) reader_recode_compat(self);
+    return LAZ_TRUE;
 }
 
 static void Reader_dealloc(ReaderObject *self)
@@ -1405,7 +1441,8 @@ static int parse_items(PyObject *seq, LazItem **out, U32 *out_n)
  */
 static int parse_compatibility(ReaderObject *self, PyObject *obj)
 {
-    I32 starts[5];
+    I32 *starts = self->compat_starts;
+    U32 decoded = self->rp.num_extra_bytes;
     int i;
 
     if (obj == NULL || obj == Py_None) return 0;
@@ -1413,15 +1450,11 @@ static int parse_compatibility(ReaderObject *self, PyObject *obj)
                           &starts[3], &starts[4]))
         return -1;
 
-    self->num_extra_bytes = self->raw_extra_bytes;
-    for (i = 0; i < 5; i++) {
-        /* two bytes for the scan angle remainder and the NIR band, one for
-         * each of the three that are packed into a byte apiece */
-        I32 size = (i == 0 || i == 4) ? 2 : 1;
-        if (i == 4 && starts[i] < 0) continue;          /* no NIR band */
+    for (i = 0; i < COMPAT_ATTRIBUTES; i++) {
+        if (i == COMPAT_NIR && starts[i] < 0) continue;     /* no NIR band */
         /* by subtraction, so a start near U32_MAX cannot wrap past the end */
-        if (starts[i] < 0 || (U32)size > self->raw_extra_bytes ||
-            (U32)starts[i] > self->raw_extra_bytes - (U32)size) {
+        if (starts[i] < 0 || compat_widths[i] > decoded ||
+            (U32)starts[i] > decoded - compat_widths[i]) {
             PyErr_SetString(LazErrorType, "a LAS 1.4 compatibility attribute "
                             "lies outside the extra bytes");
             return -1;
@@ -1432,12 +1465,10 @@ static int parse_compatibility(ReaderObject *self, PyObject *obj)
             self->num_extra_bytes = (U32)starts[i];
     }
 
+    for (i = 0; i < 256; i++)
+        self->scan_angle_of_rank[i] = COMPAT_SCAN_ANGLE_OF_RANK((I8)i);
+
     self->compat = LAZ_TRUE;
-    self->start_scan_angle = starts[0];
-    self->start_extended_returns = starts[1];
-    self->start_classification = starts[2];
-    self->start_flags_and_channel = starts[3];
-    self->start_NIR_band = starts[4];
     return 0;
 }
 
@@ -1472,10 +1503,9 @@ static int Reader_tp_init(ReaderObject *self, PyObject *args, PyObject *kwds)
     }
     PyMem_Free(items);
 
-    self->raw_extra_bytes = self->rp.num_extra_bytes;
-    self->num_extra_bytes = self->raw_extra_bytes;
-    if (self->raw_extra_bytes) {
-        self->extra_bytes = (U8 *)calloc(self->raw_extra_bytes, 1);
+    self->num_extra_bytes = self->rp.num_extra_bytes;
+    if (self->num_extra_bytes) {
+        self->extra_bytes = (U8 *)calloc(self->num_extra_bytes, 1);
         if (!self->extra_bytes) { PyErr_NoMemory(); return -1; }
     }
     /* may trim num_extra_bytes: the compatibility attributes are decoded but
@@ -1537,10 +1567,9 @@ static PyObject *Reader_read(ReaderObject *self, PyObject *Py_UNUSED(i))
     /* The GIL is deliberately held. Decoding one point costs less than a
      * release/reacquire pair, and the only Python re-entry underneath is the
      * stream refill roughly once per 64 KB. */
-    ok = laz_readpoint_read(&self->rp, &self->point, self->extra_bytes);
+    ok = reader_next(self);
 
     if (!ok) return reader_error(self);
-    if (self->compat) reader_recode_compat(self);
     self->index++;
     Py_INCREF(self->point_view);
     return self->point_view;
@@ -1568,8 +1597,7 @@ static PyObject *Reader_checksum(ReaderObject *self, PyObject *args)
         LazPoint *p = &self->point;
         int i;
 
-        if (!laz_readpoint_read(&self->rp, p, self->extra_bytes)) { ok = LAZ_FALSE; break; }
-        if (self->compat) reader_recode_compat(self);
+        if (!reader_next(self)) { ok = LAZ_FALSE; break; }
 
         memcpy(rec + 0, &p->X, 4);
         memcpy(rec + 4, &p->Y, 4);
@@ -1707,11 +1735,10 @@ static PyObject *Reader_read_into(ReaderObject *self, PyObject *args)
 
     Py_BEGIN_ALLOW_THREADS
     for (done = 0; done < count; done++) {
-        if (!laz_readpoint_read(&self->rp, &self->point, self->extra_bytes)) {
+        if (!reader_next(self)) {
             ok = LAZ_FALSE;
             break;
         }
-        if (self->compat) reader_recode_compat(self);
         for (i = 0; i < n; i++) {
             memcpy(cols[i].dst, cols[i].src, (size_t)cols[i].size);
             cols[i].dst += cols[i].size;      /* on to this column's next */

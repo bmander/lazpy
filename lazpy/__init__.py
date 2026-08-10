@@ -41,15 +41,17 @@ __all__ = ["Reader", "Writer", "Point", "Compressor", "Coder", "ItemType",
 LASZIP_VLR_RECORD_ID = 22204
 LASZIP_VLR_USER_ID = b"laszip encoded"
 
+# How a record is looked up: variable_length_records is keyed by
+# (user_id, record_id), since LAS namespaces records by user id and a bare id
+# collides. LASZIP_VLR_KEY and LASCOMPATIBLE_VLR_KEY are where that stops being
+# hypothetical -- both records claim id 22204 and sit in the same file.
+LASZIP_VLR_KEY = (LASZIP_VLR_USER_ID, LASZIP_VLR_RECORD_ID)
+
 # The two records a LAS 1.4 compatibility-mode file carries beside the LASzip
-# one. The compatibility record shares its record id with the LASzip record and
-# is told apart by user id, which is why variable_length_records is keyed by
-# both. The "extra bytes" record is the ordinary LAS one; it is only special
+# one. The "extra bytes" record is the ordinary LAS one; it is only special
 # here because compatibility mode describes the fields it hides in it there.
-LASCOMPATIBLE_VLR_RECORD_ID = 22204
-LASCOMPATIBLE_VLR_USER_ID = b"lascompatible"
-EXTRA_BYTES_VLR_RECORD_ID = 4
-LASF_SPEC_USER_ID = b"LASF_Spec"
+LASCOMPATIBLE_VLR_KEY = (b"lascompatible", 22204)
+EXTRA_BYTES_VLR_KEY = (b"LASF_Spec", 4)
 
 
 # LazError is defined in the C extension so decode failures raised from C and
@@ -369,6 +371,11 @@ def header_formats(version_minor):
     return formats
 
 
+def _header_size(version_minor):
+    """How long a LAS 1.`version_minor` header is, by its own tables."""
+    return sum(format_size(fmt) for fmt in header_formats(version_minor))
+
+
 VLR_HEADER_FORMAT = (
     ('reserved', 2, unsigned_int),
     ('user_id', 16, cstr),
@@ -456,53 +463,65 @@ def pack_format(fmt, values):
 # does carry them.
 # ---------------------------------------------------------------------------
 
-# The compatibility record: two version numbers and a spare, then the 148 bytes
-# of LAS 1.4 header a 1.2 or 1.3 header has nowhere to put. laszip also writes
-# a 174-byte form, 18 bytes longer, for LAS 1.5.
+# The compatibility record: two version numbers and a spare, then the LAS 1.4
+# header tail a 1.2 or 1.3 header has nowhere to put -- which is exactly the
+# tables that describe it, so it is those rather than a second copy of them.
+# laszip also writes a form 18 bytes longer, for LAS 1.5.
 COMPATIBILITY_RECORD_FORMAT = (
     ('laszip_version', 2, unsigned_int),
     ('compatible_version', 2, unsigned_int),
     ('unused', 4, unsigned_int),
-    ('start_of_waveform_data_packet_record', 8, unsigned_int),
-    ('start_of_first_extended_variable_length_record', 8, unsigned_int),
-    ('number_of_extended_variable_length_records', 4, unsigned_int),
-    ('extended_number_of_point_records', 8, unsigned_int),
-    ('extended_number_of_points_by_return', 8 * 15, u64_array),
-)
+) + HEADER_FORMAT_13 + HEADER_FORMAT_14
 COMPATIBILITY_RECORD_SIZE = format_size(COMPATIBILITY_RECORD_FORMAT)
 
 # What `compatible_version` in that record says the file stands in for: laszip
 # writes 3 for a LAS 1.4 file and 4 for a LAS 1.5 one. lazpy has no LAS 1.5
 # header to report, so a 1.5 file is left as the legacy file it says it is
 # rather than half-upgraded into something it is not.
-COMPATIBLE_VERSION_14 = 3
+_COMPATIBLE_VERSION_14 = 3
 
 # The four fields every compatibility-mode file hides, in the order laszip
 # appends them, and the fifth it hides only for a point format with a
 # near-infrared band. Names are what an "extra bytes" descriptor calls them.
-COMPATIBILITY_ATTRIBUTES = (b"LAS 1.4 scan angle",
-                            b"LAS 1.4 extended returns",
-                            b"LAS 1.4 classification",
-                            b"LAS 1.4 flags and channel")
-NIR_ATTRIBUTE = b"LAS 1.4 NIR band"
+_COMPATIBILITY_ATTRIBUTES = (b"LAS 1.4 scan angle",
+                             b"LAS 1.4 extended returns",
+                             b"LAS 1.4 classification",
+                             b"LAS 1.4 flags and channel")
+_NIR_ATTRIBUTE = b"LAS 1.4 NIR band"
+
+# Where those five live in a point's extra bytes, which is all the point reader
+# needs to put a point back together. Named rather than positional because the
+# order is agreed with the C reader, which unpacks this straight into fields.
+CompatibilityLayout = namedtuple(
+    "CompatibilityLayout",
+    "scan_angle extended_returns classification flags_and_channel nir")
 
 # What a legacy point format becomes once the hidden fields are folded back in,
-# by whether the file hid a near-infrared band too. Formats 4 and 5 share a
-# rule, as they do in laszip: in a file laszip wrote, only the one that had RGB
-# to begin with can have a NIR band.
+# by whether the file hid a near-infrared band too. This is laszip's own
+# branching, including for formats 4 and 5, which it treats as one case -- in a
+# file laszip wrote, only the one that had RGB to begin with can have a NIR
+# band, so the unreachable halves never come up.
 _UPGRADED_FORMAT = {1: (6, 6), 3: (7, 8), 4: (9, 10), 5: (9, 10)}
 
 # One attribute descriptor out of an "extra bytes" record: a fixed 192 bytes,
-# of which only the type, its option byte and the name matter here.
+# of which only the type, its option byte and the name matter here. The rest is
+# no-data/min/max/scale/offset, which describe values rather than layout.
+EXTRA_BYTES_ATTRIBUTE_FORMAT = (
+    ('reserved', 2, unsigned_int),
+    ('data_type', 1, unsigned_int),
+    ('options', 1, unsigned_int),
+    ('name', 32, cstr),
+)
 EXTRA_BYTES_ATTRIBUTE_SIZE = 192
-_ATTRIBUTE_DATA_TYPE = 2
-_ATTRIBUTE_OPTIONS = 3
-_ATTRIBUTE_NAME = slice(4, 36)
 
 # The widths of data types 1 to 10. Type 0 means undocumented bytes, as many as
 # the option byte says; 11 to 30 were arrays of two and three, deprecated in
 # 2018 and gone from LASzip's own writer, but still sized by the same table.
 _ATTRIBUTE_SIZES = (1, 1, 2, 2, 4, 4, 8, 8, 4, 8)
+
+# An attribute, as _extra_bytes_attributes reports it: where its descriptor
+# sits in the record, and where and how wide the attribute is in a point.
+_Attribute = namedtuple("_Attribute", "name offset start size")
 
 
 def _attribute_size(data_type, options):
@@ -512,35 +531,33 @@ def _attribute_size(data_type, options):
     if data_type > 3 * len(_ATTRIBUTE_SIZES):
         raise UnsupportedFileError(
             f"unknown extra bytes attribute data type {data_type}")
-    return (_ATTRIBUTE_SIZES[(data_type - 1) % len(_ATTRIBUTE_SIZES)]
-            * ((data_type - 1) // len(_ATTRIBUTE_SIZES) + 1))
+    # the deprecated types are the ten scalar ones over again, two and three
+    # to an attribute
+    dimensions, scalar = divmod(data_type - 1, len(_ATTRIBUTE_SIZES))
+    return _ATTRIBUTE_SIZES[scalar] * (dimensions + 1)
 
 
 def _extra_bytes_attributes(data):
     """The attributes an "extra bytes" record describes, in file order.
 
-    Yields ``(name, offset, start, size)``: where the 192-byte descriptor sits
-    in the record, and where and how wide the attribute it describes is inside
-    a point's extra bytes. The descriptors are a running layout -- each
-    attribute begins where the one before it ended -- which is what makes
-    `start` derivable rather than stated.
+    Each is an :class:`_Attribute`. The descriptors are a running layout --
+    every attribute begins where the one before it ended -- which is what
+    makes `start` derivable rather than stated.
     """
     start = 0
     for offset in range(0, len(data) - EXTRA_BYTES_ATTRIBUTE_SIZE + 1,
                         EXTRA_BYTES_ATTRIBUTE_SIZE):
-        descriptor = data[offset:offset + EXTRA_BYTES_ATTRIBUTE_SIZE]
-        size = _attribute_size(descriptor[_ATTRIBUTE_DATA_TYPE],
-                               descriptor[_ATTRIBUTE_OPTIONS])
-        yield cstr(descriptor[_ATTRIBUTE_NAME]), offset, start, size
+        fields, _ = unpack_format(EXTRA_BYTES_ATTRIBUTE_FORMAT, data, offset)
+        size = _attribute_size(fields['data_type'], fields['options'])
+        yield _Attribute(fields['name'], offset, start, size)
         start += size
 
 
 def _compatibility_layout(header):
-    """Where a compatibility-mode file hides its LAS 1.4 fields, or None.
+    """A compatibility-mode file's :class:`CompatibilityLayout`, or None.
 
-    The five starts, in the order the point reader wants them, with -1 for a
-    file that hid no near-infrared band. None means this is not a
-    compatibility-mode file, which is the answer for almost every file.
+    None means this is not a compatibility-mode file, which is the answer for
+    almost every file. ``nir`` is -1 for one that hid no near-infrared band.
 
     The test is laszip's: a LAS 1.2 or 1.3 file, a point format that could
     have been an extended one, a compatibility record long enough to hold what
@@ -554,23 +571,23 @@ def _compatibility_layout(header):
         return None
 
     vlrs = header['variable_length_records']
-    record = vlrs.get((LASCOMPATIBLE_VLR_USER_ID, LASCOMPATIBLE_VLR_RECORD_ID))
+    record = vlrs.get(LASCOMPATIBLE_VLR_KEY)
     if record is None or len(record['data']) < COMPATIBILITY_RECORD_SIZE:
         return None
     fields, _ = unpack_format(COMPATIBILITY_RECORD_FORMAT, record['data'])
-    if fields['compatible_version'] != COMPATIBLE_VERSION_14:
+    if fields['compatible_version'] != _COMPATIBLE_VERSION_14:
         return None
 
-    attributes = vlrs.get((LASF_SPEC_USER_ID, EXTRA_BYTES_VLR_RECORD_ID))
+    attributes = vlrs.get(EXTRA_BYTES_VLR_KEY)
     if attributes is None:
         return None
-    layout = {name: start
-              for name, _, start, _ in _extra_bytes_attributes(
-                  attributes['data'])}
-    if not all(name in layout for name in COMPATIBILITY_ATTRIBUTES):
+    starts = {a.name: a.start
+              for a in _extra_bytes_attributes(attributes['data'])}
+    if not all(name in starts for name in _COMPATIBILITY_ATTRIBUTES):
         return None
-    return tuple(layout[name] for name in COMPATIBILITY_ATTRIBUTES) + \
-        (layout.get(NIR_ATTRIBUTE, -1),)
+    return CompatibilityLayout(
+        *(starts[name] for name in _COMPATIBILITY_ATTRIBUTES),
+        starts.get(_NIR_ATTRIBUTE, -1))
 
 
 def _upgrade_to_las_14(header, layout, num_extra_bytes):
@@ -582,26 +599,26 @@ def _upgrade_to_las_14(header, layout, num_extra_bytes):
     from. The two records that made the file a compatibility-mode file go away,
     since after this there is nothing left for them to describe.
     """
-    record = header['variable_length_records'].pop(
-        (LASCOMPATIBLE_VLR_USER_ID, LASCOMPATIBLE_VLR_RECORD_ID))
+    record = header['variable_length_records'].pop(LASCOMPATIBLE_VLR_KEY)
     header['number_of_variable_length_records'] -= 1
     fields, _ = unpack_format(COMPATIBILITY_RECORD_FORMAT, record['data'])
 
-    # The LAS 1.4 header fields, out of the record that carried them. The two
-    # that address extended records are read as zero however they were written,
-    # as laszip reads them: compatibility mode cannot carry any.
+    # The LAS 1.4 header fields, out of the record that carried them -- which
+    # holds them under the names the header itself uses, since it is described
+    # by the header's own tables. The two that address extended records are
+    # read as zero however they were written, as laszip reads them:
+    # compatibility mode cannot carry any.
+    for name, _, _ in HEADER_FORMAT_13 + HEADER_FORMAT_14:
+        header[name] = fields[name]
     header['start_of_waveform_data_packet_record'] = 0
     header['start_of_first_extended_variable_length_record'] = 0
     header['number_of_extended_variable_length_records'] = 0
-    header['extended_number_of_point_records'] = \
-        fields['extended_number_of_point_records']
-    header['extended_number_of_points_by_return'] = \
-        fields['extended_number_of_points_by_return']
 
     _drop_compatibility_attributes(header)
 
-    # a LAS 1.2 header is 148 bytes shorter than a 1.4 one, a 1.3 header 140
-    grew = 148 if header['version_minor'] < 3 else 140
+    # the LAS 1.4 header is longer than the one the file has by exactly the
+    # tables it has that the file's version does not
+    grew = _header_size(4) - _header_size(header['version_minor'])
     header['header_size'] += grew
     header['offset_to_point_data'] += grew
     header['version_minor'] = 4
@@ -611,9 +628,8 @@ def _upgrade_to_las_14(header, layout, num_extra_bytes):
     if (b'LASF_Projection', 2112) in header['variable_length_records']:
         header['global_encoding'] |= 1 << 4
 
-    nir_start = layout[-1]
     point_format = _UPGRADED_FORMAT[
-        header['point_data_format_id']][nir_start != -1]
+        header['point_data_format_id']][layout.nir != -1]
     header['point_data_format_id'] = point_format
     header['point_data_record_length'] = (_POINT_FORMATS[point_format][0]
                                           + num_extra_bytes)
@@ -626,18 +642,16 @@ def _drop_compatibility_attributes(header):
     disguise is off they would be describing bytes a caller no longer has. A
     record that described nothing else goes away with them.
     """
-    key = (LASF_SPEC_USER_ID, EXTRA_BYTES_VLR_RECORD_ID)
-    vlr = header['variable_length_records'][key]
-    hidden = frozenset(COMPATIBILITY_ATTRIBUTES + (NIR_ATTRIBUTE,))
-    kept = b''.join(vlr['data'][offset:offset + EXTRA_BYTES_ATTRIBUTE_SIZE]
-                    for name, offset, _, _ in _extra_bytes_attributes(
-                        vlr['data'])
-                    if name not in hidden)
+    vlr = header['variable_length_records'][EXTRA_BYTES_VLR_KEY]
+    hidden = frozenset(_COMPATIBILITY_ATTRIBUTES + (_NIR_ATTRIBUTE,))
+    kept = b''.join(vlr['data'][a.offset:a.offset + EXTRA_BYTES_ATTRIBUTE_SIZE]
+                    for a in _extra_bytes_attributes(vlr['data'])
+                    if a.name not in hidden)
     if kept:
         vlr['data'] = kept
         vlr['record_length_after_header'] = len(kept)
     else:
-        del header['variable_length_records'][key]
+        del header['variable_length_records'][EXTRA_BYTES_VLR_KEY]
         header['number_of_variable_length_records'] -= 1
 
 
@@ -802,10 +816,8 @@ class Reader:
             if chunk_size < 0:
                 chunk_size = 0xFFFFFFFF
 
-        # Both of these have to be read while the header still describes the
-        # file as it was written: a compatibility-mode upgrade moves the point
-        # data offset on to where a LAS 1.4 header would have ended, and the
-        # item layout above is the legacy one the points really are.
+        # where the points really begin, before the upgrade below moves the
+        # header's copy on to where a LAS 1.4 header would have ended
         point_data_offset = self.header['offset_to_point_data']
         compatibility = _compatibility_layout(self.header)
 
@@ -883,11 +895,8 @@ class Reader:
             raise LazError(f"header_size {header['header_size']} is too small")
         header['user_data'] = fp.read(user_data_size)
 
-        # keyed by (user_id, record_id), as the extended records are and for
-        # the same reason: LAS namespaces records by user id and a bare id
-        # collides. A LAS 1.4 compatibility-mode file is where that stops being
-        # hypothetical -- its "lascompatible" record shares id 22204 with the
-        # LASzip record sitting beside it.
+        # keyed by (user_id, record_id), as the extended records are; see
+        # LASZIP_VLR_KEY for why the id alone is not a key
         header['variable_length_records'] = {}
         for _ in range(header['number_of_variable_length_records']):
             vlr = cls._read_variable_length_record(fp)
@@ -981,8 +990,7 @@ class Reader:
     @staticmethod
     def _find_laz_header(header):
         """Return the parsed LASzip VLR, or None for an uncompressed file."""
-        vlr = header['variable_length_records'].get(
-            (LASZIP_VLR_USER_ID, LASZIP_VLR_RECORD_ID))
+        vlr = header['variable_length_records'].get(LASZIP_VLR_KEY)
         if vlr is None:
             return None
         return Reader._parse_laszip_record(vlr['data'])
@@ -1376,7 +1384,7 @@ class Writer:
     def _build_header(self, record_length, version_minor, vlr_size, scales,
                       offsets, system_identifier, generating_software,
                       file_creation):
-        header_size = self._header_size(version_minor)
+        header_size = _header_size(version_minor)
         day, year = file_creation
 
         header = {
@@ -1418,10 +1426,6 @@ class Writer:
         return header
 
     @staticmethod
-    def _header_size(version_minor):
-        return sum(format_size(fmt) for fmt in header_formats(version_minor))
-
-    @staticmethod
     def _pack_header(header):
         """The header bytes, from the tables Reader parses them with.
 
@@ -1430,10 +1434,10 @@ class Writer:
         file, in header_size and again in offset_to_point_data.
         """
         version_minor = header['version_minor']
-        if Writer._header_size(version_minor) != header['header_size']:
+        if _header_size(version_minor) != header['header_size']:
             raise LazError(
                 f"a LAS 1.{version_minor} header is "
-                f"{Writer._header_size(version_minor)} bytes, but this file "
+                f"{_header_size(version_minor)} bytes, but this file "
                 f"declares {header['header_size']}")
         return b''.join(pack_format(fmt, header)
                         for fmt in header_formats(version_minor))

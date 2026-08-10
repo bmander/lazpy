@@ -34,6 +34,7 @@
 #include "laswritepoint.hpp"
 #include "bytestreamout_file.hpp"
 #include "laszip_api.h"
+#include "point_sizes.h"
 
 /* xorshift so the data is identical on every platform and every run */
 static unsigned int rng_state = 2463534242u;
@@ -51,10 +52,6 @@ static void put32(unsigned char* p, unsigned v)
     p[0] = v & 0xFF; p[1] = (v >> 8) & 0xFF; p[2] = (v >> 16) & 0xFF; p[3] = (v >> 24) & 0xFF;
 }
 static void putd(unsigned char* p, double v) { memcpy(p, &v, 8); }
-
-/* point record sizes for formats 0-10, before any extra bytes */
-static const unsigned short base_size[11] =
-    { 20, 28, 26, 34, 57, 63, 30, 36, 38, 59, 67 };
 
 /* every file mklaz writes carries these, so the BYTE/BYTE14 readers are
  * exercised alongside everything else */
@@ -125,7 +122,7 @@ static int write_compat(unsigned char point_type, unsigned short version,
     header->header_size = 375;
     header->offset_to_point_data = 375;
     header->point_data_format = point_type;
-    header->point_data_record_length = base_size[point_type] + extra;
+    header->point_data_record_length = point_base_size[point_type] + extra;
     header->extended_number_of_point_records = npoints;
     /* the counts by return number have to be right before the first point is
      * written: they are copied into the compatibility record then, not at the
@@ -255,7 +252,7 @@ int main(int argc, char** argv)
         return write_compat(point_type, version, npoints, chunk_size, out_path,
                             compat_extra);
 
-    unsigned short point_size = base_size[point_type] + extra_bytes;
+    unsigned short point_size = point_base_size[point_type] + extra_bytes;
 
     bool compressed = (version > 0);
     bool pointwise = compressed && chunk_size == 0;
