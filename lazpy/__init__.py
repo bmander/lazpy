@@ -25,7 +25,6 @@ from collections import namedtuple
 from collections.abc import Mapping
 from enum import IntEnum
 import io
-import sys
 
 # Point, PointReader and PointWriter are re-exported: they are the API for
 # driving the container directly, without a Reader or Writer over it.
@@ -203,8 +202,12 @@ def _min_version_minor(point_format):
 # bit layouts -- and the ones sharing a byte share one read of it.
 #
 # Offsets are into LazPoint (src/laz_types.h), which mirrors LASzip's own
-# point struct; -1 means the extra bytes instead. Types are spelled
-# little-endian because that is the only host lazpy builds on.
+# point struct; -1 means the extra bytes instead. Types are spelled in native
+# order ('='), because read_into copies the decoded point's bytes straight
+# through and a decoded point is in host order -- see the byte-order note on
+# LazPoint. The sub-byte shifts are host-independent: LazPoint packs those
+# bytes by hand rather than leaving them to the compiler, for exactly this
+# reason.
 #
 # This restates a layout that C owns, so it is pinned from the outside:
 # test_arrays_match_reading_point_by_point compares every column of every
@@ -215,10 +218,10 @@ _Field = namedtuple("_Field", "offset dtype width shift mask",
                     defaults=(1, 0, None))
 
 _ARRAY_FIELDS = {
-    'X': _Field(0, '<i4'),
-    'Y': _Field(4, '<i4'),
-    'Z': _Field(8, '<i4'),
-    'intensity': _Field(12, '<u2'),
+    'X': _Field(0, '=i4'),
+    'Y': _Field(4, '=i4'),
+    'Z': _Field(8, '=i4'),
+    'intensity': _Field(12, '=u2'),
     'return_number': _Field(14, 'u1', mask=0x07),
     'number_of_returns': _Field(14, 'u1', shift=3, mask=0x07),
     'scan_direction_flag': _Field(14, 'u1', shift=6, mask=0x01),
@@ -229,19 +232,20 @@ _ARRAY_FIELDS = {
     'withheld_flag': _Field(15, 'u1', shift=7, mask=0x01),
     'scan_angle_rank': _Field(16, 'i1'),
     'user_data': _Field(17, 'u1'),
-    'point_source_ID': _Field(18, '<u2'),
-    'extended_scan_angle': _Field(20, '<i2'),
+    'point_source_ID': _Field(18, '=u2'),
+    'extended_scan_angle': _Field(20, '=i2'),
     'extended_point_type': _Field(22, 'u1', mask=0x03),
     'extended_scanner_channel': _Field(22, 'u1', shift=2, mask=0x03),
     'extended_classification_flags': _Field(22, 'u1', shift=4, mask=0x0F),
     'extended_classification': _Field(23, 'u1'),
     'extended_return_number': _Field(24, 'u1', mask=0x0F),
     'extended_number_of_returns': _Field(24, 'u1', shift=4, mask=0x0F),
-    'gps_time': _Field(32, '<f8'),
-    'red': _Field(40, '<u2'),
-    'green': _Field(42, '<u2'),
-    'blue': _Field(44, '<u2'),
-    'nir': _Field(46, '<u2'),
+    'gps_time': _Field(32, '=f8'),
+    'red': _Field(40, '=u2'),
+    'green': _Field(42, '=u2'),
+    'blue': _Field(44, '=u2'),
+    'nir': _Field(46, '=u2'),
+    # a wavepacket keeps its on-disk order in the point, so it is bytes here
     'wave_packet': _Field(48, 'u1', width=29),
 }
 
@@ -763,10 +767,6 @@ class Reader:
 
     def open(self, filename):
         """Open a file by path. Also accepts an already-open binary file."""
-        if sys.byteorder != 'little':
-            raise UnsupportedFileError(
-                "only little-endian hosts are supported")
-
         if hasattr(filename, 'read'):
             self.fp = filename
             self._owns_fp = False
@@ -1261,9 +1261,6 @@ class Writer:
         self._closed = False
         self._owns_fp = False
 
-        if sys.byteorder != 'little':
-            raise UnsupportedFileError(
-                "only little-endian hosts are supported")
         if num_extra_bytes < 0:
             raise ValueError("num_extra_bytes cannot be negative")
 

@@ -14,7 +14,7 @@
  * LazWriteItem*.
  *
  * `item` points at this item's bytes inside the caller's point -- for the
- * compressed writers that is the same little-endian layout the matching reader
+ * compressed writers that is the same host-order layout the matching reader
  * produces, so writer(reader(x)) is the identity on the byte stream.
  *
  * Every writer pairs with the reader of the same name: laz_writeitem_v2_rgb12
@@ -56,7 +56,7 @@ static inline void laz_writeitem_destroy(LazWriteItem *w)
     free(w);
 }
 
-/* --- raw writers (laswriteitemraw.hpp), little-endian hosts only --- */
+/* --- raw writers (laswriteitemraw.hpp): the host/on-disk byte-order boundary --- */
 LazWriteItem *laz_writeitem_raw_point10(LazOutStream *out);
 LazWriteItem *laz_writeitem_raw_gpstime11(LazOutStream *out);
 LazWriteItem *laz_writeitem_raw_rgb12(LazOutStream *out);

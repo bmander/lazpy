@@ -573,32 +573,33 @@ void laz_stream_destroy(LazStream *s)
     free(s);
 }
 
+/* The chunk table and the layer byte counts are little-endian on disk like
+ * everything else, so these go through the shared accessors in laz_types.h
+ * rather than spelling the packing out a second time. */
 U32 laz_stream_get32(LazStream *s)
 {
     U8 b[4];
     s->get_bytes(s, b, 4);
-    return (U32)b[0] | ((U32)b[1] << 8) | ((U32)b[2] << 16) | ((U32)b[3] << 24);
+    return laz_le_get32(b);
 }
 
 U64 laz_stream_get64(LazStream *s)
 {
-    U64 lo = laz_stream_get32(s);
-    U64 hi = laz_stream_get32(s);
-    return lo | (hi << 32);
+    U8 b[8];
+    s->get_bytes(s, b, 8);
+    return laz_le_get64(b);
 }
 
 void laz_outstream_put32(LazOutStream *s, U32 value)
 {
     U8 b[4];
-    b[0] = (U8)(value & 0xFF);
-    b[1] = (U8)((value >> 8) & 0xFF);
-    b[2] = (U8)((value >> 16) & 0xFF);
-    b[3] = (U8)((value >> 24) & 0xFF);
+    laz_le_put32(b, value);
     s->put_bytes(s, b, 4);
 }
 
 void laz_outstream_put64(LazOutStream *s, U64 value)
 {
-    laz_outstream_put32(s, (U32)(value & 0xFFFFFFFFu));
-    laz_outstream_put32(s, (U32)(value >> 32));
+    U8 b[8];
+    laz_le_put64(b, value);
+    s->put_bytes(s, b, 8);
 }

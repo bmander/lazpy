@@ -53,3 +53,44 @@ jobs:
         run: pytest -q "${{ github.workspace }}/tests"
         shell: bash
         working-directory: ${{ runner.temp }}
+
+  # Big-endian coverage. Every runner GitHub offers is little-endian, and the
+  # byte-order conversion in the raw item coders is dead code on those, so
+  # without this it would never run. s390x under emulation is the usual way to
+  # reach a big-endian host; it costs minutes rather than seconds, which is why
+  # this is one job and not another axis of the matrix above.
+  #
+  # The version is pinned rather than matrixed for the same reason: byte order
+  # is a property of the host, not of the interpreter.
+  big-endian:
+    name: s390x (big-endian, emulated)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: s390x
+
+      # Debian and apt rather than the python image and pip, because numpy
+      # publishes no s390x wheel: pip would build it from source under
+      # emulation, which costs more than everything else here put together.
+      # Skipping numpy instead is not an option -- the array path is one of the
+      # two places byte order shows up, and its tests skip themselves without
+      # it. --no-build-isolation for the same reason, so the build uses apt's
+      # setuptools rather than fetching its own.
+      #
+      # cd /tmp before pytest, as above: so `import lazpy` finds the installed
+      # package and not the source tree beside it.
+      - name: Test
+        run: |
+          docker run --rm --platform linux/s390x -v "$PWD":/src -w /src \
+            debian:trixie bash -euxc '
+              apt-get update -qq
+              apt-get install -y -qq --no-install-recommends \
+                gcc libc6-dev python3-dev python3-pip python3-setuptools \
+                python3-numpy python3-pytest
+              python3 -c "import sys; assert sys.byteorder == \"big\", sys.byteorder"
+              pip3 install --break-system-packages --no-build-isolation --no-deps .
+              cd /tmp && python3 -m pytest -q /src/tests
+            '

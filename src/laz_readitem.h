@@ -15,7 +15,8 @@
  * concrete reader can always be cast to LazReadItem*.
  *
  * `item` points into the caller's LazPoint at the offset for this item type
- * (see laz_types.h) -- readers write raw little-endian bytes there.
+ * (see laz_types.h) -- readers write host-order bytes there, in the layout
+ * documented on that struct.
  */
 #ifndef LAZ_READITEM_H
 #define LAZ_READITEM_H
@@ -50,7 +51,7 @@ static inline void laz_readitem_destroy(LazReadItem *r)
     free(r);
 }
 
-/* --- raw readers (lasreaditemraw.hpp), little-endian hosts only --- */
+/* --- raw readers (lasreaditemraw.hpp): the on-disk/host byte-order boundary --- */
 LazReadItem *laz_readitem_raw_point10(LazStream *in);
 LazReadItem *laz_readitem_raw_gpstime11(LazStream *in);
 LazReadItem *laz_readitem_raw_rgb12(LazStream *in);

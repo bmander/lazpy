@@ -112,7 +112,7 @@ BOOL laz_writepoint_setup(LazWritePoint *wp, U32 num_items, const LazItem *items
 
 void laz_writepoint_init_point(const LazWritePoint *wp, LazPoint *point)
 {
-    point->extended_point_type = wp->has_point14 ? 1 : 0;
+    laz_point_set_extended_point_type(point, wp->has_point14 ? 1 : 0);
 }
 
 BOOL laz_writepoint_init(LazWritePoint *wp, LazOutStream *outstream)

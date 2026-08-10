@@ -155,6 +155,14 @@ for. Note that `header_size` and `offset_to_point_data` then describe the LAS
 Not yet: *writing* extended variable-length records or compatibility-mode
 files, and spatial indexing.
 
+Both host byte orders work. LAS and LAZ are little-endian on disk and a
+decoded point is in host order, so a big-endian host converts between the two
+in the raw item coders (`src/laz_readitem_raw.c` and its writing counterpart);
+the rule the rest of the code follows is written out above `laz_le_get16` in
+`src/laz_types.h`. A file decodes to the same values, and compresses to the
+same bytes, on either kind of machine. CI runs the suite on s390x under
+emulation, since nothing else in the matrix is big-endian.
+
 Anything that goes wrong reading or writing a file raises `lazpy.LazError`,
 except an error from the underlying file object, which propagates as itself.
 
