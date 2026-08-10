@@ -40,6 +40,16 @@ struct LazReadItem {
     BOOL (*overran)(LazReadItem *self);
     void (*destroy)(LazReadItem *self);
 
+    /* compressed readers only: TRUE once read() has given up on a point
+     * because a model it needed could not be allocated. Both the on-demand
+     * banks (laz_bank_get in laz_item.h) and the per-context model sets of the
+     * v3/v4 readers come into existence partway through a chunk, so unlike
+     * every other allocation those cannot be reported out of init(). Reported
+     * like an overrun instead: the flag is raised, read() abandons the point,
+     * and laz_readpoint_read turns it into an error. Sticky, so a caller that
+     * reads on regardless keeps failing rather than getting stale points. */
+    BOOL alloc_failed;
+
     LazStream *instream;    /* raw readers: borrowed */
     LazDecoder *dec;        /* compressed readers: borrowed */
 };

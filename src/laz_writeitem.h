@@ -109,6 +109,9 @@ LazWriteItem *laz_writeitem_v4_byte14(LazEncoder *enc, U32 number);
  * the item is stored raw, and WAVEPACKET13 stays at 1 even inside a v2 file.
  */
 LazWriteItem *laz_writeitem_new_raw(const LazItem *item, LazOutStream *out);
-LazWriteItem *laz_writeitem_new_compressed(const LazItem *item, LazEncoder *enc);
+/* *unsupported distinguishes a type or version with no writer from one whose
+ * writer could not be allocated; both come back as NULL. */
+LazWriteItem *laz_writeitem_new_compressed(const LazItem *item, LazEncoder *enc,
+                                           BOOL *unsupported);
 
 #endif /* LAZ_WRITEITEM_H */

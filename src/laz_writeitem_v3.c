@@ -180,7 +180,9 @@ typedef struct {
 
 static void p14_write_gps_time(Point14v3 *w, I64 gps_time);
 
-static void p14_create_and_init(Point14v3 *w, U32 context, const U8 *item)
+/* Returns LAZ_FALSE if any of the models this context needs could not be
+ * allocated, which the callers pass out of init() or write(). */
+static BOOL p14_create_and_init(Point14v3 *w, U32 context, const U8 *item)
 {
     Point14Context *c = &w->contexts[context];
     U32 i;
@@ -213,38 +215,44 @@ static void p14_create_and_init(Point14v3 *w, U32 context, const U8 *item)
     }
 
     /* channel_returns_XY layer */
-    for (i = 0; i < 8; i++) laz_symbol_model_init(&c->m_changed_values[i], NULL);
-    laz_symbol_model_init(&c->m_scanner_channel, NULL);
-    laz_bank_reinit(c->m_number_of_returns, c->created_nor, 16);
-    laz_bank_reinit(c->m_return_number, c->created_rn, 16);
-    laz_symbol_model_init(&c->m_return_number_gps_same, NULL);
-    laz_ic_init_compressor(&c->ic_dX);
-    laz_ic_init_compressor(&c->ic_dY);
+    for (i = 0; i < 8; i++) {
+        if (!laz_symbol_model_init(&c->m_changed_values[i], NULL)) return LAZ_FALSE;
+    }
+    if (!laz_symbol_model_init(&c->m_scanner_channel, NULL) ||
+        !laz_bank_reinit(c->m_number_of_returns, c->created_nor, 16) ||
+        !laz_bank_reinit(c->m_return_number, c->created_rn, 16) ||
+        !laz_symbol_model_init(&c->m_return_number_gps_same, NULL) ||
+        !laz_ic_init_compressor(&c->ic_dX) ||
+        !laz_ic_init_compressor(&c->ic_dY))
+        return LAZ_FALSE;
     for (i = 0; i < 12; i++) {
         laz_median5_init(&c->last_X_diff_median5[i]);
         laz_median5_init(&c->last_Y_diff_median5[i]);
     }
 
     /* Z layer */
-    laz_ic_init_compressor(&c->ic_Z);
+    if (!laz_ic_init_compressor(&c->ic_Z)) return LAZ_FALSE;
     for (i = 0; i < 8; i++) c->last_Z[i] = P14_Z_IN(item);
 
     /* classification / flags / user_data layers */
-    laz_bank_reinit(c->m_classification, c->created_cls, 64);
-    laz_bank_reinit(c->m_flags, c->created_flg, 64);
-    laz_bank_reinit(c->m_user_data, c->created_usr, 64);
+    if (!laz_bank_reinit(c->m_classification, c->created_cls, 64) ||
+        !laz_bank_reinit(c->m_flags, c->created_flg, 64) ||
+        !laz_bank_reinit(c->m_user_data, c->created_usr, 64))
+        return LAZ_FALSE;
 
     /* intensity layer */
-    laz_ic_init_compressor(&c->ic_intensity);
+    if (!laz_ic_init_compressor(&c->ic_intensity)) return LAZ_FALSE;
     for (i = 0; i < 8; i++) c->last_intensity[i] = P14_INTENSITY_IN(item);
 
-    laz_ic_init_compressor(&c->ic_scan_angle);
-    laz_ic_init_compressor(&c->ic_point_source_ID);
+    if (!laz_ic_init_compressor(&c->ic_scan_angle) ||
+        !laz_ic_init_compressor(&c->ic_point_source_ID))
+        return LAZ_FALSE;
 
     /* gps_time layer */
-    laz_symbol_model_init(&c->m_gpstime_multi, NULL);
-    laz_symbol_model_init(&c->m_gpstime_0diff, NULL);
-    laz_ic_init_compressor(&c->ic_gpstime);
+    if (!laz_symbol_model_init(&c->m_gpstime_multi, NULL) ||
+        !laz_symbol_model_init(&c->m_gpstime_0diff, NULL) ||
+        !laz_ic_init_compressor(&c->ic_gpstime))
+        return LAZ_FALSE;
     c->last = 0;
     c->next = 0;
     memset(c->last_gpstime_diff, 0, sizeof(c->last_gpstime_diff));
@@ -256,6 +264,7 @@ static void p14_create_and_init(Point14v3 *w, U32 context, const U8 *item)
     P14_GPS_TIME_CHANGE(c->last_item) = LAZ_FALSE;
 
     c->unused = LAZ_FALSE;
+    return LAZ_TRUE;
 }
 
 static BOOL p14_init(LazWriteItem *self, const U8 *item, U32 *context)
@@ -290,8 +299,7 @@ static BOOL p14_init(LazWriteItem *self, const U8 *item, U32 *context)
     w->current_context = P14_SCANNER_CHANNEL_IN(item);
     *context = w->current_context;   /* POINT14 sets the context for all items */
 
-    p14_create_and_init(w, w->current_context, item);
-    return LAZ_TRUE;
+    return p14_create_and_init(w, w->current_context, item);
 }
 
 static BOOL p14_write(LazWriteItem *self, const U8 *item, U32 *context)
@@ -304,6 +312,7 @@ static BOOL p14_write(LazWriteItem *self, const U8 *item, U32 *context)
     BOOL point_source_change, gps_time_change, scan_angle_change;
     U32 last_n, last_r, n, rn, m, l, k_bits;
     I32 median, diff;
+    LazSymbolModel *model;
 
     /* single (3) / first (1) / last (2) / intermediate (0) from the last return,
      * plus whether the GPS time changed on that return */
@@ -350,7 +359,7 @@ static BOOL p14_write(LazWriteItem *self, const U8 *item, U32 *context)
         laz_encode_symbol(&w->channel_returns_XY.enc, &cx->m_scanner_channel,
                           (U32)((sym > 0 ? sym : sym + 4) - 1));
         if (w->contexts[scanner_channel].unused) {
-            p14_create_and_init(w, scanner_channel, cx->last_item);
+            if (!p14_create_and_init(w, scanner_channel, cx->last_item)) return LAZ_FALSE;
             last_item = w->contexts[scanner_channel].last_item;
         }
         w->current_context = scanner_channel;
@@ -361,16 +370,16 @@ static BOOL p14_write(LazWriteItem *self, const U8 *item, U32 *context)
     if (w->v4) *context = w->current_context;
 
     if (changed_values & (1 << 2)) {
-        laz_encode_symbol(&w->channel_returns_XY.enc,
-                          laz_bank_get(cx->m_number_of_returns, cx->created_nor, last_n),
-                          n);
+        model = laz_bank_get(cx->m_number_of_returns, cx->created_nor, last_n);
+        if (!model) return LAZ_FALSE;
+        laz_encode_symbol(&w->channel_returns_XY.enc, model, n);
     }
 
     if ((changed_values & 3) == 3) {
         if (gps_time_change) {
-            laz_encode_symbol(&w->channel_returns_XY.enc,
-                              laz_bank_get(cx->m_return_number, cx->created_rn, last_r),
-                              rn);
+            model = laz_bank_get(cx->m_return_number, cx->created_rn, last_r);
+            if (!model) return LAZ_FALSE;
+            laz_encode_symbol(&w->channel_returns_XY.enc, model, rn);
         } else {
             I32 sym = (I32)rn - (I32)last_r;
             laz_encode_symbol(&w->channel_returns_XY.enc,
@@ -411,9 +420,9 @@ static BOOL p14_write(LazWriteItem *self, const U8 *item, U32 *context)
         U32 ccc = ((last_classification & 0x1F) << 1) + (cpr == 3 ? 1 : 0);
 
         if (classification != last_classification) w->classification.changed = LAZ_TRUE;
-        laz_encode_symbol(&w->classification.enc,
-                          laz_bank_get(cx->m_classification, cx->created_cls, ccc),
-                          classification);
+        model = laz_bank_get(cx->m_classification, cx->created_cls, ccc);
+        if (!model) return LAZ_FALSE;
+        laz_encode_symbol(&w->classification.enc, model, classification);
     }
 
     {
@@ -425,9 +434,9 @@ static BOOL p14_write(LazWriteItem *self, const U8 *item, U32 *context)
                           P14_CLASSIFICATION_FLAGS_IN(item));
 
         if (flags != last_flags) w->flags.changed = LAZ_TRUE;
-        laz_encode_symbol(&w->flags.enc,
-                          laz_bank_get(cx->m_flags, cx->created_flg, last_flags),
-                          flags);
+        model = laz_bank_get(cx->m_flags, cx->created_flg, last_flags);
+        if (!model) return LAZ_FALSE;
+        laz_encode_symbol(&w->flags.enc, model, flags);
     }
 
     if (P14_INTENSITY_IN(item) != P14_INTENSITY_IN(last_item)) w->intensity.changed = LAZ_TRUE;
@@ -446,9 +455,9 @@ static BOOL p14_write(LazWriteItem *self, const U8 *item, U32 *context)
         U32 idx = P14_USER_DATA_IN(last_item) / 4;
         if (P14_USER_DATA_IN(item) != P14_USER_DATA_IN(last_item))
             w->user_data.changed = LAZ_TRUE;
-        laz_encode_symbol(&w->user_data.enc,
-                          laz_bank_get(cx->m_user_data, cx->created_usr, idx),
-                          P14_USER_DATA_IN(item));
+        model = laz_bank_get(cx->m_user_data, cx->created_usr, idx);
+        if (!model) return LAZ_FALSE;
+        laz_encode_symbol(&w->user_data.enc, model, P14_USER_DATA_IN(item));
     }
 
     if (point_source_change) {
@@ -736,7 +745,7 @@ typedef struct {
     Rgb14Context contexts[4];
 } Rgb14v3;
 
-static void rgb14_create_and_init(Rgb14v3 *w, U32 context, const U8 *item)
+static BOOL rgb14_create_and_init(Rgb14v3 *w, U32 context, const U8 *item)
 {
     Rgb14Context *c = &w->contexts[context];
     U32 i;
@@ -745,10 +754,13 @@ static void rgb14_create_and_init(Rgb14v3 *w, U32 context, const U8 *item)
         for (i = 0; i < 6; i++) laz_symbol_model_setup(&c->m_rgb_diff[i], 256, LAZ_TRUE);
         c->created = LAZ_TRUE;
     }
-    laz_symbol_model_init(&c->m_byte_used, NULL);
-    for (i = 0; i < 6; i++) laz_symbol_model_init(&c->m_rgb_diff[i], NULL);
+    if (!laz_symbol_model_init(&c->m_byte_used, NULL)) return LAZ_FALSE;
+    for (i = 0; i < 6; i++) {
+        if (!laz_symbol_model_init(&c->m_rgb_diff[i], NULL)) return LAZ_FALSE;
+    }
     memcpy(c->last_item, item, 6);
     c->unused = LAZ_FALSE;
+    return LAZ_TRUE;
 }
 
 static BOOL rgb14_init(LazWriteItem *self, const U8 *item, U32 *context)
@@ -761,8 +773,7 @@ static BOOL rgb14_init(LazWriteItem *self, const U8 *item, U32 *context)
 
     for (c = 0; c < 4; c++) w->contexts[c].unused = LAZ_TRUE;
     w->current_context = *context;      /* set by the POINT14 writer */
-    rgb14_create_and_init(w, w->current_context, item);
-    return LAZ_TRUE;
+    return rgb14_create_and_init(w, w->current_context, item);
 }
 
 static BOOL rgb14_write(LazWriteItem *self, const U8 *item, U32 *context)
@@ -774,7 +785,8 @@ static BOOL rgb14_write(LazWriteItem *self, const U8 *item, U32 *context)
     if (w->current_context != *context) {
         w->current_context = *context;
         if (w->contexts[w->current_context].unused) {
-            rgb14_create_and_init(w, w->current_context, (const U8 *)last_item);
+            if (!rgb14_create_and_init(w, w->current_context, (const U8 *)last_item))
+                return LAZ_FALSE;
             if (!w->v4) last_item = w->contexts[w->current_context].last_item;
         }
         /* v4 refreshes last_item for any switch, v3 only for an unused context */
@@ -852,7 +864,7 @@ typedef struct {
     RgbNir14Context contexts[4];
 } RgbNir14v3;
 
-static void rgbnir14_create_and_init(RgbNir14v3 *w, U32 context, const U8 *item)
+static BOOL rgbnir14_create_and_init(RgbNir14v3 *w, U32 context, const U8 *item)
 {
     RgbNir14Context *c = &w->contexts[context];
     U32 i;
@@ -864,13 +876,18 @@ static void rgbnir14_create_and_init(RgbNir14v3 *w, U32 context, const U8 *item)
         for (i = 0; i < 2; i++) laz_symbol_model_setup(&c->m_nir_diff[i], 256, LAZ_TRUE);
         c->created = LAZ_TRUE;
     }
-    laz_symbol_model_init(&c->m_rgb_bytes_used, NULL);
-    for (i = 0; i < 6; i++) laz_symbol_model_init(&c->m_rgb_diff[i], NULL);
-    laz_symbol_model_init(&c->m_nir_bytes_used, NULL);
-    for (i = 0; i < 2; i++) laz_symbol_model_init(&c->m_nir_diff[i], NULL);
+    if (!laz_symbol_model_init(&c->m_rgb_bytes_used, NULL)) return LAZ_FALSE;
+    for (i = 0; i < 6; i++) {
+        if (!laz_symbol_model_init(&c->m_rgb_diff[i], NULL)) return LAZ_FALSE;
+    }
+    if (!laz_symbol_model_init(&c->m_nir_bytes_used, NULL)) return LAZ_FALSE;
+    for (i = 0; i < 2; i++) {
+        if (!laz_symbol_model_init(&c->m_nir_diff[i], NULL)) return LAZ_FALSE;
+    }
 
     memcpy(c->last_item, item, 8);
     c->unused = LAZ_FALSE;
+    return LAZ_TRUE;
 }
 
 static BOOL rgbnir14_init(LazWriteItem *self, const U8 *item, U32 *context)
@@ -884,8 +901,7 @@ static BOOL rgbnir14_init(LazWriteItem *self, const U8 *item, U32 *context)
 
     for (c = 0; c < 4; c++) w->contexts[c].unused = LAZ_TRUE;
     w->current_context = *context;
-    rgbnir14_create_and_init(w, w->current_context, item);
-    return LAZ_TRUE;
+    return rgbnir14_create_and_init(w, w->current_context, item);
 }
 
 static BOOL rgbnir14_write(LazWriteItem *self, const U8 *item, U32 *context)
@@ -899,7 +915,8 @@ static BOOL rgbnir14_write(LazWriteItem *self, const U8 *item, U32 *context)
     if (w->current_context != *context) {
         w->current_context = *context;
         if (w->contexts[w->current_context].unused) {
-            rgbnir14_create_and_init(w, w->current_context, (const U8 *)last_item);
+            if (!rgbnir14_create_and_init(w, w->current_context, (const U8 *)last_item))
+                return LAZ_FALSE;
             if (!w->v4) last_item = w->contexts[w->current_context].last_item;
         }
         if (w->v4) last_item = w->contexts[w->current_context].last_item;
@@ -998,7 +1015,7 @@ typedef struct {
     Wave14Context contexts[4];
 } Wave14v3;
 
-static void wave14_create_and_init(Wave14v3 *w, U32 context, const U8 *item)
+static BOOL wave14_create_and_init(Wave14v3 *w, U32 context, const U8 *item)
 {
     Wave14Context *c = &w->contexts[context];
     U32 i;
@@ -1012,17 +1029,21 @@ static void wave14_create_and_init(Wave14v3 *w, U32 context, const U8 *item)
         laz_ic_setup_enc(&c->ic_xyz, &w->wavepacket.enc, 32, 3, 8, 0);
         c->created = LAZ_TRUE;
     }
-    laz_symbol_model_init(&c->m_packet_index, NULL);
-    for (i = 0; i < 4; i++) laz_symbol_model_init(&c->m_offset_diff[i], NULL);
-    laz_ic_init_compressor(&c->ic_offset_diff);
-    laz_ic_init_compressor(&c->ic_packet_size);
-    laz_ic_init_compressor(&c->ic_return_point);
-    laz_ic_init_compressor(&c->ic_xyz);
+    if (!laz_symbol_model_init(&c->m_packet_index, NULL)) return LAZ_FALSE;
+    for (i = 0; i < 4; i++) {
+        if (!laz_symbol_model_init(&c->m_offset_diff[i], NULL)) return LAZ_FALSE;
+    }
+    if (!laz_ic_init_compressor(&c->ic_offset_diff) ||
+        !laz_ic_init_compressor(&c->ic_packet_size) ||
+        !laz_ic_init_compressor(&c->ic_return_point) ||
+        !laz_ic_init_compressor(&c->ic_xyz))
+        return LAZ_FALSE;
 
     c->last_diff_32 = 0;
     c->sym_last_offset_diff = 0;
     memcpy(c->last_item, item, 29);
     c->unused = LAZ_FALSE;
+    return LAZ_TRUE;
 }
 
 static BOOL wave14_init(LazWriteItem *self, const U8 *item, U32 *context)
@@ -1035,8 +1056,7 @@ static BOOL wave14_init(LazWriteItem *self, const U8 *item, U32 *context)
 
     for (c = 0; c < 4; c++) w->contexts[c].unused = LAZ_TRUE;
     w->current_context = *context;
-    wave14_create_and_init(w, w->current_context, item);
-    return LAZ_TRUE;
+    return wave14_create_and_init(w, w->current_context, item);
 }
 
 static BOOL wave14_write(LazWriteItem *self, const U8 *item, U32 *context)
@@ -1051,7 +1071,8 @@ static BOOL wave14_write(LazWriteItem *self, const U8 *item, U32 *context)
     if (w->current_context != *context) {
         w->current_context = *context;
         if (w->contexts[w->current_context].unused) {
-            wave14_create_and_init(w, w->current_context, last_item);
+            if (!wave14_create_and_init(w, w->current_context, last_item))
+                return LAZ_FALSE;
             if (!w->v4) last_item = w->contexts[w->current_context].last_item;
         }
         if (w->v4) last_item = w->contexts[w->current_context].last_item;
@@ -1175,13 +1196,22 @@ static BOOL byte14_create_and_init(Byte14v3 *w, U32 context, const U8 *item)
     U32 i;
 
     if (!c->created) {
-        c->m_bytes = laz_symbol_models_new(w->number, 256, LAZ_TRUE);
-        c->last_item = (U8 *)calloc(w->number ? w->number : 1, 1);
-        if (!c->m_bytes || !c->last_item) return LAZ_FALSE;
+        /* each allocation is skipped if a previous, failed call already made
+         * it, so that retrying does not leak the one that succeeded */
+        if (!c->m_bytes) {
+            c->m_bytes = laz_symbol_models_new(w->number, 256, LAZ_TRUE);
+            if (!c->m_bytes) return LAZ_FALSE;
+        }
+        if (!c->last_item) {
+            c->last_item = (U8 *)laz_model_calloc(w->number ? w->number : 1, 1);
+            if (!c->last_item) return LAZ_FALSE;
+        }
         c->created = LAZ_TRUE;
     }
 
-    for (i = 0; i < w->number; i++) laz_symbol_model_init(&c->m_bytes[i], NULL);
+    for (i = 0; i < w->number; i++) {
+        if (!laz_symbol_model_init(&c->m_bytes[i], NULL)) return LAZ_FALSE;
+    }
     memcpy(c->last_item, item, w->number);
     c->unused = LAZ_FALSE;
     return LAZ_TRUE;

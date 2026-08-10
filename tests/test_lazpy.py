@@ -3512,3 +3512,121 @@ class TestSpatialIndexFormats:
             indices = query_indices(reader, (1400, 1600, 1500, 1700))
             assert indices == [i for i in inside_by_scan(
                 "pt1_v2.laz", (1400, 1600, 1500, 1700)) if i <= 10]
+
+
+# ---------------------------------------------------------------------------
+# Running out of memory.
+#
+# Every arithmetic model a coder uses is allocated the first time it is used,
+# and the on-demand banks (see ModelBank in src/laz_item.h) create theirs
+# partway through a chunk rather than at chunk setup, because a model that has
+# never existed has to start fresh when it is first needed -- the writer
+# creates them on the same schedule, so the alternative would change the
+# bitstream. The failure paths that hang off those allocations are reachable
+# from no input file, only from an allocator that runs out, which is what
+# cpylaz._alloc_fail_after exists for.
+#
+# The sweeps below arm it at every count in turn, so every allocation a whole
+# read or a whole write makes is made to fail once. What they assert is
+# uniform: an exception, never a crash and never a half-decoded point or a
+# half-written chunk handed back as if it were whole.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def failing_allocator():
+    """Arms the model allocator to fail after n allocations.
+
+    Disarms it however the test ends: the countdown is process-wide, so a test
+    that left it armed would take every later test down with it.
+    """
+    try:
+        yield cpylaz._alloc_fail_after
+    finally:
+        cpylaz._alloc_fail_after(-1)
+
+
+# One fixture per compressed item version. Between them they name every
+# compressed reader and writer there is: v1 and v2 cover POINT10, GPSTIME11,
+# RGB12, WAVEPACKET13 and BYTE; v3 and v4 cover POINT14, RGB14, RGBNIR14,
+# WAVEPACKET14 and BYTE14, in both of the flavours the layered coders have.
+ALLOCATION_FIXTURES = ["pt5_v1.laz", "pt5_v2.laz", "pt7_v3.laz", "pt10_v4.laz"]
+
+
+def sweep_allocation_failures(arm, attempt):
+    """Run `attempt` with the allocator failing after 0, 1, 2 ... allocations.
+
+    Stops at the count where the allocator no longer gets in the way, and
+    returns how far `attempt` got each time before that -- whatever `attempt`
+    passes to the `reached` callback it is given.
+    """
+    reached = []
+    while len(reached) < 100000:
+        arm(len(reached))
+        try:
+            attempt(reached.append)
+        except LazError:
+            continue
+        finally:
+            arm(-1)
+        # succeeded, so the last entry is a complete run rather than a failure
+        return reached[:-1]
+    raise AssertionError("the allocation sweep did not converge")
+
+
+@pytest.mark.parametrize("name", ALLOCATION_FIXTURES)
+def test_reading_survives_every_allocation_failure(name, failing_allocator):
+    """No allocation failure while decoding turns into a crash, and none of
+    them yields the point it failed on."""
+    data = load(name).data
+    expected = [(p.X, p.Y, p.Z) for p in Reader(io.BytesIO(data))]
+
+    def read_all(reached):
+        got = []
+        try:
+            with Reader(io.BytesIO(data)) as reader:
+                for point in reader:
+                    got.append((point.X, point.Y, point.Z))
+        finally:
+            reached(got)
+
+    partials = sweep_allocation_failures(failing_allocator, read_all)
+
+    assert len(partials) > 100, "the fixture allocates too little to be a test"
+    # every point that did come out is the point that file holds there
+    assert all(got == expected[:len(got)] for got in partials)
+    # A failure after the chunk's first point is one the reader met partway
+    # through decoding -- the on-demand bank path, which init() cannot report.
+    assert max(len(got) for got in partials) > 1, "no failure landed mid-chunk"
+
+
+@pytest.mark.parametrize("name", ALLOCATION_FIXTURES)
+def test_writing_survives_every_allocation_failure(name, failing_allocator):
+    """Nor does one while encoding: a chunk that cannot be modelled is an
+    error, not a chunk quietly written without those points in it."""
+    f = load(name)
+    records = (las_records("pt5_v0.las") if f.items[0][0] == ItemType.POINT10
+               else packed_records(name))
+    prefix = f.data[:f.header["offset_to_point_data"]]
+
+    def write_all(reached):
+        written = 0
+        fp = io.BytesIO(prefix)
+        fp.seek(0, io.SEEK_END)
+        try:
+            writer = cpylaz.PointWriter(fp, f.items, f.compressor,
+                                        chunk_size=f.chunk_size & 0xFFFFFFFF)
+            for record in records:
+                writer.write(record)
+                written += 1
+            writer.done()
+        finally:
+            reached(written)
+
+    partials = sweep_allocation_failures(failing_allocator, write_all)
+
+    assert len(partials) > 100, "the fixture allocates too little to be a test"
+    # as above: a failure after the first point of a chunk is one the writer
+    # met in the middle of encoding rather than while starting the chunk. The
+    # tail of the sweep fails in done(), with every record written but the
+    # last chunk unclosed -- an error there is still an error.
+    assert max(partials) > 1, "no failure landed mid-chunk"

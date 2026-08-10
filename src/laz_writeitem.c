@@ -34,56 +34,60 @@ LazWriteItem *laz_writeitem_new_raw(const LazItem *item, LazOutStream *out)
     }
 }
 
-LazWriteItem *laz_writeitem_new_compressed(const LazItem *item, LazEncoder *enc)
+LazWriteItem *laz_writeitem_new_compressed(const LazItem *item, LazEncoder *enc,
+                                          BOOL *unsupported)
 {
     U32 v = item->version;
 
+    *unsupported = LAZ_FALSE;
     switch (item->type) {
     case LAZ_ITEM_POINT10:
         if (v == 1) return laz_writeitem_v1_point10(enc);
         if (v == 2) return laz_writeitem_v2_point10(enc);
-        return NULL;
+        break;
     case LAZ_ITEM_GPSTIME11:
         if (v == 1) return laz_writeitem_v1_gpstime11(enc);
         if (v == 2) return laz_writeitem_v2_gpstime11(enc);
-        return NULL;
+        break;
     case LAZ_ITEM_RGB12:
         if (v == 1) return laz_writeitem_v1_rgb12(enc);
         if (v == 2) return laz_writeitem_v2_rgb12(enc);
-        return NULL;
+        break;
     case LAZ_ITEM_BYTE:
         if (v == 1) return laz_writeitem_v1_byte(enc, item->size);
         if (v == 2) return laz_writeitem_v2_byte(enc, item->size);
-        return NULL;
+        break;
     case LAZ_ITEM_WAVEPACKET13:
         /* wavepackets never got a v2 encoding, so the VLR of a v2 file still
          * declares this item as v1 -- as make_compressed_reader expects */
         if (v == 1) return laz_writeitem_v1_wavepacket13(enc);
-        return NULL;
+        break;
     /* The LAS 1.4 items exist only as layered writers. make_compressed_reader
      * also accepts version 2 for them, because lasproto once wrote that; there
      * is no reason to keep producing it. */
     case LAZ_ITEM_POINT14:
         if (v == 3) return laz_writeitem_v3_point14(enc);
         if (v == 4) return laz_writeitem_v4_point14(enc);
-        return NULL;
+        break;
     case LAZ_ITEM_RGB14:
         if (v == 3) return laz_writeitem_v3_rgb14(enc);
         if (v == 4) return laz_writeitem_v4_rgb14(enc);
-        return NULL;
+        break;
     case LAZ_ITEM_RGBNIR14:
         if (v == 3) return laz_writeitem_v3_rgbnir14(enc);
         if (v == 4) return laz_writeitem_v4_rgbnir14(enc);
-        return NULL;
+        break;
     case LAZ_ITEM_WAVEPACKET14:
         if (v == 3) return laz_writeitem_v3_wavepacket14(enc);
         if (v == 4) return laz_writeitem_v4_wavepacket14(enc);
-        return NULL;
+        break;
     case LAZ_ITEM_BYTE14:
         if (v == 3) return laz_writeitem_v3_byte14(enc, item->size);
         if (v == 4) return laz_writeitem_v4_byte14(enc, item->size);
-        return NULL;
+        break;
     default:
-        return NULL;
+        break;
     }
+    *unsupported = LAZ_TRUE;
+    return NULL;
 }

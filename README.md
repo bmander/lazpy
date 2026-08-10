@@ -216,6 +216,14 @@ own points and chunk size, the point block lazpy produces is byte-identical to
 laszip's. `tools/` holds the harness that regenerated that reference data;
 running the tests does not require laszip.
 
+The out-of-memory paths are covered too, which takes a hand from the C side:
+every arithmetic model is allocated the first time it is used, and the model
+banks create theirs partway through a chunk, so nothing an input file can do
+reaches those failure branches. `_cpylaz._alloc_fail_after(n)` makes the model
+allocator start returning NULL after `n` allocations, and the tests sweep it
+across every allocation a whole read or write makes. It is a test hook rather
+than API, and it is not thread-safe.
+
 ## License
 
 Apache License 2.0 — see `LICENSE`. Everything in `src/` is a port of
