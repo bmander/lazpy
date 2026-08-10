@@ -4,7 +4,7 @@
 """
 import sys
 
-from lazpy import Reader
+from lazpy import Chunking, Reader
 
 
 def summarize(reader):
@@ -22,7 +22,13 @@ def summarize(reader):
         print(f"laz compressor   {laz['compressor']} "
               f"(item version{'s' if len(versions) > 1 else ''} "
               f"{', '.join(map(str, versions))})")
-        print(f"chunk size       {reader.chunk_size}")
+        if reader.chunking is Chunking.FIXED:
+            chunking = f"fixed, {reader.chunk_size} points per chunk"
+        elif reader.chunking is Chunking.ADAPTIVE:
+            chunking = "adaptive (sizes in the chunk table)"
+        else:
+            chunking = "none (one stream)"
+        print(f"chunking         {chunking}")
     evlrs = header['extended_variable_length_records']
     if evlrs:
         # headers only: a payload may be gigabytes, and is read on demand

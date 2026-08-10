@@ -23,7 +23,7 @@ LAS file specification
 
 from collections import namedtuple
 from collections.abc import Mapping
-from enum import IntEnum
+from enum import Enum, IntEnum
 import io
 import os
 
@@ -34,8 +34,8 @@ from ._cpylaz import (PointReader, PointWriter, Point,  # noqa: F401
 from ._utils import (unsigned_int, signed_int, u32_array, u64_array, double,
                      cstr, PACKERS)
 
-__all__ = ["Reader", "Writer", "Point", "Compressor", "Coder", "ItemType",
-           "Selective", "LazError", "UnsupportedFileError",
+__all__ = ["Reader", "Writer", "Point", "Chunking", "Compressor", "Coder",
+           "ItemType", "Selective", "LazError", "UnsupportedFileError",
            "ExtendedVariableLengthRecord"]
 
 LASZIP_VLR_RECORD_ID = 22204
@@ -75,6 +75,18 @@ class Compressor(IntEnum):
 
 class Coder(IntEnum):
     ARITHMETIC = 0
+
+
+class Chunking(Enum):
+    """How a file's points are grouped, which is what random access costs.
+
+    Not a field of any record: POINTWISE and POINTWISE_CHUNKED carry the same
+    chunk size in the LASzip VLR, and the adaptive case declares it as -1, so
+    this is read off the compressor and that field together.
+    """
+    NONE = 'none'          # one stream of points; seeking decodes forward
+    FIXED = 'fixed'        # chunks of Reader.chunk_size points each
+    ADAPTIVE = 'adaptive'  # variable-size chunks; the chunk table has them
 
 
 class Selective(IntEnum):
@@ -1034,9 +1046,32 @@ class Reader:
         return self.header['number_of_point_records']
 
     @property
-    def chunk_size(self):
+    def chunking(self):
+        """How this file's points are grouped, as a :class:`Chunking`."""
         if self.laz_header is None:
-            return 0
+            return Chunking.NONE
+        # The VLR carries a chunk size whether or not anything chunks, so what
+        # it means depends on the compressor beside it.
+        if self.laz_header['compressor'] == Compressor.POINTWISE:
+            return Chunking.NONE
+        if self.laz_header['chunk_size'] < 0:
+            return Chunking.ADAPTIVE
+        return Chunking.FIXED
+
+    @property
+    def chunk_size(self):
+        """How many points share a chunk, or None if that is not a number.
+
+        None for an unchunked file -- plain LAS, or the POINTWISE container,
+        which is a single stream however large a chunk size the LASzip VLR
+        happens to carry -- and None for adaptive chunking, where the chunks
+        are whatever sizes the writer chose and only the chunk table knows
+        them. Check :attr:`chunking` to tell those two apart; the underlying
+        ``PointReader.chunk_starts`` has the boundaries themselves, once
+        reading has read the table.
+        """
+        if self.chunking is not Chunking.FIXED:
+            return None
         return self.laz_header['chunk_size']
 
     @property
