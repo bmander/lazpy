@@ -28,10 +28,6 @@
 #include "laz_arithmetic.h"
 #include "laz_readitem.h"
 
-/* Upper bound on items in a LASzip VLR. The real layouts use at most five;
- * this only exists so the per-point destination table can be a fixed array. */
-#define LAZ_MAX_ITEMS 32
-
 typedef struct {
     LazStream *instream;        /* borrowed */
     U32 num_readers;

@@ -23,10 +23,12 @@ with Reader("cloud.laz") as reader:
 ## Status
 
 Reading is complete. Writing is under way: the entropy coder is bidirectional,
-and every item writer is in place — v1 and v2 for point formats 0–5, the
-layered v3 and v4 for 6–10 — each producing byte-identical output to laszip.
-Still missing above them are the chunking container and a `Writer` front end,
-so lazpy cannot yet write a file end to end.
+every item writer is in place — v1 and v2 for point formats 0–5, the layered v3
+and v4 for 6–10 — and so is the container above them, which cuts the stream
+into chunks and writes the chunk table. A whole point block comes out
+byte-identical to laszip's. Still missing is a `Writer` front end to put a
+header and a LASzip VLR in front of it, so lazpy cannot yet write a file end to
+end.
 
 | Point data format | Items | LAZ versions |
 |---|---|---|

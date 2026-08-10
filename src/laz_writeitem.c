@@ -10,11 +10,11 @@
  * Which writer codes which item, mirroring laz_readitem_new_raw and
  * make_compressed_reader on the read side.
  *
- * The compressed mapping lives with the container on the read side, because
- * the container is the only caller. Here it sits with the writers instead: the
- * chunking container does not exist yet, and the tests that pin the writers
- * against laszip's own output have to go through the same mapping the
- * container will, or they stop pinning anything real.
+ * Both mappings sit here, rather than the compressed one living inside the
+ * container as it does on the read side, so that the two can be read together
+ * -- including the one deliberate asymmetry between the directions: the reader
+ * accepts version 2 for the LAS 1.4 items, because lasproto once wrote it, and
+ * the writer will not produce it.
  */
 #include "laz_writeitem.h"
 LazWriteItem *laz_writeitem_new_raw(const LazItem *item, LazOutStream *out)

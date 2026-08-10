@@ -26,6 +26,11 @@
 #include "laz_arithmetic.h"
 #include "laz_intcompressor.h"
 
+/* Upper bound on items in a LASzip VLR. The real layouts use at most five;
+ * this only exists so the per-point item tables both containers keep can be
+ * fixed arrays. */
+#define LAZ_MAX_ITEMS 32
+
 /*
  * Where item `type` lives inside a LazPoint. Extra bytes are the exception:
  * they go to a caller-supplied buffer, signalled by -1, and an item type
