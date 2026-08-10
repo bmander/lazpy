@@ -18,7 +18,9 @@ LAS file specification
     1.4: https://www.asprs.org/wp-content/uploads/2010/12/LAS_1_4_r13.pdf
 """
 
+from collections.abc import Mapping
 from enum import IntEnum
+import io
 import sys
 
 from ._cpylaz import (PointReader, PointWriter, Point,  # noqa: F401 (re-exported)
@@ -27,7 +29,8 @@ from ._utils import (unsigned_int, signed_int, u32_array, u64_array, double,
                      cstr, PACKERS)
 
 __all__ = ["Reader", "Writer", "Point", "Compressor", "Coder", "ItemType",
-           "Selective", "LazError", "UnsupportedFileError"]
+           "Selective", "LazError", "UnsupportedFileError",
+           "ExtendedVariableLengthRecord"]
 
 LASZIP_VLR_RECORD_ID = 22204
 LASZIP_VLR_USER_ID = b"laszip encoded"
@@ -250,7 +253,23 @@ VLR_HEADER_FORMAT = (
     ('description', 32, cstr),
 )
 
+# An extended VLR differs from a VLR in one field: the payload length is eight
+# bytes rather than two, which is the whole reason the record type exists. They
+# live behind the point data, so a file can grow one without moving its points.
+EVLR_HEADER_FORMAT = (
+    ('reserved', 2, unsigned_int),
+    ('user_id', 16, cstr),
+    ('record_id', 2, unsigned_int),
+    ('record_length_after_header', 8, unsigned_int),
+    ('description', 32, cstr),
+)
+
 # The LASzip VLR's payload, followed by one triple per item in the layout.
+#
+# number_of_special_evlrs and offset_to_special_evlrs are parsed and then left
+# alone. They address the extended records laszip writes for LAS 1.4
+# compatibility mode, where the 1.4-only point fields are carried beside a 1.2
+# point format; nothing can be done with them until that mode is read at all.
 LASZIP_RECORD_FORMAT = (
     ('compressor', 2, unsigned_int),
     ('coder', 2, unsigned_int),
@@ -277,6 +296,7 @@ def format_size(fmt):
 
 
 VLR_HEADER_SIZE = format_size(VLR_HEADER_FORMAT)
+EVLR_HEADER_SIZE = format_size(EVLR_HEADER_FORMAT)
 
 
 def unpack_format(fmt, data, offset=0):
@@ -292,6 +312,78 @@ def pack_format(fmt, values):
     """The bytes of `fmt`, from a dict holding its fields."""
     return b''.join(PACKERS[parse](values[name], size)
                     for name, size, parse in fmt)
+
+
+def _can_seek(fp):
+    """Whether seeks on `fp` can be expected to work.
+
+    The same rule the C stream applies in file_is_seekable (src/laz_stream.c):
+    an object that answers seekable() is taken at its word, since a pipe has a
+    seek method that raises, and one that does not answer at all is believed.
+    """
+    return hasattr(fp, 'seek') and getattr(fp, 'seekable', lambda: True)()
+
+
+class ExtendedVariableLengthRecord(Mapping):
+    """One EVLR, whose payload is fetched the first time it is asked for.
+
+    Reads like the dict a regular VLR is: every field of the record header is a
+    key, plus ``offset_to_data`` -- where the payload begins in the file -- and
+    ``data``, the payload itself.
+
+    ``data`` is what is not a dict. An EVLR payload is allowed to be enormous,
+    which is what its eight-byte length field is for -- a waveform data packet
+    record can run to gigabytes -- so opening a file reads the 60-byte headers
+    and no more, and the bytes are read only if something asks for them. That
+    means ``data`` needs the reader still open, since the reader is what holds
+    the file. Once read, the payload is kept, so it outlives the reader.
+    """
+
+    def __init__(self, fields, fp):
+        self._fields = fields
+        self._fp = fp
+        self._data = None
+
+    def __getitem__(self, key):
+        if key != 'data':
+            return self._fields[key]
+        if self._data is None:
+            self._data = self._read_data()
+        return self._data
+
+    def __iter__(self):
+        return iter((*self._fields, 'data'))
+
+    def __len__(self):
+        return len(self._fields) + 1
+
+    def __repr__(self):
+        return (f"<EVLR {self['user_id']!r}/{self['record_id']} "
+                f"{self['record_length_after_header']} bytes>")
+
+    def _read_data(self):
+        """The payload, read out from under whoever else is using the file.
+
+        The point reader has owned the file handle since it was constructed and
+        keeps its own buffer over it, so the position has to come back exactly
+        where it was found; it advances the handle only by reading, so what
+        tell() reports is where it believes it is.
+        """
+        length = self._fields['record_length_after_header']
+        try:
+            resume = self._fp.tell()
+            try:
+                self._fp.seek(self._fields['offset_to_data'])
+                data = self._fp.read(length)
+            finally:
+                self._fp.seek(resume)
+        except (OSError, ValueError) as exc:
+            # a closed file object is a ValueError, a dead one an OSError
+            raise LazError(f"cannot read the payload of {self!r}: the file is "
+                           f"closed or unreadable") from exc
+        if len(data) != length:
+            raise LazError(f"{self!r} runs past the end of the file")
+        return data
 
 
 class Reader:
@@ -311,6 +403,7 @@ class Reader:
         self.laz_header = None
         self._reader = None
         self._owns_fp = False
+        self._evlr_warning = None
         self.decompress_selective = (Selective.ALL if decompress_selective is None
                                      else int(decompress_selective))
         if filename is not None:
@@ -339,6 +432,10 @@ class Reader:
 
     def _setup(self):
         self.header = self._read_las_header(self.fp)
+        # before the point reader takes the file over, since this seeks past
+        # the point data and back
+        records, self._evlr_warning = self._read_evlrs(self.fp, self.header)
+        self.header['extended_variable_length_records'] = records
         self.laz_header = self._find_laz_header(self.header)
 
         if self.laz_header is None:
@@ -444,6 +541,77 @@ class Reader:
         return header
 
     @staticmethod
+    def _read_evlrs(fp, header):
+        """The extended records `header` points at, and a warning, as a pair.
+
+        The extended records live behind the point data rather than in front of
+        it, so reading them means going to the end of the file and coming back.
+        Only their headers are read; see ExtendedVariableLengthRecord for why
+        the payloads are not.
+
+        They are keyed by ``(user_id, record_id)`` rather than by record id
+        alone, which is what ``variable_length_records`` uses: LAS namespaces
+        records by user id, and a bare id collides -- LASF_Spec reserves ids 0
+        to 99 for waveform packet descriptors, so a file with two of them would
+        keep one.
+
+        A file that declares more records than it holds keeps the ones it does
+        hold, and the shortfall is the warning; a malformed record behind the
+        point data says nothing about the points themselves, so it is not worth
+        refusing to open the file over.
+        """
+        records = {}
+        # counted rather than len(records), so that two records that really do
+        # share a key do not read as a truncated file
+        found = 0
+
+        if not (header['version_major'] == 1 and header['version_minor'] >= 4):
+            return records, None
+        declared = header['number_of_extended_variable_length_records']
+        start = header['start_of_first_extended_variable_length_record']
+        if not declared or not start:
+            return records, None
+        # a file that cannot seek cannot be read at all -- the point reader
+        # says so, in better words than a failure here would
+        if not _can_seek(fp):
+            return records, None
+
+        resume = fp.tell()
+        try:
+            fp.seek(0, io.SEEK_END)
+            end_of_file = fp.tell()
+            fp.seek(start)
+            # `declared` is a U32 out of the header and worth no more trust
+            # than that, but it needs no cap of its own: every pass consumes at
+            # least these 60 bytes and never seeks backwards, so a count that
+            # outruns the file stops at the first short read. The work a header
+            # aimed at the wrong place can cause is bounded by what is behind
+            # the offset, which is to say by the size of the file.
+            for _ in range(declared):
+                data = fp.read(EVLR_HEADER_SIZE)
+                if len(data) < EVLR_HEADER_SIZE:
+                    break
+                fields, _ = unpack_format(EVLR_HEADER_FORMAT, data)
+                fields['offset_to_data'] = fp.tell()
+                # checked here rather than where the payload is read, so that a
+                # record that is not all there is left out rather than handed
+                # over and found short later
+                length = fields['record_length_after_header']
+                if fields['offset_to_data'] + length > end_of_file:
+                    break
+                key = (fields['user_id'], fields['record_id'])
+                records[key] = ExtendedVariableLengthRecord(fields, fp)
+                found += 1
+                fp.seek(length, io.SEEK_CUR)     # past it, not through it
+        finally:
+            fp.seek(resume)
+
+        if found < declared:
+            return records, (f"file declares {declared} extended variable "
+                             f"length records but holds {found}")
+        return records, None
+
+    @staticmethod
     def _parse_laszip_record(data):
         record, offset = unpack_format(LASZIP_RECORD_FORMAT, data)
 
@@ -503,10 +671,15 @@ class Reader:
         """A non-fatal problem found while reading, or None.
 
         Set when the chunk table is missing or corrupt, which is recoverable
-        but costs random access: seeking then has to decode forward instead of
-        jumping to a chunk.
+        but costs random access -- seeking then has to decode forward instead
+        of jumping to a chunk -- and when the extended variable length records
+        behind the point data are fewer than the header claims.
+
+        The chunk table comes first when both are true: it is the one that
+        affects reading points.
         """
-        return self._reader.warning
+        table = self._reader.warning if self._reader is not None else None
+        return table or self._evlr_warning
 
     # -- reading ---------------------------------------------------------
 
@@ -744,8 +917,7 @@ class Writer:
             self.fp = open(filename, 'wb')
             self._owns_fp = True
         # close() has to go back and fill in the counts and the bounding box
-        if not (hasattr(self.fp, 'seek') and
-                getattr(self.fp, 'seekable', lambda: True)()):
+        if not _can_seek(self.fp):
             self._close_file()
             raise ValueError("writing needs a seekable file, because the point "
                              "count and bounding box are only known at the end")

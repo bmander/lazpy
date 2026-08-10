@@ -22,6 +22,12 @@ def summarize(reader):
               f"(item version{'s' if len(versions) > 1 else ''} "
               f"{', '.join(map(str, versions))})")
         print(f"chunk size       {reader.chunk_size}")
+    evlrs = header['extended_variable_length_records']
+    if evlrs:
+        # headers only: a payload may be gigabytes, and is read on demand
+        users = sorted({user_id.decode(errors='replace')
+                        for user_id, _ in evlrs})
+        print(f"extended vlrs    {len(evlrs)} ({', '.join(users)})")
     print(f"points           {reader.num_points:,}")
     print(f"extra bytes      {reader.num_extra_bytes}")
     print(f"scales           {reader.scales}")
