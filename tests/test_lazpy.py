@@ -1849,7 +1849,8 @@ def test_the_written_point_block_is_byte_identical_to_laszip(point_format):
                         chunk_size=load(name).chunk_size)
 
     block = point_block(name)
-    start = struct.unpack_from("<I", data, 96)[0]      # offset_to_point_data
+    with Reader(io.BytesIO(data)) as reader:
+        start = reader.header["offset_to_point_data"]
     shift = start - load(name).header["offset_to_point_data"]
 
     assert data[start + 8:] == block[8:]
@@ -1857,13 +1858,36 @@ def test_the_written_point_block_is_byte_identical_to_laszip(point_format):
             struct.unpack_from("<q", block, 0)[0] + shift)
 
 
+@pytest.mark.parametrize("point_format", list(LEGACY_FORMATS) + list(LAS14_FORMATS))
+def test_the_laszip_vlr_matches_the_one_laszip_writes(point_format):
+    """Everything the VLR declares about the encoding, byte for byte: the
+    compressor, the coder, the chunk size and every item triple.
+
+    Only the description differs, which is free text naming the writer.
+    """
+    laz_version = 2 if point_format < 6 else 3
+    name = f"pt{point_format}_v{laz_version}.laz"
+    points, layout = source_points(source_fixture(point_format))
+
+    data = written_file(point_format, laz_version, points, layout,
+                        chunk_size=load(name).chunk_size)
+
+    with Reader(io.BytesIO(data)) as reader:
+        written = reader.header["variable_length_records"][22204]
+    expected = load(name).header["variable_length_records"][22204]
+
+    assert written["data"] == expected["data"]
+    assert written["user_id"] == expected["user_id"]
+    assert written["record_id"] == expected["record_id"]
+
+
 class TestWrittenHeader:
     """The fields a header cannot be finished without."""
 
-    def written(self, point_format=1, **kwargs):
-        points, layout = source_points(source_fixture(point_format))
-        data = written_file(point_format, 2 if point_format < 6 else 3,
-                            points, layout, **kwargs)
+    def written(self):
+        """Point format 1 written back out, as its header and its points."""
+        points, layout = source_points(source_fixture(1))
+        data = written_file(1, 2, points, layout)
         with Reader(io.BytesIO(data)) as reader:
             return reader.header, points
 
@@ -2020,6 +2044,16 @@ class TestWriterErrors:
 
         with pytest.raises(ValueError, match="seekable"):
             Writer(WriteOnlyFile(), 1)
+
+    def test_rejects_a_header_edit_that_changes_the_header_length(self):
+        """Fields can be set until the file is closed, but not ones that move
+        the points: that distance is already written, twice over."""
+        buf = io.BytesIO()
+        writer = Writer(buf, 1)
+        writer.write(Point(X=1))
+        writer.header["version_minor"] = 4          # eight bytes longer
+        with pytest.raises(LazError, match="header"):
+            writer.close()
 
     def test_rejects_more_extra_bytes_than_the_layout_holds(self):
         buf = io.BytesIO()

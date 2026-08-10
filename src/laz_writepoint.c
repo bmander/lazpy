@@ -70,6 +70,7 @@ BOOL laz_writepoint_setup(LazWritePoint *wp, U32 num_items, const LazItem *items
             set_error(wp, "item type %u is not supported", items[i].type);
             return LAZ_FALSE;
         }
+        if (items[i].type == LAZ_ITEM_POINT14) wp->has_point14 = LAZ_TRUE;
         wp->point_size += items[i].size;
     }
 
@@ -91,6 +92,11 @@ BOOL laz_writepoint_setup(LazWritePoint *wp, U32 num_items, const LazItem *items
     }
 
     return LAZ_TRUE;
+}
+
+void laz_writepoint_init_point(const LazWritePoint *wp, LazPoint *point)
+{
+    point->extended_point_type = wp->has_point14 ? 1 : 0;
 }
 
 BOOL laz_writepoint_init(LazWritePoint *wp, LazOutStream *outstream)

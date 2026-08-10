@@ -853,10 +853,9 @@ static PyTypeObject IntComp_Type = {
  * than dangling.
  *
  * Points are also writable, because a file has to be written from something:
- * Point(X=..., ...) builds one from nothing, and every attribute assigns. A
- * point that is still viewing a reader's buffer detaches on the first
- * assignment, so writing to what read() returned modifies a copy and never the
- * reader's own point.
+ * Point(X=..., ...) builds one from nothing, and every attribute assigns. What
+ * assignment does to a point that is viewing a reader's buffer is spelled out
+ * where the setters are.
  */
 typedef struct {
     PyObject_HEAD
@@ -869,16 +868,28 @@ typedef struct {
 
 static PyTypeObject Point_Type;
 
+/* A zeroed point that owns itself. The three ways to get a Point -- built,
+ * borrowed, copied -- all start here and then repoint or fill as they need. */
+static PointObject *point_alloc(PyTypeObject *type)
+{
+    PointObject *o = PyObject_New(PointObject, type);
+    if (!o) return NULL;
+    memset(&o->storage, 0, sizeof(o->storage));
+    o->p = &o->storage;
+    o->extra = NULL;
+    o->num_extra = 0;
+    o->extra_storage = NULL;
+    return o;
+}
+
 /* A view onto memory owned by `reader`, valid until the reader detaches it. */
 static PyObject *Point_borrow(LazPoint *p, U8 *extra, U32 num_extra)
 {
-    PointObject *o = PyObject_New(PointObject, &Point_Type);
+    PointObject *o = point_alloc(&Point_Type);
     if (!o) return NULL;
     o->p = p;
     o->extra = extra;
     o->num_extra = num_extra;
-    o->extra_storage = NULL;
-    memset(&o->storage, 0, sizeof(o->storage));
     return (PyObject *)o;
 }
 
@@ -909,13 +920,10 @@ static void Point_dealloc(PointObject *self)
 
 static PyObject *Point_copy(PointObject *self, PyObject *Py_UNUSED(i))
 {
-    PointObject *o = PyObject_New(PointObject, &Point_Type);
+    PointObject *o = point_alloc(&Point_Type);
     if (!o) return NULL;
     o->storage = *self->p;
-    o->p = &o->storage;
     o->num_extra = self->num_extra;
-    o->extra_storage = NULL;
-    o->extra = NULL;
     if (self->num_extra) {
         o->extra_storage = (U8 *)malloc(self->num_extra);
         if (!o->extra_storage) { PyObject_Del(o); return PyErr_NoMemory(); }
@@ -1067,7 +1075,7 @@ POINT_ISETTER(scan_angle_rank, -128, 127)
 POINT_USETTER(user_data, 0xFF)
 POINT_USETTER(point_source_ID, 0xFFFF)
 POINT_ISETTER(extended_scan_angle, -32768, 32767)
-POINT_USETTER(extended_point_type, 0x3)
+/* no setter for extended_point_type: see the getset table */
 POINT_USETTER(extended_scanner_channel, 0x3)
 POINT_USETTER(extended_classification_flags, 0xF)
 POINT_USETTER(extended_classification, 0xFF)
@@ -1195,10 +1203,18 @@ static PyGetSetDef Point_getset[] = {
     POINT_GETSET(user_data, NULL),
     POINT_GETSET(point_source_ID, NULL),
     POINT_GETSET(extended_scan_angle, NULL),
-    POINT_GETSET(extended_point_type, NULL),
+    /* read-only: a writer stamps this from the layout it is writing, so
+     * setting it here would decide nothing */
+    {"extended_point_type", (getter)Point_get_extended_point_type, NULL,
+     "1 on a point of format 6-10", NULL},
     POINT_GETSET(extended_scanner_channel, NULL),
-    POINT_GETSET(extended_classification_flags, NULL),
-    POINT_GETSET(extended_classification, NULL),
+    POINT_GETSET(extended_classification_flags,
+                 "synthetic|keypoint|withheld|overlap; of these only overlap "
+                 "reaches a LAS 1.4 record from here, the other three from "
+                 "synthetic_flag, keypoint_flag and withheld_flag"),
+    POINT_GETSET(extended_classification,
+                 "the LAS 1.4 class; a record takes it only where the legacy "
+                 "classification is 0"),
     POINT_GETSET(extended_return_number, NULL),
     POINT_GETSET(extended_number_of_returns, NULL),
     POINT_GETSET(gps_time, NULL),
@@ -1215,20 +1231,10 @@ static PyMethodDef Point_methods[] = {
     {NULL}
 };
 
-/* Owns its storage from the start, so no accessor has to wonder. */
 static PyObject *Point_tp_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
 {
-    PointObject *o;
-
     (void)args; (void)kwds;
-    o = PyObject_New(PointObject, type);
-    if (!o) return NULL;
-    memset(&o->storage, 0, sizeof(o->storage));
-    o->p = &o->storage;
-    o->extra = NULL;
-    o->extra_storage = NULL;
-    o->num_extra = 0;
-    return (PyObject *)o;
+    return (PyObject *)point_alloc(type);
 }
 
 /* Point(X=1, classification=2, ...): every keyword is an attribute, so the
@@ -1755,11 +1761,10 @@ static int writer_take_point(WriterObject *self, PointObject *point)
         memset(self->extra_bytes + point->num_extra, 0, want - point->num_extra);
     }
 
-    /* point formats 6-10 are marked, everything else is not: a point built by
-     * hand has never been through a reader, and one copied from another file
-     * may have been through the wrong sort */
-    self->point.extended_point_type = 0;
-    laz_readpoint_init_point(&self->scatter, &self->point);
+    /* point formats 6-10 are marked and everything else is not: a point built
+     * by hand has never been through a reader, and one copied from another
+     * file may have been through the wrong sort */
+    laz_writepoint_init_point(&self->wp, &self->point);
     return 0;
 }
 
@@ -1771,9 +1776,13 @@ static void writer_tally(WriterObject *self)
     U32 return_number;
     int i;
 
-    for (i = 0; i < 3; i++) {
-        if (self->index == 0 || xyz[i] < self->min_xyz[i]) self->min_xyz[i] = xyz[i];
-        if (self->index == 0 || xyz[i] > self->max_xyz[i]) self->max_xyz[i] = xyz[i];
+    if (self->index == 0) {
+        for (i = 0; i < 3; i++) self->min_xyz[i] = self->max_xyz[i] = xyz[i];
+    } else {
+        for (i = 0; i < 3; i++) {
+            if (xyz[i] < self->min_xyz[i]) self->min_xyz[i] = xyz[i];
+            if (xyz[i] > self->max_xyz[i]) self->max_xyz[i] = xyz[i];
+        }
     }
 
     return_number = self->point.extended_point_type

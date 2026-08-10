@@ -67,9 +67,14 @@ Complete in both directions.
 Also handled: LAS 1.0–1.4 headers, variable-length records, extra bytes,
 pointwise-chunked and layered-chunked containers, fixed and adaptive chunk
 tables, files whose chunk table is missing because the compressor was
-interrupted, selective decompression of LAS 1.4 attribute layers, and writing
-to an output that cannot seek, where the chunk table's own offset goes at the
-end of the file rather than in front of the points.
+interrupted, and selective decompression of LAS 1.4 attribute layers.
+
+`Writer` needs a seekable output, because the point count and the bounding box
+are only known once the last point is written and they belong at the front of
+the file. The point block below it does not: a chunk table written to a stream
+that cannot seek puts its own offset at the end of the file instead, and lazpy
+reads that variant back. Reaching it means driving `lazpy.PointWriter` and
+writing a header yourself.
 
 Not yet: extended variable-length records, spatial indexing, and LAS 1.4
 compatibility mode.
