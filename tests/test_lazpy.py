@@ -918,7 +918,10 @@ EVLR_OFFSET_FIELD = 235      # start_of_first_extended_variable_length_record
 EVLR_COUNT_FIELD = 243       # number_of_extended_variable_length_records
 EVLR_LENGTH_FIELD = 20       # record_length_after_header, within a record
 
-EVLR_NAME = "pt6_v3.laz"     # LAS 1.4: no other version has extended records
+# LAS 1.4, which is the only version with extended records; the same points
+# compressed and not, since the two take different routes to the point data
+EVLR_NAME = "pt6_v3.laz"
+EVLR_NAMES = ["pt6_v3.laz", "pt6_v0.las"]
 
 
 def evlr_bytes(user_id, record_id, payload, description=b""):
@@ -927,13 +930,13 @@ def evlr_bytes(user_id, record_id, payload, description=b""):
                        description) + payload
 
 
-def with_evlrs(*records, declared=None, start=None):
+def with_evlrs(*records, name=EVLR_NAME, declared=None, start=None):
     """A fixture's bytes, with `records` appended and the header aimed at them.
 
     `declared` and `start` override the two header fields, which is how a file
     that lies about the records it holds gets built.
     """
-    with open(fixture(EVLR_NAME), "rb") as fh:
+    with open(fixture(name), "rb") as fh:
         data = bytearray(fh.read())
     offset = len(data)
     for record in records:
@@ -967,6 +970,15 @@ def test_extended_records_are_parsed():
 
         assert evlrs[(b"lazpy", 1)]["data"] == b"payload"
         assert reader.warning is None
+
+
+@pytest.mark.parametrize("name", EVLR_NAMES)
+def test_extended_records_leave_the_points_alone(name):
+    """Compressed or not, and whatever else the reader does with the file."""
+    data = with_evlrs(evlr_bytes(b"lazpy", 1, b"payload"), name=name)
+    with Reader(io.BytesIO(data)) as reader:
+        assert evlrs_of(reader)[(b"lazpy", 1)]["data"] == b"payload"
+        assert reader.checksum() == REFERENCE_HASH[name]
 
 
 def test_an_extended_record_reads_like_a_dict():
@@ -1090,6 +1102,39 @@ def test_a_payload_running_past_the_end_of_the_file_is_not_handed_over_short():
     with Reader(io.BytesIO(with_evlrs(bytes(record)))) as reader:
         assert evlrs_of(reader) == {}
         assert "holds 0" in reader.warning
+
+
+def test_a_payload_that_goes_away_under_the_reader_raises():
+    """The length was checked against the file when it was opened, so this can
+    only happen to a file that shrank since. It is still not a short read."""
+    fp = io.BytesIO(with_evlrs(evlr_bytes(b"lazpy", 1, b"payload")))
+    with Reader(fp) as reader:
+        record = evlrs_of(reader)[(b"lazpy", 1)]
+        fp.truncate(record["offset_to_data"] + 3)
+        with pytest.raises(LazError, match="past the end"):
+            record["data"]
+
+
+def test_a_stream_that_cannot_seek_fails_as_a_stream_that_cannot_seek():
+    """Extended records are behind the point data, so reading them means
+    seeking -- but a file that cannot seek was already unreadable, and that is
+    the error worth getting."""
+    class Unseekable(io.RawIOBase):
+        def __init__(self, data):
+            self._buffer = io.BytesIO(data)
+
+        def read(self, size=-1):
+            return self._buffer.read(size)
+
+        def readable(self):
+            return True
+
+        def seekable(self):
+            return False
+
+    data = with_evlrs(evlr_bytes(b"lazpy", 1, b"payload"))
+    with pytest.raises(LazError, match="seek to the start of point data"):
+        Reader(Unseekable(data))
 
 
 def test_a_payload_already_read_outlives_the_reader(tmp_path):
