@@ -69,6 +69,20 @@ pointwise-chunked and layered-chunked containers, fixed and adaptive chunk
 tables, files whose chunk table is missing because the compressor was
 interrupted, and selective decompression of LAS 1.4 attribute layers.
 
+The extended variable-length records LAS 1.4 keeps behind the point data are
+read as well, keyed by `(user_id, record_id)` — the id alone is not a key,
+since LAS namespaces records by user id:
+
+```python
+wkt = reader.header["extended_variable_length_records"][(b"LASF_Projection", 2112)]
+wkt["data"]     # read from the file here, not when it was opened
+```
+
+Opening a file reads their 60-byte headers and nothing else. A payload arrives
+only when something asks for it, because one is allowed to be enormous — an
+eight-byte length field is what distinguishes an extended record — so it needs
+the reader still open. Read once, it is kept.
+
 `Writer` needs a seekable output, because the point count and the bounding box
 are only known once the last point is written and they belong at the front of
 the file. The point block below it does not: a chunk table written to a stream
@@ -76,8 +90,9 @@ that cannot seek puts its own offset at the end of the file instead, and lazpy
 reads that variant back. Reaching it means driving `lazpy.PointWriter` and
 writing a header yourself.
 
-Not yet: extended variable-length records, spatial indexing, and LAS 1.4
-compatibility mode.
+Not yet: *writing* extended variable-length records, spatial indexing, and LAS
+1.4 compatibility mode — including the special extended records the LASzip VLR
+points at, which are that mode's business.
 
 Little-endian hosts only; the build fails there rather than mis-code a point.
 
