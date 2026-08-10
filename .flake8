@@ -1,0 +1,13 @@
+# The only setting here is what not to look at: no max-line-length, because
+# PEP 8's own 79 is what the code is written to, and no per-file ignores. A
+# bare `flake8` from the repo root should be the same thing CI runs.
+#
+# flake8 has no pyproject.toml support, which is why this is its own file.
+[flake8]
+extend-exclude =
+    build,
+    dist,
+    env,
+    .venv,
+    venv,
+    *.egg-info
