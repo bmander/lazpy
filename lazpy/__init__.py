@@ -25,11 +25,12 @@ from collections import namedtuple
 from collections.abc import Mapping
 from enum import IntEnum
 import io
+import os
 
 # Point, PointReader and PointWriter are re-exported: they are the API for
 # driving the container directly, without a Reader or Writer over it.
 from ._cpylaz import (PointReader, PointWriter, Point,  # noqa: F401
-                      LazError)
+                      SpatialIndex, LazError)
 from ._utils import (unsigned_int, signed_int, u32_array, u64_array, double,
                      cstr, PACKERS)
 
@@ -51,6 +52,10 @@ LASZIP_VLR_KEY = (LASZIP_VLR_USER_ID, LASZIP_VLR_RECORD_ID)
 # here because compatibility mode describes the fields it hides in it there.
 LASCOMPATIBLE_VLR_KEY = (b"lascompatible", 22204)
 EXTRA_BYTES_VLR_KEY = (b"LASF_Spec", 4)
+
+# The extended record an index appended to the file itself travels in. Nothing
+# in the LAS header points at it; the LASzip record's "special EVLR" fields do.
+LASINDEX_EVLR_KEY = (b"LAStools", 30)
 
 
 # LazError is defined in the C extension so decode failures raised from C and
@@ -401,10 +406,11 @@ EVLR_HEADER_FORMAT = (
 
 # The LASzip VLR's payload, followed by one triple per item in the layout.
 #
-# number_of_special_evlrs and offset_to_special_evlrs are parsed and then left
-# alone. They were meant to address extended records held apart from the rest,
-# which no version of laszip has ever written: it writes -1 in both, and so
-# does lazpy.
+# number_of_special_evlrs and offset_to_special_evlrs address extended records
+# held apart from the rest, which the LAS header does not count and nothing
+# else points at. laszip writes -1 in both, and so does lazpy; what does write
+# them is `lasindex -append`, and following them is how an index appended to a
+# file is found. See Reader._appended_index_data.
 LASZIP_RECORD_FORMAT = (
     ('compressor', 2, unsigned_int),
     ('coder', 2, unsigned_int),
@@ -757,6 +763,9 @@ class Reader:
         self._reader = None
         self._owns_fp = False
         self._evlr_warning = None
+        self._path = None
+        self._index = None
+        self._index_looked_for = False
         self.decompress_selective = (
             Selective.ALL if decompress_selective is None
             else int(decompress_selective))
@@ -767,12 +776,18 @@ class Reader:
 
     def open(self, filename):
         """Open a file by path. Also accepts an already-open binary file."""
+        self._path = None
+        self._index = None
+        self._index_looked_for = False
+
         if hasattr(filename, 'read'):
             self.fp = filename
             self._owns_fp = False
         else:
             self.fp = open(filename, 'rb')
             self._owns_fp = True
+            # remembered for the sidecar ".lax", which is found by name
+            self._path = os.fspath(filename)
 
         try:
             self._setup()
@@ -847,6 +862,10 @@ class Reader:
 
     def close(self):
         self._reader = None
+        # dropped rather than left to be looked for: finding an index means
+        # reading the file, and there is no file any more
+        self._index = None
+        self._index_looked_for = True
         if self.fp is not None and self._owns_fp:
             self.fp.close()
         self.fp = None
@@ -952,21 +971,13 @@ class Reader:
             # aimed at the wrong place can cause is bounded by what is behind
             # the offset, which is to say by the size of the file.
             for _ in range(declared):
-                data = fp.read(EVLR_HEADER_SIZE)
-                if len(data) < EVLR_HEADER_SIZE:
+                record = Reader._evlr_at(fp, end_of_file)
+                if record is None:
                     break
-                fields, _ = unpack_format(EVLR_HEADER_FORMAT, data)
-                fields['offset_to_data'] = fp.tell()
-                # checked here rather than where the payload is read, so that a
-                # record that is not all there is left out rather than handed
-                # over and found short later
-                length = fields['record_length_after_header']
-                if fields['offset_to_data'] + length > end_of_file:
-                    break
-                key = (fields['user_id'], fields['record_id'])
-                records[key] = ExtendedVariableLengthRecord(fields, fp)
+                records[(record['user_id'], record['record_id'])] = record
                 found += 1
-                fp.seek(length, io.SEEK_CUR)     # past it, not through it
+                # past the payload, not through it
+                fp.seek(record['record_length_after_header'], io.SEEK_CUR)
         finally:
             fp.seek(resume)
 
@@ -974,6 +985,27 @@ class Reader:
             return records, (f"file declares {declared} extended variable "
                              f"length records but holds {found}")
         return records, None
+
+    @staticmethod
+    def _evlr_at(fp, end_of_file):
+        """One extended record, read from where `fp` is, or None.
+
+        None means there is not a whole record here: either the 60-byte header
+        is short or the payload it declares runs past the end of the file. That
+        is checked here rather than where the payload is read, so a record that
+        is not all there is left out rather than handed over and found short
+        later. Leaves `fp` on the payload, which is where the next record's
+        header begins once the payload is skipped.
+        """
+        data = fp.read(EVLR_HEADER_SIZE)
+        if len(data) < EVLR_HEADER_SIZE:
+            return None
+        fields, _ = unpack_format(EVLR_HEADER_FORMAT, data)
+        fields['offset_to_data'] = fp.tell()
+        if (fields['offset_to_data'] + fields['record_length_after_header']
+                > end_of_file):
+            return None
+        return ExtendedVariableLengthRecord(fields, fp)
 
     @staticmethod
     def _parse_laszip_record(data):
@@ -1096,6 +1128,145 @@ class Reader:
 
     def __len__(self):
         return self.num_points
+
+    # -- region queries --------------------------------------------------
+
+    def _appended_index_data(self):
+        """The index the LASzip record says is inside this file, or None.
+
+        Two ways in, both the same bytes. An index appended by ``lasindex
+        -append`` is an extended record the LAS header does not count, found
+        only by the offset the LASzip record keeps for it; a file that also
+        lists it among its extended records is read from there instead, since
+        those are parsed already.
+        """
+        record = self.header['extended_variable_length_records'].get(
+            LASINDEX_EVLR_KEY)
+        if record is not None:
+            return record['data']
+
+        if self.laz_header is None:
+            return None
+        offset = self.laz_header['offset_to_special_evlrs']
+        if self.laz_header['number_of_special_evlrs'] <= 0 or offset < 0:
+            return None
+        if not _can_seek(self.fp):
+            return None
+
+        # read out from under the point reader and put the handle back, as
+        # ExtendedVariableLengthRecord does; see its _read_data
+        resume = self.fp.tell()
+        try:
+            self.fp.seek(0, io.SEEK_END)
+            end_of_file = self.fp.tell()
+            self.fp.seek(offset)
+            record = Reader._evlr_at(self.fp, end_of_file)
+        finally:
+            self.fp.seek(resume)
+
+        if record is None:
+            # unlike a record the header merely counted, this one was pointed
+            # at: something said an index is here, so a record that is not all
+            # there is worth saying so about
+            raise LazError("the record the LASzip header points at for the "
+                           "spatial index runs past the end of the file")
+        # the chain is for special records in general rather than for indexes,
+        # so something else sitting there is not an error
+        if (record['user_id'], record['record_id']) != LASINDEX_EVLR_KEY:
+            return None
+        return record['data']
+
+    def _sidecar_index_data(self):
+        """The index in the ".lax" beside this file, or None.
+
+        Only a file opened by name has one to look for -- an index is found by
+        the name of the file it indexes, and a file object has none.
+        """
+        if self._path is None:
+            return None
+        root, _ = os.path.splitext(self._path)
+        try:
+            with open(root + '.lax', 'rb') as fp:
+                return fp.read()
+        except OSError:
+            return None
+
+    @property
+    def spatial_index(self):
+        """The file's spatial index, or None if it has none.
+
+        Looked for the first time it is asked about rather than when the file
+        is opened, so a reader that only ever walks the points pays nothing for
+        it. An index inside the file is preferred to one beside it: it travels
+        with the file, so it is the one that cannot be stale.
+
+        An index that is there but unreadable raises rather than being passed
+        over. Falling back to a full scan would answer the same question far
+        more slowly and say nothing about why.
+        """
+        if not self._index_looked_for:
+            self._index_looked_for = True
+            data = self._appended_index_data()
+            if data is None:
+                data = self._sidecar_index_data()
+            if data is not None:
+                self._index = SpatialIndex(data)
+        return self._index
+
+    @property
+    def has_spatial_index(self):
+        """Whether a rectangle query can skip past most of the file."""
+        return self.spatial_index is not None
+
+    def points_within(self, min_x, min_y, max_x, max_y):
+        """Yield the points inside a rectangle, in file order.
+
+        The rectangle is half-open -- a point counts when ``min_x <= x <
+        max_x`` and ``min_y <= y < max_y`` -- in the georeferenced coordinates
+        :meth:`scale` returns, not the integers a point stores. Adjoining
+        rectangles therefore partition the points rather than sharing the ones
+        on the seam, which is what laszip's own rectangle query does.
+
+        With a spatial index this decodes only the runs of points the index
+        says could be in the rectangle, which for a small rectangle in a large
+        file is a small fraction of it. Without one it is a filtered full scan:
+        the same points, at the cost of reading everything.
+
+        As with :meth:`points`, each iteration yields the same object with new
+        contents; call ``point.copy()`` to keep one. The reader is left
+        wherever the last interval ended, so :meth:`seek` before reading
+        sequentially again.
+        """
+        if min_x > max_x or min_y > max_y:
+            raise ValueError("rectangle is inside out: "
+                             "min must not exceed max")
+
+        index = self.spatial_index
+        num_points = self.num_points
+        if index is None:
+            spans = [(0, num_points - 1)] if num_points else []
+        else:
+            spans = index.intervals(min_x, min_y, max_x, max_y)
+
+        sx, sy = self._scale_offset[0], self._scale_offset[1]
+        ox, oy = self._scale_offset[3], self._scale_offset[4]
+        read = self._reader.read          # hoisted: this loop runs per point
+        for start, end in spans:
+            # an index is data out of a file like any other, and one that names
+            # points this file does not have is not worth decoding towards
+            if start >= num_points:
+                continue
+            end = min(end, num_points - 1)
+            self.seek(start)
+            for _ in range(end - start + 1):
+                point = read()
+                x = point.X * sx + ox
+                if x < min_x or x >= max_x:
+                    continue
+                y = point.Y * sy + oy
+                if y < min_y or y >= max_y:
+                    continue
+                yield point
 
     # -- reading as arrays -----------------------------------------------
 

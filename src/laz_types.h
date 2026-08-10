@@ -162,6 +162,16 @@ static inline void laz_le_put64(U8 *p, U64 v)
     laz_le_put32(p + 4, (U32)(v >> 32));
 }
 
+/* A float travels as its IEEE 754 bit pattern too; the spatial index's
+ * bounding box is four of them. */
+static inline F32 laz_le_get_f32(const U8 *p)
+{
+    U32 bits = laz_le_get32(p);
+    F32 v;
+    memcpy(&v, &bits, 4);
+    return v;
+}
+
 /* A double travels as its IEEE 754 bit pattern, which is what the LAS gps_time
  * and the LAZ coders both treat it as. */
 static inline F64 laz_le_get_f64(const U8 *p)
