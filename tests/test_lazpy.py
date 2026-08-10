@@ -191,6 +191,7 @@ class TestCArithmeticModel:
         assert model.distribution_lookup(6) == 16384
         assert model.distribution_lookup(7) == 4096
 
+
 class TestArithmeticBitModel:
     def test_create(self):
         model = models.ArithmeticBitModel()
@@ -201,6 +202,7 @@ class TestArithmeticBitModel:
         assert model.bit_0_prob == 4096
         assert model.update_cycle == 4
         assert model.bits_until_update == 4
+
 
 class TestCArithmeticBitModel:
     def test_create(self):
@@ -213,16 +215,20 @@ class TestCArithmeticBitModel:
 
 
 # string filled with random bits
-file_contents = b"\xad]\r\xf3-v*V\xa9\xd3\xf9\xbb\x7f\x9a\x06\xc9^hWv\xe7\xe7" \
-b"\rXE\xf0w\x88+\xe0G\x12\xe0\x06?c\xc8\xd7e\xa1\xe0\t\x86\x08\x9a\x11\x88\xd4" \
-b"U\xbfb?d`H\xdcgq\x15\xab\tx\xe7\x8bP\\\xf0\x99\xa9\xf1\xf2G-@7y\xf9J\x94)" \
-b"\x17\xe6\xa2>\x17\x8d\xdf\x14\xf3\xc9\x85Q\xc5?BTB\xfd\x9d\xa8>\xf80\x8a\x19" \
-b"\x01(\xc2N\xe0`\xbc$\x9b\x91\xe0\xed\xe3\x19K\xdb\xba\x01\x11\x9a\xf2\x89" \
-b"\x01\xb1\xb5\xb2%\xe7=.ua\xbb\x92(-\xb4\xde=*#\xec\x15Hs:\x80\xa7\x0b\xba" \
-b"\xe6\xbcD!'\x1c\x08\t\x1db\xfeT\xa5_\x15OeL\x81,Z\xf2\\|\x86i[\xc0\x1fQ\x9e" \
-b";2]\xef\x92\xbb\x16\xfd\xcb\x88\x9f\x13Je\xe8-@\x8a\xbd\xc7)v\xb3K\xcc\x9e" \
-b"\xa4\xaf\xc8\xb5\x05\x1c!\x97i\xe4\x8c\x89n\xb5\x9c\xb0\xbc\x00\x85\re\xed0" \
-b"\x8b\xe0\xe4\x0c\x1c; \xbf*\x89\xec\xa9\x80\xc2n\xc0R(\x8d|\x1a"
+file_contents = (
+    b"\xad]\r\xf3-v*V\xa9\xd3\xf9\xbb\x7f\x9a\x06\xc9^hWv\xe7\xe7"
+    b"\rXE\xf0w\x88+\xe0G\x12\xe0\x06?c\xc8\xd7e\xa1\xe0\t\x86\x08\x9a\x11"
+    b"\x88\xd4U\xbfb?d`H\xdcgq\x15\xab\tx\xe7\x8bP\\\xf0\x99\xa9\xf1\xf2G-@"
+    b"7y\xf9J\x94)\x17\xe6\xa2>\x17\x8d\xdf\x14\xf3\xc9\x85Q\xc5?BTB\xfd"
+    b"\x9d\xa8>\xf80\x8a\x19\x01(\xc2N\xe0`\xbc$\x9b\x91\xe0\xed\xe3\x19K"
+    b"\xdb\xba\x01\x11\x9a\xf2\x89\x01\xb1\xb5\xb2%\xe7=.ua\xbb\x92(-\xb4"
+    b"\xde=*#\xec\x15Hs:\x80\xa7\x0b\xba\xe6\xbcD!'\x1c\x08\t\x1db\xfeT\xa5"
+    b"_\x15OeL\x81,Z\xf2\\|\x86i[\xc0\x1fQ\x9e;2]\xef\x92\xbb\x16\xfd\xcb"
+    b"\x88\x9f\x13Je\xe8-@\x8a\xbd\xc7)v\xb3K\xcc\x9e\xa4\xaf\xc8\xb5\x05"
+    b"\x1c!\x97i\xe4\x8c\x89n\xb5\x9c\xb0\xbc\x00\x85\re\xed0\x8b\xe0\xe4"
+    b"\x0c\x1c; \xbf*\x89\xec\xa9\x80\xc2n\xc0R(\x8d|\x1a"
+)
+
 
 class TestArithmeticDecoder:
     def test_create(self):
@@ -247,9 +253,11 @@ class TestArithmeticDecoder:
         m = models.ArithmeticBitModel()
         decoder.start()
 
-        bits = [1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1,
-        0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1, 0,
-        0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0]
+        bits = [
+            1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 0,
+            0, 0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0,
+            0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0,
+            1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0]
 
         testbits = [int(decoder.decode_bit(m)) for i in range(64)]
 
@@ -262,9 +270,11 @@ class TestArithmeticDecoder:
         m.init()
         decoder.start()
 
-        symbols = [5, 3, 2, 5, 6, 6, 7, 2, 6, 5, 1, 6, 5, 3, 5, 3, 4, 7, 7, 3, 
-        6, 6, 5, 1, 6, 7, 3, 5, 6, 7, 7, 4, 6, 6, 5, 6, 7, 6, 1, 5, 7, 6, 5, 
-        5, 6, 7, 7, 6, 5, 5, 7, 7, 0, 5, 7, 6, 6, 6, 6, 2, 5, 5, 5, 7]
+        symbols = [
+            5, 3, 2, 5, 6, 6, 7, 2, 6, 5, 1, 6, 5, 3, 5, 3,
+            4, 7, 7, 3, 6, 6, 5, 1, 6, 7, 3, 5, 6, 7, 7, 4,
+            6, 6, 5, 6, 7, 6, 1, 5, 7, 6, 5, 5, 6, 7, 7, 6,
+            5, 5, 7, 7, 0, 5, 7, 6, 6, 6, 6, 2, 5, 5, 5, 7]
 
         test_symbols = [decoder.decode_symbol(m) for i in range(64)]
 
@@ -344,14 +354,15 @@ class TestCArithmeticDeoder:
         m = cpylaz.ArithmeticBitModel()
         decoder.start()
 
-        bits = [1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1,
-        0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1, 0,
-        0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0]
+        bits = [
+            1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 0,
+            0, 0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0,
+            0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0,
+            1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0]
 
         testbits = [int(decoder.decode_bit(m)) for i in range(64)]
 
         assert bits == testbits
-
 
     def test_decode_symbol(self):
         fp = io.BytesIO(file_contents)
@@ -360,14 +371,16 @@ class TestCArithmeticDeoder:
         m.init()
         decoder.start()
 
-        symbols = [5, 3, 2, 5, 6, 6, 7, 2, 6, 5, 1, 6, 5, 3, 5, 3, 4, 7, 7, 3, 
-        6, 6, 5, 1, 6, 7, 3, 5, 6, 7, 7, 4, 6, 6, 5, 6, 7, 6, 1, 5, 7, 6, 5, 
-        5, 6, 7, 7, 6, 5, 5, 7, 7, 0, 5, 7, 6, 6, 6, 6, 2, 5, 5, 5, 7]
+        symbols = [
+            5, 3, 2, 5, 6, 6, 7, 2, 6, 5, 1, 6, 5, 3, 5, 3,
+            4, 7, 7, 3, 6, 6, 5, 1, 6, 7, 3, 5, 6, 7, 7, 4,
+            6, 6, 5, 6, 7, 6, 1, 5, 7, 6, 5, 5, 6, 7, 7, 6,
+            5, 5, 7, 7, 0, 5, 7, 6, 6, 6, 6, 2, 5, 5, 5, 7]
 
         test_symbols = [decoder.decode_symbol(m) for i in range(64)]
 
         assert symbols == test_symbols
-        
+
     def test_read_bits(self):
         fp = io.BytesIO(file_contents)
         decoder = encoder.ArithmeticDecoder(fp)
@@ -790,7 +803,8 @@ def test_the_two_integer_compressors_emit_the_same_bytes():
     values = pseudorandom(3000, 1 << 16, seed=31)
     pairs = list(zip([0] + values, values))     # a running predictor
 
-    assert compress_all(PY_CODER, pairs, 16) == compress_all(C_CODER, pairs, 16)
+    assert (compress_all(PY_CODER, pairs, 16)
+            == compress_all(C_CODER, pairs, 16))
 
 
 class TestCIntegerCompressorDirection:
@@ -855,7 +869,8 @@ def load_reference_hashes():
 
 REFERENCE_HASHES = load_reference_hashes()
 FIXTURES = [name for name, _, _ in REFERENCE_HASHES]
-REFERENCE_HASH = {name: (digest, count) for name, digest, count in REFERENCE_HASHES}
+REFERENCE_HASH = {name: (digest, count)
+                  for name, digest, count in REFERENCE_HASHES}
 
 
 def fixture(name):
@@ -890,8 +905,8 @@ def test_seek_matches_sequential_read(name):
         for index in [0, 1, n - 1, n // 2, 5, n // 3, 0, n - 2, n // 2, 3]:
             reader.seek(index)
             p = reader.read()
-            assert (p.X, p.Y, p.Z, p.gps_time, p.classification) == sequential[index], \
-                f"seek({index}) in {name}"
+            got = (p.X, p.Y, p.Z, p.gps_time, p.classification)
+            assert got == sequential[index], f"seek({index}) in {name}"
 
 
 @pytest.mark.parametrize("name", FIXTURES)
@@ -1206,7 +1221,8 @@ def field_span(name, version_minor):
 # patched at directly. LAS 1.4 zeroes the legacy point count for the extended
 # point types and keeps the real one further along.
 LEGACY_POINT_COUNT_OFFSET = field_span("number_of_point_records", 2)[0]
-EXTENDED_POINT_COUNT_OFFSET = field_span("extended_number_of_point_records", 4)[0]
+EXTENDED_POINT_COUNT_OFFSET = field_span(
+    "extended_number_of_point_records", 4)[0]
 # The chunk size sits 12 bytes into the LASzip VLR's payload, which begins 54
 # bytes into the record -- whose 16-byte user id starts at offset 2.
 LASZIP_VLR_USER_ID = b"laszip encoded"
@@ -1268,7 +1284,8 @@ def rebuilt_header(name, count, chunk_size=None):
     if f.header["version_minor"] >= 4:
         struct.pack_into("<Q", header, EXTENDED_POINT_COUNT_OFFSET, count)
     if chunk_size is not None:
-        offset = header.index(LASZIP_VLR_USER_ID) + LASZIP_VLR_CHUNK_SIZE_OFFSET
+        offset = (header.index(LASZIP_VLR_USER_ID)
+                  + LASZIP_VLR_CHUNK_SIZE_OFFSET)
         struct.pack_into("<i", header, offset, chunk_size)
     return bytes(header)
 
@@ -1337,7 +1354,8 @@ def test_v2_output_is_byte_identical_to_laszip(point_format):
 def test_raw_output_is_byte_identical(point_format):
     """An uncompressed container writes the records straight through."""
     records = las_records(f"pt{point_format}_v0.las")
-    items = [(t, size, 0) for t, size, _ in load(f"pt{point_format}_v2.laz").items]
+    items = [(t, size, 0)
+             for t, size, _ in load(f"pt{point_format}_v2.laz").items]
     fp = io.BytesIO()
     compress(fp, records, items, Compressor.NONE)
     assert fp.getvalue() == b"".join(records)
@@ -1486,7 +1504,8 @@ def awkward_las14_records(count, items):
                                         for _ in range(channels)))
             elif item_type == ItemType.WAVEPACKET14:
                 record += struct.pack("<BQIifff", rand.randrange(256),
-                                      rand.randrange(2**40), rand.randrange(2**20),
+                                      rand.randrange(2**40),
+                                      rand.randrange(2**20),
                                       rand.randrange(-2**20, 2**20),
                                       *(rand.uniform(-1, 1) for _ in range(3)))
             elif item_type == ItemType.BYTE14:
@@ -1541,7 +1560,8 @@ def awkward_records(count, length):
     for i in range(count):
         r = bytearray(length)
         struct.pack_into("<iii", r, 0,
-                         rand.randrange(-2**30, 2**30) if i % 7 == 0 else i * 13,
+                         (rand.randrange(-2**30, 2**30) if i % 7 == 0
+                          else i * 13),
                          i * -7 if i % 3 else rand.randrange(-2**30, 2**30),
                          i * i % 90000)
         struct.pack_into("<H", r, 12, rand.randrange(65536))
@@ -1551,7 +1571,8 @@ def awkward_records(count, length):
         gps_time += (1e6 if i % 50 == 0 else
                      0.0 if i % 11 == 0 else 0.001 * rand.randrange(1000))
         struct.pack_into("<d", r, 20, gps_time)
-        struct.pack_into("<HHH", r, 28, *(rand.randrange(65536) for _ in range(3)))
+        struct.pack_into("<HHH", r, 28,
+                         *(rand.randrange(65536) for _ in range(3)))
         r[34] = rand.randrange(256)
         struct.pack_into("<QIifff", r, 35,
                          rand.randrange(2**40), rand.randrange(2**20),
@@ -1565,13 +1586,15 @@ def awkward_records(count, length):
 
 @pytest.fixture(scope="module")
 def records():
-    return awkward_records(400, load("pt5_v0.las").header["point_data_record_length"])
+    length = load("pt5_v0.las").header["point_data_record_length"]
+    return awkward_records(400, length)
 
 
 @pytest.fixture(scope="module")
 def expected(records):
     """What those records decode to when nothing compresses them."""
-    with Reader(rebuilt("pt5_v0.las", b"".join(records), len(records))) as reader:
+    fp = rebuilt("pt5_v0.las", b"".join(records), len(records))
+    with Reader(fp) as reader:
         return reader.checksum()
 
 
@@ -1650,7 +1673,8 @@ class TestChunking:
         return WrittenFile(buffer.getvalue(), writer.number_chunks)
 
     @pytest.mark.parametrize("chunk_size", (1, 137, 400, 1000))
-    def test_round_trips_at_any_chunk_size(self, records, expected, chunk_size):
+    def test_round_trips_at_any_chunk_size(self, records, expected,
+                                           chunk_size):
         """One point per chunk, a size that divides the input unevenly, exactly
         the point count, and more than it."""
         written = self.written(records, chunk_size)
@@ -1679,7 +1703,7 @@ class TestChunking:
                 assert (point.X, point.gps_time) == sequential[index]
 
     def test_closing_a_chunk_no_point_went_into_does_nothing(self, records):
-        """So a caller may end every chunk itself without having to special-case
+        """So a caller may end every chunk itself without special-casing
         the first one, or two boundaries that fall together."""
         assert (self.written(records, -1, breaks=(0, 1, 1, 200)) ==
                 self.written(records, -1, breaks=(1, 200)))
@@ -1688,7 +1712,8 @@ class TestChunking:
         with pytest.raises(LazError):
             self.written(records, 137, breaks=(50,))
 
-    def test_a_non_seekable_output_appends_the_chunk_table_offset(self, records):
+    def test_a_non_seekable_output_appends_the_chunk_table_offset(
+            self, records):
         """With nowhere to patch, the offset in front of the first chunk is -1
         and the real one goes at the very end -- which is what the reader
         already knows to look for."""
@@ -1697,7 +1722,8 @@ class TestChunking:
         start = load(self.NAME).header["offset_to_point_data"]
 
         assert struct.unpack_from("<q", written.data, start)[0] == -1
-        table_start = struct.unpack_from("<q", written.data, len(written.data) - 8)[0]
+        table_start = struct.unpack_from(
+            "<q", written.data, len(written.data) - 8)[0]
         assert table_start == struct.unpack_from("<q", seekable.data, start)[0]
 
         # the two differ in nothing else: same points, same table, same place
@@ -1911,13 +1937,15 @@ class TestFileProperties:
             assert reader.num_points == 500
             reader.read()
             reader.close()
-            assert not fh.closed      # we did not open it, so we do not close it
+            # we did not open it, so we do not close it
+            assert not fh.closed
 
 
 class TestItemLayout:
     def test_known_formats(self):
         items = lazpy.items_for_point_format(1, 28)
-        assert [t for t, _, _ in items] == [ItemType.POINT10, ItemType.GPSTIME11]
+        assert [t for t, _, _ in items] == [ItemType.POINT10,
+                                            ItemType.GPSTIME11]
 
         items = lazpy.items_for_point_format(10, 67)
         assert [t for t, _, _ in items] == [
@@ -1947,21 +1975,24 @@ class TestSelectiveDecompression:
                                  Selective.CLASSIFICATION)
         with Reader(fixture("pt6_v3.laz")) as full:
             want = [(p.X, p.Y) for p in full]
-        with Reader(fixture("pt6_v3.laz"), decompress_selective=mask) as partial:
+        with Reader(fixture("pt6_v3.laz"),
+                    decompress_selective=mask) as partial:
             got = [(p.X, p.Y) for p in partial]
         assert got == want
 
     def test_skipped_attributes_are_frozen(self):
         mask = Selective.ALL & ~Selective.Z
-        with Reader(fixture("pt6_v3.laz"), decompress_selective=mask) as reader:
+        with Reader(fixture("pt6_v3.laz"),
+                    decompress_selective=mask) as reader:
             zs = {p.Z for p in reader}
-        # Z never decodes, so it keeps the first point's value within each chunk
+        # Z never decodes, so it keeps the chunk's first point's value
         assert len(zs) < 10
 
     def test_full_mask_is_the_default(self):
         with Reader(fixture("pt8_v4.laz")) as a:
             default = a.checksum()
-        with Reader(fixture("pt8_v4.laz"), decompress_selective=Selective.ALL) as b:
+        with Reader(fixture("pt8_v4.laz"),
+                    decompress_selective=Selective.ALL) as b:
             explicit = b.checksum()
         assert default == explicit
 
@@ -2080,7 +2111,8 @@ def source_points(name):
                             scales=reader.scales, offsets=reader.offsets)
 
 
-def written_file(point_format, laz_version, points, layout, breaks=(), **kwargs):
+def written_file(point_format, laz_version, points, layout, breaks=(),
+                 **kwargs):
     """`points` written out whole, as bytes.
 
     `breaks` are the indices to end a chunk in front of, as in `compress`,
@@ -2099,7 +2131,7 @@ def written_file(point_format, laz_version, points, layout, breaks=(), **kwargs)
 @pytest.mark.parametrize("point_format,laz_version", WRITER_CASES,
                          ids=WRITER_IDS)
 def test_round_trips_every_format_and_version(point_format, laz_version):
-    """Write a fixture's points, read them back, and match laszip's checksum."""
+    """Write a fixture's points, read back, and match laszip's checksum."""
     name = source_fixture(point_format)
     points, layout = source_points(name)
 
@@ -2111,7 +2143,8 @@ def test_round_trips_every_format_and_version(point_format, laz_version):
         assert reader.checksum() == REFERENCE_HASH[name]
 
 
-@pytest.mark.parametrize("point_format", list(LEGACY_FORMATS) + list(LAS14_FORMATS))
+@pytest.mark.parametrize("point_format",
+                         list(LEGACY_FORMATS) + list(LAS14_FORMATS))
 def test_the_written_point_block_is_byte_identical_to_laszip(point_format):
     """Given laszip's own points and its chunk size, at the item version it
     used, every byte behind the header is the byte laszip wrote.
@@ -2139,7 +2172,8 @@ def test_the_written_point_block_is_byte_identical_to_laszip(point_format):
             struct.unpack_from("<q", block, 0)[0] + shift)
 
 
-@pytest.mark.parametrize("point_format", list(LEGACY_FORMATS) + list(LAS14_FORMATS))
+@pytest.mark.parametrize("point_format",
+                         list(LEGACY_FORMATS) + list(LAS14_FORMATS))
 def test_the_laszip_vlr_matches_the_one_laszip_writes(point_format):
     """Everything the VLR declares about the encoding, byte for byte: the
     compressor, the coder, the chunk size and every item triple.
@@ -2154,8 +2188,10 @@ def test_the_laszip_vlr_matches_the_one_laszip_writes(point_format):
                         chunk_size=load(name).chunk_size)
 
     with Reader(io.BytesIO(data)) as reader:
-        written = reader.header["variable_length_records"][LASZIP_VLR_RECORD_ID]
-    expected = load(name).header["variable_length_records"][LASZIP_VLR_RECORD_ID]
+        vlrs = reader.header["variable_length_records"]
+        written = vlrs[LASZIP_VLR_RECORD_ID]
+    expected = load(name).header["variable_length_records"][
+        LASZIP_VLR_RECORD_ID]
 
     assert written["data"] == expected["data"]
     assert written["user_id"] == expected["user_id"]
@@ -2174,10 +2210,11 @@ class TestWrittenHeader:
 
     def test_bounds_are_the_extremes_of_the_points_written(self):
         header, points = self.written()
-        assert header["min_x"] == min(p.X for p in points) * header["x_scale_factor"]
-        assert header["max_x"] == max(p.X for p in points) * header["x_scale_factor"]
-        assert header["min_z"] == min(p.Z for p in points) * header["z_scale_factor"]
-        assert header["max_z"] == max(p.Z for p in points) * header["z_scale_factor"]
+        x_scale, z_scale = header["x_scale_factor"], header["z_scale_factor"]
+        assert header["min_x"] == min(p.X for p in points) * x_scale
+        assert header["max_x"] == max(p.X for p in points) * x_scale
+        assert header["min_z"] == min(p.Z for p in points) * z_scale
+        assert header["max_z"] == max(p.Z for p in points) * z_scale
 
     def test_counts_by_return_number(self):
         header, points = self.written()
@@ -2191,16 +2228,22 @@ class TestWrittenHeader:
         points, layout = source_points(source_fixture(6))
         data = written_file(6, 3, points, layout)
 
-        assert struct.unpack_from("<I", data, LEGACY_POINT_COUNT_OFFSET)[0] == 0
-        assert struct.unpack_from("<Q", data, EXTENDED_POINT_COUNT_OFFSET)[0] == len(points)
-        assert struct.unpack_from("<5I", data, LEGACY_POINT_COUNT_OFFSET + 4) == (0,) * 5
+        legacy = struct.unpack_from("<I", data, LEGACY_POINT_COUNT_OFFSET)
+        extended = struct.unpack_from("<Q", data, EXTENDED_POINT_COUNT_OFFSET)
+        by_return = struct.unpack_from("<5I", data,
+                                       LEGACY_POINT_COUNT_OFFSET + 4)
+        assert legacy[0] == 0
+        assert extended[0] == len(points)
+        assert by_return == (0,) * 5
 
     def test_a_legacy_format_in_a_las_14_file_fills_in_both(self):
         points, layout = source_points(source_fixture(1))
         data = written_file(1, 2, points, layout, version_minor=4)
 
-        assert struct.unpack_from("<I", data, LEGACY_POINT_COUNT_OFFSET)[0] == len(points)
-        assert struct.unpack_from("<Q", data, EXTENDED_POINT_COUNT_OFFSET)[0] == len(points)
+        legacy = struct.unpack_from("<I", data, LEGACY_POINT_COUNT_OFFSET)
+        extended = struct.unpack_from("<Q", data, EXTENDED_POINT_COUNT_OFFSET)
+        assert legacy[0] == len(points)
+        assert extended[0] == len(points)
 
     def test_an_empty_file_is_still_a_file(self):
         buf = io.BytesIO()
@@ -2214,7 +2257,7 @@ class TestWrittenHeader:
     @pytest.mark.parametrize("point_format,expected", [(1, 2), (4, 3), (6, 4)])
     def test_las_version_defaults_to_the_oldest_that_fits_the_format(
             self, point_format, expected):
-        """Wavepackets arrived in LAS 1.3 and the extended point types in 1.4."""
+        """Wavepackets arrived in LAS 1.3, extended point types in 1.4."""
         buf = io.BytesIO()
         Writer(buf, point_format).close()
         buf.seek(0)
@@ -2458,7 +2501,8 @@ class TestWritablePoint:
         """Including the LAS 1.4 fields, which only reach the file because the
         writer marks the point it is given as an extended one."""
         point = Point(X=1, Y=2, Z=3, extended_return_number=9,
-                      extended_number_of_returns=11, extended_scanner_channel=2,
+                      extended_number_of_returns=11,
+                      extended_scanner_channel=2,
                       extended_classification=200, extended_scan_angle=-4000,
                       keypoint_flag=1, extended_classification_flags=0b1000,
                       gps_time=99.5, rgb=(10, 20, 30, 40))
@@ -2470,7 +2514,8 @@ class TestWritablePoint:
         with Reader(buf) as reader:
             back = reader.read()
             for field in ("X", "Y", "Z", "extended_return_number",
-                          "extended_number_of_returns", "extended_scanner_channel",
+                          "extended_number_of_returns",
+                          "extended_scanner_channel",
                           "extended_classification", "extended_scan_angle",
                           "keypoint_flag", "gps_time", "rgb"):
                 assert getattr(back, field) == getattr(point, field), field

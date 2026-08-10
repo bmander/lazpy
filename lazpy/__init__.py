@@ -14,8 +14,8 @@ extension, which is a port of LASzip.
     ...     writer.write(Point(X=1, Y=2, Z=3, gps_time=4.0))
 
 LAS file specification
-    1.2: https://www.asprs.org/a/society/committees/standards/asprs_las_format_v12.pdf
-    1.4: https://www.asprs.org/wp-content/uploads/2010/12/LAS_1_4_r13.pdf
+    1.2: www.asprs.org/a/society/committees/standards/asprs_las_format_v12.pdf
+    1.4: www.asprs.org/wp-content/uploads/2010/12/LAS_1_4_r13.pdf
 """
 
 from collections.abc import Mapping
@@ -23,7 +23,9 @@ from enum import IntEnum
 import io
 import sys
 
-from ._cpylaz import (PointReader, PointWriter, Point,  # noqa: F401 (re-exported)
+# Point, PointReader and PointWriter are re-exported: they are the API for
+# driving the container directly, without a Reader or Writer over it.
+from ._cpylaz import (PointReader, PointWriter, Point,  # noqa: F401
                       LazError)
 from ._utils import (unsigned_int, signed_int, u32_array, u64_array, double,
                      cstr, PACKERS)
@@ -147,8 +149,8 @@ def items_for_point_format(point_format, point_size):
         else:
             items.append((ItemType.RGB12, 6, 0))
     if wave:
-        items.append((ItemType.WAVEPACKET14 if point14 else ItemType.WAVEPACKET13,
-                      29, 0))
+        items.append((ItemType.WAVEPACKET14 if point14
+                      else ItemType.WAVEPACKET13, 29, 0))
     if extra:
         items.append((ItemType.BYTE14 if point14 else ItemType.BYTE, extra, 0))
     return items
@@ -404,8 +406,9 @@ class Reader:
         self._reader = None
         self._owns_fp = False
         self._evlr_warning = None
-        self.decompress_selective = (Selective.ALL if decompress_selective is None
-                                     else int(decompress_selective))
+        self.decompress_selective = (
+            Selective.ALL if decompress_selective is None
+            else int(decompress_selective))
         if filename is not None:
             self.open(filename)
 
@@ -414,7 +417,8 @@ class Reader:
     def open(self, filename):
         """Open a file by path. Also accepts an already-open binary file."""
         if sys.byteorder != 'little':
-            raise UnsupportedFileError("only little-endian hosts are supported")
+            raise UnsupportedFileError(
+                "only little-endian hosts are supported")
 
         if hasattr(filename, 'read'):
             self.fp = filename
@@ -740,7 +744,7 @@ class Writer:
     The mirror of :class:`Reader`: the header and the LASzip VLR are built
     here, and everything from the first point onward is the C extension's.
 
-        >>> with Writer("out.laz", point_format=6, scales=(0.01, 0.01, 0.01)) as w:
+        >>> with Writer("out.laz", point_format=6, scales=(0.01,) * 3) as w:
         ...     for point in points:
         ...         w.write(point)
 
@@ -806,13 +810,15 @@ class Writer:
         self._owns_fp = False
 
         if sys.byteorder != 'little':
-            raise UnsupportedFileError("only little-endian hosts are supported")
+            raise UnsupportedFileError(
+                "only little-endian hosts are supported")
         if num_extra_bytes < 0:
             raise ValueError("num_extra_bytes cannot be negative")
 
         # raises for a point format there is no layout for, so everything
         # below can look one up
-        record_length = _POINT_FORMATS.get(point_format, (0,))[0] + num_extra_bytes
+        record_length = (_POINT_FORMATS.get(point_format, (0,))[0]
+                         + num_extra_bytes)
         self.items = items_for_point_format(point_format, record_length)
         point14 = _POINT_FORMATS[point_format][5]
 
@@ -919,8 +925,9 @@ class Writer:
         # close() has to go back and fill in the counts and the bounding box
         if not _can_seek(self.fp):
             self._close_file()
-            raise ValueError("writing needs a seekable file, because the point "
-                             "count and bounding box are only known at the end")
+            raise ValueError(
+                "writing needs a seekable file, because the point count and "
+                "bounding box are only known at the end")
 
     def _build_header(self, record_length, version_minor, vlr_size, scales,
                       offsets, system_identifier, generating_software,
@@ -945,8 +952,8 @@ class Writer:
             'offset_to_point_data': header_size + vlr_size,
             'number_of_variable_length_records': 1 if self.compressed else 0,
             # the high bit is what tells a reader the points are compressed
-            'point_data_format_id': self.point_format | (0x80 if self.compressed
-                                                         else 0),
+            'point_data_format_id': (self.point_format
+                                     | (0x80 if self.compressed else 0)),
             'point_data_record_length': record_length,
             'number_of_point_records': 0,
             'number_of_points_by_return': [0] * 5,
@@ -1070,7 +1077,8 @@ class Writer:
                                                 else [0] * 5)
         if header['version_minor'] >= 4:
             header['extended_number_of_point_records'] = count
-            header['extended_number_of_points_by_return'] = list(by_return[1:16])
+            header['extended_number_of_points_by_return'] = \
+                list(by_return[1:16])
 
         # A file with no points keeps the zero bounds _build_header set, which
         # is what laszip leaves in an empty file too.

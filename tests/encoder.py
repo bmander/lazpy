@@ -54,7 +54,7 @@ class ArithmeticEncoder:
         self.outbuffer[p] += 1
 
     def _manage_outbuffer(self):
-        """Hand the just-filled half to the file and start filling the other."""
+        """Hand the just-filled half to the file, and fill the other."""
         if self.outbyte == len(self.outbuffer):
             self.outbyte = 0
         self.fp.write(bytes(
@@ -212,7 +212,8 @@ class ArithmeticDecoder:
 
     def decode_bit(self, m):
         if self.length == 0:
-            raise RuntimeError("Decoder interval is empty - have you called start()?")
+            raise RuntimeError(
+                "Decoder interval is empty - have you called start()?")
 
         # m is an ArithmeticBitModel
         x = m.bit_0_prob * (self.length >> BM_LENGTH_SHIFT)
@@ -236,9 +237,10 @@ class ArithmeticDecoder:
 
     def decode_symbol(self, m):
         # m is an ArithmeticModel
-        
+
         if self.length == 0:
-            raise RuntimeError("Decoder interval is empty - have you called start()?")
+            raise RuntimeError(
+                "Decoder interval is empty - have you called start()?")
 
         y = self.length
 

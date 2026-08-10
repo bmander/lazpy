@@ -21,7 +21,8 @@ SCALAR_FIELDS = [
     "synthetic_flag", "keypoint_flag", "withheld_flag", "scan_angle_rank",
     "user_data", "point_source_ID",
 ]
-# then: gps_bits, rgb[0..3], extended_*, num_extra_bytes, wave_packet[29], extra
+# then: gps_bits, rgb[0..3], extended_*, num_extra_bytes, wave_packet[29],
+# and extra
 EXTENDED_FIELDS = [
     "extended_point_type", "extended_scanner_channel",
     "extended_classification_flags", "extended_classification",
@@ -100,7 +101,8 @@ def compare(laz_path, dump_path, max_points=None):
 def hash_file(laz_path, max_points=None):
     """Whole-file hash, computed in C so 40M-point files stay practical."""
     reader = Reader(laz_path)
-    n = reader.num_points if max_points is None else min(max_points, reader.num_points)
+    n = (reader.num_points if max_points is None
+         else min(max_points, reader.num_points))
     return reader.checksum(n)
 
 
