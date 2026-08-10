@@ -104,6 +104,12 @@ void laz_stream_array_reset(LazStream *s, const U8 *data, I64 size)
  *
  * `base` is the file offset of buf[0], so tell() is base + pos without
  * calling back into Python. Any seek drops the buffer.
+ *
+ * That accounting means the object's own position is only ever moved by this
+ * code, and Python holds it too: lazpy.ExtendedVariableLengthRecord reads an
+ * extended record's payload by seeking the same object and putting it back
+ * exactly where it found it. Anything here that leaves the object somewhere
+ * other than base + fill -- read-ahead, say -- has to be reflected there.
  */
 #define FILE_BUF_SIZE 65536
 

@@ -921,7 +921,7 @@ EVLR_LENGTH_FIELD = 20       # record_length_after_header, within a record
 # LAS 1.4, which is the only version with extended records; the same points
 # compressed and not, since the two take different routes to the point data
 EVLR_NAME = "pt6_v3.laz"
-EVLR_NAMES = ["pt6_v3.laz", "pt6_v0.las"]
+EVLR_NAMES = [EVLR_NAME, "pt6_v0.las"]
 
 
 def evlr_bytes(user_id, record_id, payload, description=b""):
@@ -936,8 +936,7 @@ def with_evlrs(*records, name=EVLR_NAME, declared=None, start=None):
     `declared` and `start` override the two header fields, which is how a file
     that lies about the records it holds gets built.
     """
-    with open(fixture(name), "rb") as fh:
-        data = bytearray(fh.read())
+    data = bytearray(load(name).data)
     offset = len(data)
     for record in records:
         data += record
@@ -1071,10 +1070,15 @@ def test_reading_a_payload_does_not_disturb_point_reading():
 
 @pytest.mark.parametrize("name", FIXTURES)
 def test_files_without_extended_records_have_none(name):
-    """Every version, including the 1.4 files that could have had them."""
+    """Every version, including the 1.4 files that could have had them.
+
+    An always-present key, so nothing has to ask whether a file is new enough
+    to have had any. Decoding is not re-checked here: these are the fixtures
+    exactly as they sit on disk, which test_decodes_identically_to_laszip
+    already reads end to end.
+    """
     with Reader(fixture(name)) as reader:
         assert evlrs_of(reader) == {}
-        assert reader.checksum() == REFERENCE_HASH[name]
 
 
 def test_a_short_block_keeps_what_is_there_and_warns():
@@ -1085,6 +1089,16 @@ def test_a_short_block_keeps_what_is_there_and_warns():
         assert list(evlrs_of(reader)) == [(b"lazpy", 1)]
         assert reader.warning == ("file declares 3 extended variable length "
                                   "records but holds 1")
+        assert reader.checksum() == REFERENCE_HASH[EVLR_NAME]
+
+
+def test_a_wild_record_count_stops_at_the_end_of_the_file():
+    """The count is a U32 out of the header and worth no more trust than that:
+    what stops the walk is running out of file, not the count."""
+    data = with_evlrs(evlr_bytes(b"lazpy", 1, b"here"), declared=0xFFFFFFFF)
+    with Reader(io.BytesIO(data)) as reader:
+        assert list(evlrs_of(reader)) == [(b"lazpy", 1)]
+        assert "holds 1" in reader.warning
         assert reader.checksum() == REFERENCE_HASH[EVLR_NAME]
 
 

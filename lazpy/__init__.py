@@ -314,6 +314,16 @@ def pack_format(fmt, values):
                     for name, size, parse in fmt)
 
 
+def _can_seek(fp):
+    """Whether seeks on `fp` can be expected to work.
+
+    The same rule the C stream applies in file_is_seekable (src/laz_stream.c):
+    an object that answers seekable() is taken at its word, since a pipe has a
+    seek method that raises, and one that does not answer at all is believed.
+    """
+    return hasattr(fp, 'seek') and getattr(fp, 'seekable', lambda: True)()
+
+
 class ExtendedVariableLengthRecord(Mapping):
     """One EVLR, whose payload is fetched the first time it is asked for.
 
@@ -424,7 +434,8 @@ class Reader:
         self.header = self._read_las_header(self.fp)
         # before the point reader takes the file over, since this seeks past
         # the point data and back
-        self._evlr_warning = self._read_evlrs(self.fp, self.header)
+        records, self._evlr_warning = self._read_evlrs(self.fp, self.header)
+        self.header['extended_variable_length_records'] = records
         self.laz_header = self._find_laz_header(self.header)
 
         if self.laz_header is None:
@@ -531,7 +542,7 @@ class Reader:
 
     @staticmethod
     def _read_evlrs(fp, header):
-        """Fill in `header['extended_variable_length_records']`.
+        """The extended records `header` points at, and a warning, as a pair.
 
         The extended records live behind the point data rather than in front of
         it, so reading them means going to the end of the file and coming back.
@@ -545,30 +556,37 @@ class Reader:
         keep one.
 
         A file that declares more records than it holds keeps the ones it does
-        hold; the shortfall comes back as a warning rather than an exception,
-        because a malformed record behind the point data says nothing about the
-        points themselves.
+        hold, and the shortfall is the warning; a malformed record behind the
+        point data says nothing about the points themselves, so it is not worth
+        refusing to open the file over.
         """
-        header['extended_variable_length_records'] = records = {}
+        records = {}
+        # counted rather than len(records), so that two records that really do
+        # share a key do not read as a truncated file
+        found = 0
 
         if not (header['version_major'] == 1 and header['version_minor'] >= 4):
-            return None
+            return records, None
         declared = header['number_of_extended_variable_length_records']
         start = header['start_of_first_extended_variable_length_record']
         if not declared or not start:
-            return None
+            return records, None
         # a file that cannot seek cannot be read at all -- the point reader
         # says so, in better words than a failure here would
-        seekable = getattr(fp, 'seekable', lambda: True)
-        if not (hasattr(fp, 'seek') and seekable()):
-            return None
+        if not _can_seek(fp):
+            return records, None
 
-        found = 0
         resume = fp.tell()
         try:
             fp.seek(0, io.SEEK_END)
             end_of_file = fp.tell()
             fp.seek(start)
+            # `declared` is a U32 out of the header and worth no more trust
+            # than that, but it needs no cap of its own: every pass consumes at
+            # least these 60 bytes and never seeks backwards, so a count that
+            # outruns the file stops at the first short read. The work a header
+            # aimed at the wrong place can cause is bounded by what is behind
+            # the offset, which is to say by the size of the file.
             for _ in range(declared):
                 data = fp.read(EVLR_HEADER_SIZE)
                 if len(data) < EVLR_HEADER_SIZE:
@@ -588,12 +606,10 @@ class Reader:
         finally:
             fp.seek(resume)
 
-        # counted rather than len(records), so that two records that really do
-        # share a key do not read as a truncated file
         if found < declared:
-            return (f"file declares {declared} extended variable length "
-                    f"records but holds {found}")
-        return None
+            return records, (f"file declares {declared} extended variable "
+                             f"length records but holds {found}")
+        return records, None
 
     @staticmethod
     def _parse_laszip_record(data):
@@ -860,8 +876,7 @@ class Writer:
             self.fp = open(filename, 'wb')
             self._owns_fp = True
         # close() has to go back and fill in the counts and the bounding box
-        if not (hasattr(self.fp, 'seek') and
-                getattr(self.fp, 'seekable', lambda: True)()):
+        if not _can_seek(self.fp):
             self._close_file()
             raise ValueError("writing needs a seekable file, because the point "
                              "count and bounding box are only known at the end")
