@@ -1497,6 +1497,140 @@ static PyObject *Reader_checksum(ReaderObject *self, PyObject *args)
     return Py_BuildValue("(KK)", (unsigned long long)h, (unsigned long long)done);
 }
 
+/*
+ * One column of the array path: where a field sits in the decoded point, and
+ * where each point's copy of it goes. Both source pointers are fixed for the
+ * life of the reader -- the point and its extra-bytes buffer are reused, not
+ * reallocated -- so they are resolved once and the loop below only advances
+ * the destination.
+ */
+typedef struct {
+    const U8 *src;
+    U8 *dst;
+    Py_ssize_t size;
+} Column;
+
+/* The part of LazPoint the item readers fill; everything past it is
+ * bookkeeping (the extra-bytes count and pointer), not decoded data. */
+#define POINT_FIXED_EXTENT (LAZ_POINT_OFFSET_WAVEPACKET + 29)
+
+/*
+ * Decodes `count` points straight into caller-owned buffers, one per field.
+ *
+ * `targets` is a sequence of (buffer, offset, size) triples: a writable
+ * C-contiguous buffer, the byte offset of the field inside the decoded point,
+ * and the field's width. Offset -1 means the extra bytes, which are a blob
+ * beside the point rather than a field in it.
+ *
+ * This is what makes the numpy API in lazpy/__init__.py worth having: whole
+ * columns arrive with one Python call and no object per point, where
+ * iterating read() costs an attribute lookup and a boxed int per field.
+ * Nothing here knows what a field means -- names, types and the unpacking of
+ * the sub-byte fields are Python's business.
+ */
+static PyObject *Reader_read_into(ReaderObject *self, PyObject *args)
+{
+    PyObject *targets, *seq, *result = NULL;
+    Py_ssize_t count;
+    Py_ssize_t n, i, done = 0, held = 0;
+    Column *cols = NULL;
+    Py_buffer *views = NULL;
+    BOOL ok = LAZ_TRUE;
+
+    if (!PyArg_ParseTuple(args, "On", &targets, &count)) return NULL;
+    if (!self->ready) {
+        PyErr_SetString(PyExc_ValueError, "reader is not initialised");
+        return NULL;
+    }
+    if (count < 0) {
+        PyErr_SetString(PyExc_ValueError, "count must not be negative");
+        return NULL;
+    }
+
+    seq = PySequence_Fast(targets, "targets must be a sequence");
+    if (!seq) return NULL;
+    n = PySequence_Fast_GET_SIZE(seq);
+
+    cols = (Column *)PyMem_Malloc((size_t)n * sizeof(Column));
+    views = (Py_buffer *)PyMem_Malloc((size_t)n * sizeof(Py_buffer));
+    if (!cols || !views) { PyErr_NoMemory(); goto cleanup; }
+
+    for (i = 0; i < n; i++) {
+        PyObject *t = PySequence_Fast_GET_ITEM(seq, i);
+        PyObject *buf;
+        Py_ssize_t offset, size;
+
+        if (!PyArg_ParseTuple(t, "Onn", &buf, &offset, &size)) goto cleanup;
+        if (size <= 0) {
+            PyErr_SetString(PyExc_ValueError, "field width must be positive");
+            goto cleanup;
+        }
+        if (count > PY_SSIZE_T_MAX / size) {
+            PyErr_SetString(PyExc_OverflowError, "count is too large");
+            goto cleanup;
+        }
+        /* Both bounds are checked by subtraction rather than by adding
+         * offset and size, which are the caller's and could overflow. */
+        if (offset == -1) {
+            if (size > (Py_ssize_t)self->num_extra_bytes) {
+                PyErr_SetString(PyExc_ValueError,
+                                "field lies outside the extra bytes");
+                goto cleanup;
+            }
+            cols[i].src = self->extra_bytes;
+        } else {
+            if (offset < 0 || offset > POINT_FIXED_EXTENT - size) {
+                PyErr_SetString(PyExc_ValueError,
+                                "field lies outside the decoded point");
+                goto cleanup;
+            }
+            cols[i].src = (const U8 *)&self->point + offset;
+        }
+
+        if (PyObject_GetBuffer(buf, &views[i],
+                               PyBUF_WRITABLE | PyBUF_C_CONTIGUOUS) < 0)
+            goto cleanup;
+        held = i + 1;
+        if (views[i].len < count * size) {
+            PyErr_SetString(PyExc_ValueError, "output buffer is too small");
+            goto cleanup;
+        }
+        cols[i].dst = (U8 *)views[i].buf;
+        cols[i].size = size;
+    }
+
+    Py_BEGIN_ALLOW_THREADS
+    for (done = 0; done < count; done++) {
+        if (!laz_readpoint_read(&self->rp, &self->point, self->extra_bytes)) {
+            ok = LAZ_FALSE;
+            break;
+        }
+        for (i = 0; i < n; i++) {
+            memcpy(cols[i].dst, cols[i].src, (size_t)cols[i].size);
+            cols[i].dst += cols[i].size;      /* on to this column's next */
+        }
+    }
+    Py_END_ALLOW_THREADS
+
+    /* Points that did decode stay decoded, so the index has to follow them
+     * even when the read that failed leaves the arrays part-filled. */
+    self->index += (U64)done;
+
+    if (ok) {
+        result = Py_None;
+        Py_INCREF(result);
+    } else {
+        result = reader_error(self);         /* raises; returns NULL */
+    }
+
+cleanup:
+    for (i = 0; i < held; i++) PyBuffer_Release(&views[i]);
+    PyMem_Free(views);
+    PyMem_Free(cols);
+    Py_DECREF(seq);
+    return result;
+}
+
 static PyObject *Reader_seek(ReaderObject *self, PyObject *args)
 {
     unsigned long long target;
@@ -1547,6 +1681,8 @@ static PyObject *Reader_get_warning(ReaderObject *self, void *c)
 static PyMethodDef Reader_methods[] = {
     {"read", (PyCFunction)Reader_read, METH_NOARGS,
      "read() -> Point  (the reader's shared Point; call copy() to keep it)"},
+    {"read_into", (PyCFunction)Reader_read_into, METH_VARARGS,
+     "read_into(targets, count) -> None  (targets: (buffer, offset, size))"},
     {"seek", (PyCFunction)Reader_seek, METH_VARARGS, "seek(index) -> None"},
     {"checksum", (PyCFunction)Reader_checksum, METH_VARARGS,
      "checksum(count=-1) -> (fnv1a_hash, points_read)"},

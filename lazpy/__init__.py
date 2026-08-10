@@ -10,6 +10,9 @@ extension, which is a port of LASzip.
     >>> for point in reader:
     ...     print(point.X, point.Y, point.Z, point.classification)
 
+    >>> reader.xyz()                    # or whole columns, if numpy is around
+    array([[1500.04, 1700.19, 33.98], ...])
+
     >>> with Writer("out.laz", point_format=1) as writer:
     ...     writer.write(Point(X=1, Y=2, Z=3, gps_time=4.0))
 
@@ -18,6 +21,7 @@ LAS file specification
     1.4: www.asprs.org/wp-content/uploads/2010/12/LAS_1_4_r13.pdf
 """
 
+from collections import namedtuple
 from collections.abc import Mapping
 from enum import IntEnum
 import io
@@ -174,6 +178,114 @@ def _min_version_minor(point_format):
     """
     _, _, _, _, wavepacket, point14 = _POINT_FORMATS[point_format]
     return 4 if point14 else (3 if wavepacket else 2)
+
+
+# ---------------------------------------------------------------------------
+# The array API.
+#
+# Every field of the decoded point, as the C reader has to be told about it:
+# the byte offset it lives at, the numpy type it lands in, and how many of
+# those per point. LAS packs several fields into part of a byte and numpy has
+# no bitfield type, so those fields carry the `shift` and `mask` that unpack
+# their containing byte, which is cheaper than teaching the decode loop about
+# bit layouts -- and the ones sharing a byte share one read of it.
+#
+# Offsets are into LazPoint (src/laz_types.h), which mirrors LASzip's own
+# point struct; -1 means the extra bytes instead. Types are spelled
+# little-endian because that is the only host lazpy builds on.
+#
+# This restates a layout that C owns, so it is pinned from the outside:
+# test_arrays_match_reading_point_by_point compares every column of every
+# fixture against Point's own getters, which are themselves pinned to laszip.
+# ---------------------------------------------------------------------------
+
+_Field = namedtuple("_Field", "offset dtype width shift mask",
+                    defaults=(1, 0, None))
+
+_ARRAY_FIELDS = {
+    'X': _Field(0, '<i4'),
+    'Y': _Field(4, '<i4'),
+    'Z': _Field(8, '<i4'),
+    'intensity': _Field(12, '<u2'),
+    'return_number': _Field(14, 'u1', mask=0x07),
+    'number_of_returns': _Field(14, 'u1', shift=3, mask=0x07),
+    'scan_direction_flag': _Field(14, 'u1', shift=6, mask=0x01),
+    'edge_of_flight_line': _Field(14, 'u1', shift=7, mask=0x01),
+    'classification': _Field(15, 'u1', mask=0x1F),
+    'synthetic_flag': _Field(15, 'u1', shift=5, mask=0x01),
+    'keypoint_flag': _Field(15, 'u1', shift=6, mask=0x01),
+    'withheld_flag': _Field(15, 'u1', shift=7, mask=0x01),
+    'scan_angle_rank': _Field(16, 'i1'),
+    'user_data': _Field(17, 'u1'),
+    'point_source_ID': _Field(18, '<u2'),
+    'extended_scan_angle': _Field(20, '<i2'),
+    'extended_point_type': _Field(22, 'u1', mask=0x03),
+    'extended_scanner_channel': _Field(22, 'u1', shift=2, mask=0x03),
+    'extended_classification_flags': _Field(22, 'u1', shift=4, mask=0x0F),
+    'extended_classification': _Field(23, 'u1'),
+    'extended_return_number': _Field(24, 'u1', mask=0x0F),
+    'extended_number_of_returns': _Field(24, 'u1', shift=4, mask=0x0F),
+    'gps_time': _Field(32, '<f8'),
+    'red': _Field(40, '<u2'),
+    'green': _Field(42, '<u2'),
+    'blue': _Field(44, '<u2'),
+    'nir': _Field(46, '<u2'),
+    'wave_packet': _Field(48, 'u1', width=29),
+}
+
+# The fields every point format carries, in the order LAS lists them.
+_CORE_FIELDS = ('X', 'Y', 'Z', 'intensity', 'return_number',
+                'number_of_returns', 'scan_direction_flag',
+                'edge_of_flight_line', 'classification', 'synthetic_flag',
+                'keypoint_flag', 'withheld_flag', 'scan_angle_rank',
+                'user_data', 'point_source_ID')
+
+# What the extended point types add. The legacy fields above stay meaningful
+# in formats 6-10: the POINT14 reader keeps them in step, saturating the
+# narrower ones rather than wrapping.
+_EXTENDED_FIELDS = ('extended_return_number', 'extended_number_of_returns',
+                    'extended_classification', 'extended_classification_flags',
+                    'extended_scanner_channel', 'extended_scan_angle',
+                    'extended_point_type')
+
+
+def _fields_for_point_format(point_format, num_extra_bytes):
+    """The field names a point of this format actually carries."""
+    try:
+        _, gps, rgb, nir, wave, point14 = _POINT_FORMATS[point_format]
+    except KeyError:
+        raise UnsupportedFileError(
+            f"unknown point data format {point_format}") from None
+    names = list(_CORE_FIELDS)
+    if point14:
+        names += _EXTENDED_FIELDS
+    if gps or point14:            # POINT14 carries its gps time inside itself
+        names.append('gps_time')
+    if rgb:
+        names += ['red', 'green', 'blue']
+    if nir:
+        names.append('nir')
+    if wave:
+        names.append('wave_packet')
+    if num_extra_bytes:
+        names.append('extra_bytes')
+    return names
+
+
+def _numpy():
+    """numpy, imported on use.
+
+    The array API is the only part of lazpy that wants it and the extension
+    has no dependencies of its own, so numpy stays optional rather than
+    becoming the price of reading a file.
+    """
+    try:
+        import numpy
+    except ImportError:
+        raise ImportError(
+            "Reader.arrays() and Reader.xyz() need numpy; install it with "
+            "`pip install lazpy[numpy]`") from None
+    return numpy
 
 
 def _as_i32(value):
@@ -736,6 +848,98 @@ class Reader:
 
     def __len__(self):
         return self.num_points
+
+    # -- reading as arrays -----------------------------------------------
+
+    def _array_field(self, name):
+        """Where *name* lives in a decoded point, sized for this file."""
+        if name == 'extra_bytes':
+            if not self.num_extra_bytes:
+                raise ValueError("this file has no extra bytes")
+            return _Field(-1, 'u1', width=self.num_extra_bytes)
+        try:
+            return _ARRAY_FIELDS[name]
+        except KeyError:
+            raise ValueError(f"unknown point field {name!r}") from None
+
+    def arrays(self, *names, start=None, count=None):
+        """Decode points into numpy arrays, one per field.
+
+        Returns ``{name: array}``, each array *count* long and in file order.
+        Named without arguments it returns every field this point format
+        carries, which for a format with extra bytes includes them::
+
+            a = reader.arrays()
+            ground = a["Z"][a["classification"] == 2]
+
+        Naming fields reads only those, which is the difference between three
+        columns and thirty for a whole file::
+
+            a = reader.arrays("X", "Y", "Z", "gps_time")
+
+        ``red``, ``green``, ``blue`` and ``nir`` are separate columns here,
+        where ``Point`` groups them as ``rgb``. ``wave_packet`` and
+        ``extra_bytes``, being opaque blobs, come back as ``(count, size)``
+        arrays of bytes rather than one column of numbers -- and are most of
+        the memory the default costs on the formats that have them.
+
+        Reading starts where the reader is, or at *start* if given, and runs
+        to the end of the file unless *count* says otherwise; a *count* past
+        the end of the file stops at the end of the file, as slicing does. The
+        reader is left after the last point read, so successive calls walk the
+        file in blocks -- which is how a file too big to hold at once gets
+        read.
+        """
+        np = _numpy()
+        if start is not None:
+            self.seek(start)
+        remaining = self.num_points - self.index
+        count = remaining if count is None else min(count, remaining)
+
+        if not names:
+            names = _fields_for_point_format(self.point_format,
+                                             self.num_extra_bytes)
+
+        out, targets, packed, byte_columns = {}, [], [], {}
+        for name in names:
+            f = self._array_field(name)
+            if f.mask is None:
+                shape = count if f.width == 1 else (count, f.width)
+                column = np.empty(shape, dtype=f.dtype)
+                targets.append((column, f.offset, column.itemsize * f.width))
+                out[name] = column
+                continue
+            # the packed fields run several to a byte -- four in byte 14
+            # alone -- so read each byte once and unpack them from it after
+            if f.offset not in byte_columns:
+                byte_columns[f.offset] = np.empty(count, dtype=f.dtype)
+                targets.append((byte_columns[f.offset], f.offset, 1))
+            packed.append((name, f))
+            out[name] = None            # placeholder: holds its place in out
+
+        self._reader.read_into(targets, count)
+
+        for name, f in packed:
+            out[name] = (byte_columns[f.offset] >> f.shift) & f.mask
+        return out
+
+    def xyz(self, start=None, count=None):
+        """The georeferenced points, as an ``(N, 3)`` array of floats.
+
+        The scale and offset from the header are applied, so these are the
+        coordinates the file is about rather than the integers it stores.
+        *start* and *count* are as in :meth:`arrays`.
+        """
+        np = _numpy()
+        columns = self.arrays('X', 'Y', 'Z', start=start, count=count)
+        # scaled a column at a time into the answer, which is the only
+        # full-size float array this makes
+        xyz = np.empty((len(columns['X']), 3), dtype=np.float64)
+        scales, offsets = self.scales, self.offsets
+        for i, name in enumerate('XYZ'):
+            np.multiply(columns[name], scales[i], out=xyz[:, i])
+            xyz[:, i] += offsets[i]
+        return xyz
 
 
 class Writer:
