@@ -12,8 +12,8 @@ import encoder
 import lazpy
 import models
 from lazpy import _cpylaz as cpylaz
-from lazpy import (Compressor, Point, Reader, Selective, ItemType, LazError,
-                   UnsupportedFileError, Writer)
+from lazpy import (Compressor, LASZIP_VLR_RECORD_ID, Point, Reader, Selective,
+                   ItemType, LazError, UnsupportedFileError, Writer)
 
 
 class TestArithmeticModel:
@@ -927,11 +927,23 @@ def test_reader_reports_its_position(name):
 LEGACY_FORMATS = range(6)
 LAS14_FORMATS = range(6, 11)
 
+
+def field_span(name, version_minor):
+    """Where a header field sits, from the same tables that define it."""
+    offset = 0
+    for fmt in lazpy.header_formats(version_minor):
+        for field, size, _ in fmt:
+            if field == name:
+                return offset, size
+            offset += size
+    raise KeyError(name)
+
+
 # The fields lazpy does not hand back, and that a rebuilt header has to be
 # patched at directly. LAS 1.4 zeroes the legacy point count for the extended
 # point types and keeps the real one further along.
-LEGACY_POINT_COUNT_OFFSET = 107
-EXTENDED_POINT_COUNT_OFFSET = 247
+LEGACY_POINT_COUNT_OFFSET = field_span("number_of_point_records", 2)[0]
+EXTENDED_POINT_COUNT_OFFSET = field_span("extended_number_of_point_records", 4)[0]
 # The chunk size sits 12 bytes into the LASzip VLR's payload, which begins 54
 # bytes into the record -- whose 16-byte user id starts at offset 2.
 LASZIP_VLR_USER_ID = b"laszip encoded"
@@ -1805,12 +1817,18 @@ def source_points(name):
                             scales=reader.scales, offsets=reader.offsets)
 
 
-def written_file(point_format, laz_version, points, layout, **kwargs):
-    """`points` written out whole, as bytes."""
+def written_file(point_format, laz_version, points, layout, breaks=(), **kwargs):
+    """`points` written out whole, as bytes.
+
+    `breaks` are the indices to end a chunk in front of, as in `compress`,
+    which only a file with variable-size chunks allows.
+    """
     buf = io.BytesIO()
     with Writer(buf, point_format, compressed=laz_version is not None,
                 laz_version=laz_version, **layout, **kwargs) as writer:
-        for point in points:
+        for index, point in enumerate(points):
+            if index in breaks:
+                writer.chunk()
             writer.write(point)
     return buf.getvalue()
 
@@ -1873,8 +1891,8 @@ def test_the_laszip_vlr_matches_the_one_laszip_writes(point_format):
                         chunk_size=load(name).chunk_size)
 
     with Reader(io.BytesIO(data)) as reader:
-        written = reader.header["variable_length_records"][22204]
-    expected = load(name).header["variable_length_records"][22204]
+        written = reader.header["variable_length_records"][LASZIP_VLR_RECORD_ID]
+    expected = load(name).header["variable_length_records"][LASZIP_VLR_RECORD_ID]
 
     assert written["data"] == expected["data"]
     assert written["user_id"] == expected["user_id"]
@@ -2031,6 +2049,39 @@ class TestWriterErrors:
         with pytest.raises(ValueError):
             Writer(io.BytesIO(), 1, compressed=False, laz_version=2)
 
+    @pytest.mark.parametrize("point_format,compressor", [
+        (1, Compressor.LAYERED_CHUNKED),    # layers are a LAS 1.4 thing
+        (6, Compressor.POINTWISE),          # and predate the 1.4 items
+        (6, Compressor.POINTWISE_CHUNKED),
+    ])
+    def test_rejects_a_container_the_items_cannot_use(self, point_format,
+                                                      compressor):
+        """The core refuses this too, and has to: a container and its writers
+        that disagree about layering call through a hook that is not there."""
+        with pytest.raises(UnsupportedFileError):
+            Writer(io.BytesIO(), point_format, compressor=compressor)
+
+    def test_the_core_refuses_a_container_the_items_cannot_use(self):
+        """Below the Writer, where the crash would be. PointWriter is public
+        and the test suite drives it directly."""
+        with pytest.raises(LazError):
+            cpylaz.PointWriter(io.BytesIO(), load("pt1_v2.laz").items,
+                               Compressor.LAYERED_CHUNKED)
+        with pytest.raises(LazError):
+            cpylaz.PointWriter(io.BytesIO(), load("pt6_v3.laz").items,
+                               Compressor.POINTWISE_CHUNKED)
+
+    def test_rejects_a_compressor_for_an_uncompressed_file(self):
+        with pytest.raises(ValueError):
+            Writer(io.BytesIO(), 1, compressed=False,
+                   compressor=Compressor.POINTWISE_CHUNKED)
+
+    def test_ending_a_chunk_needs_a_variable_size_one(self):
+        with Writer(io.BytesIO(), 1, chunk_size=137) as writer:
+            writer.write(Point(X=1))
+            with pytest.raises(LazError):
+                writer.chunk()
+
     def test_rejects_a_point_format_the_las_version_cannot_describe(self):
         with pytest.raises(UnsupportedFileError):
             Writer(io.BytesIO(), 4, version_minor=2)   # wavepackets need 1.3
@@ -2179,3 +2230,115 @@ class TestWritablePoint:
             assert (back.synthetic_flag, back.keypoint_flag,
                     back.withheld_flag) == (1, 0, 1)
             assert back.extended_classification_flags == 0b1101
+
+
+class TestWriterContainers:
+    """Which container the points go in, and where its chunks end -- the
+    writer's most consequential choice for whoever reads the file back, since
+    it decides whether they can seek at all.
+
+    What the container does with the points is `TestChunking`'s, a layer down;
+    what is left here is that the writer offers the choice and carries it into
+    the file.
+    """
+
+    @pytest.mark.parametrize("point_format", (0, 5))
+    def test_the_non_chunked_container_matches_laszip(self, point_format):
+        """LASzip's original container compresses the whole file as one stream
+        with no chunk table, which is how laszip wrote the _pointwise
+        fixtures -- so the point block is comparable byte for byte.
+
+        Two formats rather than all six: the per-format item output in this
+        container is already pinned against every one of those fixtures by
+        test_v1_output_is_byte_identical_to_laszip, and what is new here is
+        that a Writer can ask for it.
+        """
+        name = f"pt{point_format}_v1_pointwise.laz"
+        points, layout = source_points(source_fixture(point_format))
+
+        data = written_file(point_format, 1, points, layout,
+                            compressor=Compressor.POINTWISE)
+
+        with Reader(io.BytesIO(data)) as reader:
+            assert reader.laz_header["compressor"] == Compressor.POINTWISE
+            start = reader.header["offset_to_point_data"]
+            assert reader.checksum() == REFERENCE_HASH[name]
+        assert data[start:] == point_block(name)
+
+    def test_variable_size_chunks_through_the_writer(self):
+        """A chunk size of U32_MAX leaves the boundaries to the caller, and is
+        declared as -1 in the VLR so a reader knows to expect point counts in
+        the chunk table -- which is what lets it seek to one.
+        """
+        points, layout = source_points("pt1_v0.las")
+
+        data = written_file(1, 2, points, layout, chunk_size=0xFFFFFFFF,
+                            breaks=(1, 10, 200, 201))
+
+        with Reader(io.BytesIO(data)) as reader:
+            assert reader.chunk_size == -1
+            for index in (0, 300, 1, 205, len(points) - 1, 10, 200):
+                reader.seek(index)
+                assert reader.read().X == points[index].X, index
+            reader.seek(0)
+            assert reader.checksum() == REFERENCE_HASH["pt1_v0.las"]
+
+
+def test_the_vlr_description_is_the_callers():
+    """Free text naming what wrote the file, and the one field that stopped a
+    caller from reproducing a foreign file's VLR byte for byte."""
+    buf = io.BytesIO()
+    with Writer(buf, 1, vlr_description=b"by laszip of LAStools") as writer:
+        writer.write(Point(X=1))
+
+    buf.seek(0)
+    with Reader(buf) as reader:
+        vlr = reader.header["variable_length_records"][LASZIP_VLR_RECORD_ID]
+    assert vlr["description"] == b"by laszip of LAStools"
+
+
+# Every format but the wavepacket two, whose fixtures are LAS 1.2 -- a file
+# lazpy will not write, since those formats arrived in 1.3, so its header is
+# eight bytes longer and nothing lines up.
+WHOLE_FILE_FORMATS = [pf for pf in list(LEGACY_FORMATS) + list(LAS14_FORMATS)
+                      if pf not in (4, 5)]
+
+
+@pytest.mark.parametrize("point_format", WHOLE_FILE_FORMATS)
+def test_a_written_file_is_the_file_laszip_wrote(point_format):
+    """Given the same points, settings and free text, everything lazpy writes
+    is what laszip wrote -- header, VLR, points and chunk table alike.
+
+    Everything except two header statistics, which differ because lazpy fills
+    them in and the generator did not: it left the counts by return number at
+    zero and wrote the nominal coordinate range rather than the extent of the
+    points it had. Those are what `close()` computes, so a writer cannot be
+    talked into reproducing them, and should not be.
+    """
+    laz_version = 2 if point_format < 6 else 3
+    name = f"pt{point_format}_v{laz_version}.laz"
+    f = load(name)
+    header = f.header
+    points, layout = source_points(name)
+
+    data = written_file(
+        point_format, laz_version, points, layout,
+        chunk_size=f.chunk_size,
+        version_minor=header["version_minor"],
+        system_identifier=header["system_identifier"],
+        generating_software=header["generating_software"],
+        file_creation=(header["file_creation_day"],
+                       header["file_creation_year"]),
+        vlr_description=header["variable_length_records"][
+            LASZIP_VLR_RECORD_ID]["description"])
+
+    computed = ["number_of_points_by_return",
+                "min_x", "max_x", "min_y", "max_y", "min_z", "max_z"]
+    if header["version_minor"] >= 4:
+        computed.append("extended_number_of_points_by_return")
+
+    ours, theirs = bytearray(data), bytearray(f.data)
+    for field in computed:
+        offset, size = field_span(field, header["version_minor"])
+        ours[offset:offset + size] = theirs[offset:offset + size]
+    assert bytes(ours) == bytes(theirs)
