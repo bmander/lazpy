@@ -205,6 +205,18 @@ And by handing laszip what lazpy wrote:
 Both are only needed to regenerate or extend the reference data; running the
 test suite does not require laszip.
 
+## Style
+
+```bash
+pip install flake8
+flake8
+```
+
+PEP 8, checked at its own 79 columns. `.flake8` sets nothing but which
+directories to skip, so a bare `flake8` at the repo root is exactly what CI
+runs. There are no per-file ignores and one `noqa` in the tree, on the
+re-exports in `lazpy/__init__.py`.
+
 ## Performance
 
 Decoding the 43M-point file above:

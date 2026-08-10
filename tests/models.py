@@ -125,7 +125,6 @@ class ArithmeticModel:
                 s += 1
                 self._decoder_table[s] = self.num_symbols - 1
 
-
         # set frequency of model updates
         self.update_cycle = (5 * self.update_cycle) >> 2
         max_cycle = (self.num_symbols + 6) << 3
@@ -158,7 +157,7 @@ class ArithmeticModel:
         # for compatibility with the C version
         if self._symbol_count is None:
             raise Exception("No symbol count")
-            
+
         return self._symbol_count[sym]
 
     def has_decoder_table(self):
