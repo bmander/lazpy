@@ -54,6 +54,8 @@ typedef struct {
     /* Total size of the BYTE/BYTE14 items, i.e. how large the caller's
      * extra-bytes buffer must be. */
     U32 num_extra_bytes;
+    /* True for point formats 6-10; see laz_writepoint_init_point. */
+    BOOL has_point14;
 
     /* chunking */
     BOOL chunked;               /* false for uncompressed and for POINTWISE */
@@ -85,12 +87,15 @@ BOOL laz_writepoint_setup(LazWritePoint *wp, U32 num_items, const LazItem *items
  * placeholder. Everything written from here on belongs to the point block. */
 BOOL laz_writepoint_init(LazWritePoint *wp, LazOutStream *outstream);
 
-/* Encodes one point. `extra_bytes` may be NULL when the layout has none.
- *
- * A point of format 6-10 must carry extended_point_type, exactly as one that
- * came out of a reader does -- see laz_readpoint_init_point, which is where a
- * point buffer gets it. The raw POINT14 writer branches on that flag, and a
- * point built from scratch without it silently loses its extended fields. */
+/* Marks a point as belonging to this layout, the mirror of
+ * laz_readpoint_init_point. Point formats 6-10 carry extended_point_type on
+ * every point, the raw POINT14 writer branches on it, and a point built from
+ * scratch would otherwise lose its extended fields silently. Every point
+ * passed to laz_writepoint_write must have been through this -- a point that
+ * came from a reader of the same layout already has. */
+void laz_writepoint_init_point(const LazWritePoint *wp, LazPoint *point);
+
+/* Encodes one point. `extra_bytes` may be NULL when the layout has none. */
 BOOL laz_writepoint_write(LazWritePoint *wp, const LazPoint *point,
                           const U8 *extra_bytes);
 

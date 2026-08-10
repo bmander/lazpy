@@ -1,10 +1,10 @@
 # lazpy
 
-A reader for LAS and LAZ point clouds: a port of [LASzip](https://github.com/LASzip/LASzip)'s
-decompressor to C, with a Python front end.
+LAS and LAZ point clouds, read and written: a port of
+[LASzip](https://github.com/LASzip/LASzip) to C, with a Python front end.
 
-Every LAZ point format and every LASzip item version is supported, and decoding
-is verified against laszip itself, field for field.
+Every LAZ point format and every LASzip item version is supported in both
+directions, and both are verified against laszip itself, field for field.
 
 ```python
 from lazpy import Reader
@@ -20,15 +20,44 @@ with Reader("cloud.laz") as reader:
     x, y, z = reader.scale(point)   # georeferenced floats
 ```
 
+## Writing
+
+```python
+from lazpy import Reader, Writer
+
+# thin a survey down to its ground returns, still compressed
+with Reader("cloud.laz") as reader, \
+     Writer("ground.laz", point_format=reader.point_format,
+            scales=reader.scales, offsets=reader.offsets) as writer:
+    for point in reader:
+        if point.classification == 2:
+            writer.write(point)
+```
+
+Points can also be built from nothing:
+
+```python
+from lazpy import Point, Writer
+
+with Writer("out.laz", point_format=1, scales=(0.01, 0.01, 0.01)) as writer:
+    writer.write(Point(X=125_000, Y=473_000, Z=1_200,
+                       gps_time=356_000.5, classification=2,
+                       return_number=1, number_of_returns=1))
+```
+
+The header, the LASzip VLR and the chunk table are the writer's business. The
+point count, the counts by return number and the bounding box are filled in
+when the file is closed, which is why the output has to be seekable; anything
+else can be set through `writer.header` until then.
+
+The compressor follows the file name — `.las` writes plain LAS — and the item
+version follows the point format, as laszip's own default does: v2 for formats
+0–5, v3 for 6–10. `laz_version=` overrides it, and `chunk_size=` sets how many
+points share a chunk, which is what random access on the way back in costs.
+
 ## Status
 
-Reading is complete. Writing is under way: the entropy coder is bidirectional,
-every item writer is in place — v1 and v2 for point formats 0–5, the layered v3
-and v4 for 6–10 — and so is the container above them, which cuts the stream
-into chunks and writes the chunk table. A whole point block comes out
-byte-identical to laszip's. Still missing is a `Writer` front end to put a
-header and a LASzip VLR in front of it, so lazpy cannot yet write a file end to
-end.
+Complete in both directions.
 
 | Point data format | Items | LAZ versions |
 |---|---|---|
@@ -40,10 +69,20 @@ pointwise-chunked and layered-chunked containers, fixed and adaptive chunk
 tables, files whose chunk table is missing because the compressor was
 interrupted, and selective decompression of LAS 1.4 attribute layers.
 
-Little-endian hosts only; the build fails there rather than mis-decode.
+`Writer` needs a seekable output, because the point count and the bounding box
+are only known once the last point is written and they belong at the front of
+the file. The point block below it does not: a chunk table written to a stream
+that cannot seek puts its own offset at the end of the file instead, and lazpy
+reads that variant back. Reaching it means driving `lazpy.PointWriter` and
+writing a header yourself.
 
-Anything that goes wrong reading a file raises `lazpy.LazError`, except an error
-from the underlying file object, which propagates as itself.
+Not yet: extended variable-length records, spatial indexing, and LAS 1.4
+compatibility mode.
+
+Little-endian hosts only; the build fails there rather than mis-code a point.
+
+Anything that goes wrong reading or writing a file raises `lazpy.LazError`,
+except an error from the underlying file object, which propagates as itself.
 
 ## Installing
 
@@ -86,16 +125,18 @@ against the pure-Python reference implementations in `tests/models.py`,
 vectors of its own: it is tested as the decoder's inverse, by round trip, and
 by requiring the C and pure-Python encoders to emit the same bytes.
 
-The item writers are pinned harder still. Each `ptN_v0.las` holds the same
-points as the `.laz` files beside it, so compressing those records has to
-reproduce those files byte for byte — which it does, for every legacy point
-format in both v1 and v2.
+The write side is pinned harder still. Each `ptN_v0.las` holds the same points
+as the `.laz` files beside it, so compressing those points has to reproduce
+those files byte for byte — which it does, for every point format, chunk table
+included, which is a far stronger claim than a round trip.
 
 The end-to-end tests read `testdata/`, which holds a small file for every point
 data format crossed with every item version that applies to it, and compare a
 checksum of every decoded field of every point against
 `testdata/reference_hashes.txt` — values produced by laszip itself. A single
-wrong bit anywhere changes the hash.
+wrong bit anywhere changes the hash. The same checksums are the oracle for
+writing: a file lazpy writes and reads back has to reproduce the checksum of
+the file its points came from, for all 33 format × version combinations.
 
 ## Verification
 
@@ -109,6 +150,18 @@ lazpy and comparing every field of every point:
   checksum identical to laszip's.
 - **Random access** lands on the same point a sequential read would, forwards,
   backwards, repeated, and across chunk boundaries, for all 33 files.
+
+And by handing laszip what lazpy wrote:
+
+- **33 format × version combinations** written by lazpy — every point format
+  uncompressed, and at each item version it has — open in laszip with no error
+  and no warning, and decode to the checksum of the file their points came
+  from.
+- **Byte-identical output**: given laszip's own points, chunk size and item
+  version, the point block lazpy produces is the one laszip produced, chunk
+  table and all.
+- **Non-seekable output** — where the chunk table's offset is appended rather
+  than patched in — reads back correctly in both laszip and lazpy.
 
 `tools/` holds the harness:
 
