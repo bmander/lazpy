@@ -597,21 +597,32 @@ class Writer:
     LASZIP_VERSION = (3, 5, 1)
 
     def __init__(self, filename, point_format, *, scales=(0.01, 0.01, 0.01),
-                 offsets=(0.0, 0.0, 0.0), compressed=None, laz_version=None,
-                 chunk_size=50000, num_extra_bytes=0, version_minor=None,
-                 system_identifier=b'', generating_software=None,
+                 offsets=(0.0, 0.0, 0.0), compressed=None, compressor=None,
+                 laz_version=None, chunk_size=50000, num_extra_bytes=0,
+                 version_minor=None, system_identifier=b'',
+                 generating_software=None, vlr_description=b'lazpy',
                  file_creation=(0, 0)):
         """Open *filename* for writing points of *point_format*.
 
         ``compressed`` defaults to LAZ unless the name ends in ``.las``.
-        ``laz_version`` picks the LASzip item encoding: 1 or 2 for point
-        formats 0-5, 3 or 4 for 6-10, defaulting to what laszip itself would
-        choose. ``version_minor`` picks the LAS version, defaulting to the
-        oldest one that can describe the point format.
+        ``compressor`` picks which container the points go in, defaulting to
+        the chunked one for the point format; ``laz_version`` picks the LASzip
+        item encoding, 1 or 2 for point formats 0-5 and 3 or 4 for 6-10,
+        defaulting to what laszip itself would choose. Both are meaningless
+        for an uncompressed file and rejected there. ``version_minor`` picks
+        the LAS version, defaulting to the oldest one that can describe the
+        point format.
+
+        ``chunk_size`` is how many points share a chunk, which is what random
+        access costs on the way back in. ``0xFFFFFFFF`` leaves the boundaries
+        to the caller, who ends each chunk with ``chunk()``.
 
         ``scales`` and ``offsets`` are how the integer coordinates of a point
         become georeferenced ones; they are recorded in the header and applied
         to nothing here, since points are written as they are given.
+
+        ``system_identifier``, ``generating_software`` and ``vlr_description``
+        are free text the file carries about its own provenance.
         """
         self.fp = None
         self.header = None
@@ -642,18 +653,23 @@ class Writer:
         if self.compressed:
             if laz_version is None:
                 laz_version = 3 if point14 else 2      # laszip's own default
+            if compressor is None:
+                compressor = (Compressor.LAYERED_CHUNKED if point14
+                              else Compressor.POINTWISE_CHUNKED)
             self._check_laz_version(laz_version, point14)
+            self._check_compressor(compressor, point14)
             self.items = _versioned_items(self.items, laz_version)
-            # the layered container exists for the LAS 1.4 items and only them
-            self.compressor = (Compressor.LAYERED_CHUNKED if point14
-                               else Compressor.POINTWISE_CHUNKED)
         else:
             if laz_version not in (None, 0):
                 raise ValueError("an uncompressed file has no item version")
+            if compressor not in (None, Compressor.NONE):
+                raise ValueError("an uncompressed file has no compressor")
             laz_version = 0
-            self.compressor = Compressor.NONE
+            compressor = Compressor.NONE
         self.laz_version = laz_version
+        self.compressor = Compressor(compressor)
         self.chunk_size = chunk_size
+        self.vlr_description = vlr_description
 
         # built before the header, because the header records how far past
         # itself the points begin
@@ -694,6 +710,19 @@ class Writer:
             raise UnsupportedFileError(
                 f"LASzip item version {laz_version} is not one of "
                 f"{allowed} for this point format")
+
+    @staticmethod
+    def _check_compressor(compressor, point14):
+        """The LAS 1.4 items are layered and need the container that carries
+        layers; the legacy items cannot use it. POINTWISE is LASzip's original
+        container, which compresses the whole file as one stream: no chunk
+        table, and so no random access on the way back in."""
+        allowed = ((Compressor.LAYERED_CHUNKED,) if point14 else
+                   (Compressor.POINTWISE, Compressor.POINTWISE_CHUNKED))
+        if compressor not in allowed:
+            raise UnsupportedFileError(
+                f"compressor {compressor} is not one of "
+                f"{tuple(c.name for c in allowed)} for this point format")
 
     def _open(self, filename):
         if hasattr(filename, 'write'):
@@ -799,7 +828,7 @@ class Writer:
             'user_id': LASZIP_VLR_USER_ID,
             'record_id': LASZIP_VLR_RECORD_ID,
             'record_length_after_header': len(record),
-            'description': b'lazpy',
+            'description': self.vlr_description,
         }) + record
 
     # -- writing ---------------------------------------------------------

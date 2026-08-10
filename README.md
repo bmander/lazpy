@@ -52,8 +52,24 @@ else can be set through `writer.header` until then.
 
 The compressor follows the file name — `.las` writes plain LAS — and the item
 version follows the point format, as laszip's own default does: v2 for formats
-0–5, v3 for 6–10. `laz_version=` overrides it, and `chunk_size=` sets how many
-points share a chunk, which is what random access on the way back in costs.
+0–5, v3 for 6–10. `laz_version=` overrides it.
+
+`chunk_size=` sets how many points share a chunk, which is what random access
+on the way back in costs. `chunk_size=0xFFFFFFFF` leaves the boundaries to you
+instead:
+
+```python
+with Writer("out.laz", point_format=1, chunk_size=0xFFFFFFFF) as writer:
+    for flight_line in flight_lines:
+        for point in flight_line:
+            writer.write(point)
+        writer.chunk()          # end this chunk here
+```
+
+`compressor=` picks the container. It defaults to the chunked one, and
+`Compressor.POINTWISE` selects LASzip's original instead — the whole file as
+one stream, no chunk table, and so no random access when it is read back.
+Point formats 6–10 have only the layered container and take no choice.
 
 ## Status
 
