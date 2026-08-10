@@ -615,7 +615,9 @@ class Writer:
 
         ``chunk_size`` is how many points share a chunk, which is what random
         access costs on the way back in. ``0xFFFFFFFF`` leaves the boundaries
-        to the caller, who ends each chunk with ``chunk()``.
+        to the caller, who ends each chunk with ``chunk()``. It is recorded in
+        the VLR whatever the container, as laszip records it, but POINTWISE
+        has no chunks for it to describe.
 
         ``scales`` and ``offsets`` are how the integer coordinates of a point
         become georeferenced ones; they are recorded in the header and applied
@@ -653,11 +655,8 @@ class Writer:
         if self.compressed:
             if laz_version is None:
                 laz_version = 3 if point14 else 2      # laszip's own default
-            if compressor is None:
-                compressor = (Compressor.LAYERED_CHUNKED if point14
-                              else Compressor.POINTWISE_CHUNKED)
             self._check_laz_version(laz_version, point14)
-            self._check_compressor(compressor, point14)
+            compressor = self._resolve_compressor(compressor, point14)
             self.items = _versioned_items(self.items, laz_version)
         else:
             if laz_version not in (None, 0):
@@ -667,13 +666,13 @@ class Writer:
             laz_version = 0
             compressor = Compressor.NONE
         self.laz_version = laz_version
-        self.compressor = Compressor(compressor)
+        self.compressor = compressor
         self.chunk_size = chunk_size
-        self.vlr_description = vlr_description
 
         # built before the header, because the header records how far past
         # itself the points begin
-        vlr = self._pack_laszip_vlr() if self.compressed else b''
+        vlr = (self._pack_laszip_vlr(vlr_description) if self.compressed
+               else b'')
 
         self._open(filename)
         try:
@@ -712,17 +711,30 @@ class Writer:
                 f"{allowed} for this point format")
 
     @staticmethod
-    def _check_compressor(compressor, point14):
-        """The LAS 1.4 items are layered and need the container that carries
-        layers; the legacy items cannot use it. POINTWISE is LASzip's original
-        container, which compresses the whole file as one stream: no chunk
-        table, and so no random access on the way back in."""
+    def _resolve_compressor(compressor, point14):
+        """The container to put the points in, defaulted and checked together
+        so the rule behind both is written once.
+
+        The LAS 1.4 items are layered and need the container that carries
+        layers; the legacy items cannot use it. Of the two containers the
+        legacy items do have, POINTWISE is LASzip's original: the whole file
+        as one stream, no chunk table, and so no random access on the way back
+        in -- which is why the chunked one leads and is the default.
+
+        Unlike the item-version check beside this, the mismatch it refuses is
+        not merely inconvenient: laz_writepoint_setup refuses it too, because
+        a container and its writers that disagree about layering would call
+        through a hook that is not there.
+        """
         allowed = ((Compressor.LAYERED_CHUNKED,) if point14 else
-                   (Compressor.POINTWISE, Compressor.POINTWISE_CHUNKED))
+                   (Compressor.POINTWISE_CHUNKED, Compressor.POINTWISE))
+        if compressor is None:
+            return allowed[0]
         if compressor not in allowed:
             raise UnsupportedFileError(
-                f"compressor {compressor} is not one of "
+                f"compressor {Compressor(compressor).name} is not one of "
                 f"{tuple(c.name for c in allowed)} for this point format")
+        return Compressor(compressor)
 
     def _open(self, filename):
         if hasattr(filename, 'write'):
@@ -803,7 +815,7 @@ class Writer:
         return b''.join(pack_format(fmt, header)
                         for fmt in header_formats(version_minor))
 
-    def _pack_laszip_vlr(self):
+    def _pack_laszip_vlr(self, description):
         """The LASzip VLR, the inverse of Reader._parse_laszip_record."""
         major, minor, revision = self.LASZIP_VERSION
         record = pack_format(LASZIP_RECORD_FORMAT, {
@@ -828,7 +840,7 @@ class Writer:
             'user_id': LASZIP_VLR_USER_ID,
             'record_id': LASZIP_VLR_RECORD_ID,
             'record_length_after_header': len(record),
-            'description': self.vlr_description,
+            'description': description,
         }) + record
 
     # -- writing ---------------------------------------------------------

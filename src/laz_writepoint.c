@@ -84,6 +84,22 @@ BOOL laz_writepoint_setup(LazWritePoint *wp, U32 num_items, const LazItem *items
                           items[i].type, items[i].version);
                 return LAZ_FALSE;
             }
+            /*
+             * The container and its writers have to agree about layering, and
+             * the vtable is where a writer says which it is: a layered writer
+             * buffers per layer and hands the bytes over through these two
+             * hooks, a pointwise one encodes straight into the shared coder
+             * and has neither. Closing a layered chunk over writers that lack
+             * the hooks would call through a NULL; a layered writer in a
+             * pointwise chunk would buffer bytes nothing ever emits.
+             */
+            if ((wp->writers_compressed[i]->chunk_sizes != NULL) !=
+                (wp->layered_las14_compression != LAZ_FALSE)) {
+                set_error(wp, "item type %u version %u cannot be written by "
+                          "compressor %u", items[i].type, items[i].version,
+                          compressor);
+                return LAZ_FALSE;
+            }
         }
         if (compressor != LAZ_COMPRESSOR_POINTWISE) {
             if (chunk_size) wp->chunk_size = chunk_size;
