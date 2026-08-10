@@ -21,7 +21,9 @@ c++ -O2 -std=c++17 -o mklaz mklaz.cpp -I$LZ/src $INC $LIB
 
 ## lazdump
 
-Decodes a LAS/LAZ file with LASzip and reports what it got.
+Decodes a LAS/LAZ file with LASzip and reports what it got. It asks for LAS 1.4
+compatibility mode, as lazpy always applies it, so a disguised 1.4 file is
+reported as the file it stands in for; ordinary files are unaffected.
 
 ```bash
 ./lazdump cloud.laz reference.txt [max_points]   # one text line per point
@@ -36,16 +38,25 @@ DLL always picks the default item version for a point type and the whole point
 is to exercise v1 and v4 as well.
 
 ```bash
-./mklaz <point_type 0-10> <version 0-4> <npoints> <chunk_size> out.laz
+./mklaz <point_type 0-10> <version 0-4> <npoints> <chunk_size> out.laz [--compat]
 ```
 
 Version 0 writes uncompressed LAS. A chunk size of 0 selects LASzip's original
 `POINTWISE` container -- the whole file as one stream, no chunk table -- which
 only exists for point types 0-5.
 
+`--compat` writes a LAS 1.4 point type (6-10) in LAS 1.4 compatibility mode: a
+legacy file whose points carry their 1.4-only fields in extra bytes. That path
+goes through the public DLL instead, since compatibility mode is the DLL's --
+it builds the two records describing the disguise and folds each point into it
+-- so the item version is whatever the DLL picks and only 0 and 2 are on offer.
+
 The generated points deliberately sweep return numbers, scanner channels,
 classification flags and GPS-time patterns so the rare branches of each coder
-are reached.
+are reached. In compatibility mode they also sweep past what the legacy record
+can hold -- classifications above 31, return numbers above 7, scan angles the
+one-byte rank saturates on -- so the fields that travel in the extra bytes
+carry something.
 
 ## compare_with_laszip.py
 
@@ -71,6 +82,12 @@ done
 # non-chunked variants; POINTWISE predates the 1.4 point types
 for pt in 0 1 2 3 4 5; do
   ./mklaz "$pt" 1 500 0 "../testdata/pt${pt}_v1_pointwise.laz"
+done
+
+# the same 1.4 point types again, disguised as legacy ones
+for pt in 6 7 8 9 10; do
+  ./mklaz "$pt" 0 500 137 "../testdata/pt${pt}_compat_v0.las" --compat
+  ./mklaz "$pt" 2 500 137 "../testdata/pt${pt}_compat_v2.laz" --compat
 done
 
 : > ../testdata/reference_hashes.txt
