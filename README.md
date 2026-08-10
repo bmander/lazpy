@@ -3,8 +3,7 @@
 LAS and LAZ point clouds, read and written: a port of
 [LASzip](https://github.com/LASzip/LASzip) to C, with a Python front end.
 
-Every LAZ point format and every LASzip item version is supported in both
-directions.
+Every LAZ point format and every LASzip item version is supported for both read and write.
 
 ## Installing
 
