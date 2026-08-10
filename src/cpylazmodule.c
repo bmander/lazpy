@@ -1286,13 +1286,65 @@ typedef struct {
     PyObject *fp;
     LazPoint point;
     U8 *extra_bytes;
-    U32 num_extra_bytes;
+    U32 raw_extra_bytes;    /* what the item layout decodes */
+    U32 num_extra_bytes;    /* what a caller sees; less in compatibility mode */
+    /* LAS 1.4 compatibility mode: where in the extra bytes the packed-away
+     * 1.4 fields live, or -1 for start_NIR_band when there is no NIR band.
+     * compat is false and the starts are meaningless for an ordinary file. */
+    BOOL compat;
+    I32 start_scan_angle;
+    I32 start_extended_returns;
+    I32 start_classification;
+    I32 start_flags_and_channel;
+    I32 start_NIR_band;
     PyObject *point_view;
     BOOL ready;
     U64 index;              /* number of points read so far */
 } ReaderObject;
 
 static PyTypeObject Reader_Type;
+
+/*
+ * Reconstitute a LAS 1.4 point that was written as a legacy one.
+ *
+ * A LAS 1.4 compatibility-mode file stores a format 6-10 point as a format
+ * 1/3/4/5 point plus five (or seven, with a NIR band) extra bytes holding what
+ * the legacy record cannot express. Rebuilding the real point means adding
+ * those back to what the legacy fields already carry: the scan angle is a
+ * remainder on top of the quantized rank, the return numbers and the
+ * classification are increments on top of the narrow legacy values, and the
+ * classification flags are the legacy three plus the overlap bit.
+ *
+ * This is laszip_read_point()'s recoding step in laszip_dll.cpp, and the
+ * inverse of what laszip_write_point() does on the way in. The truncating
+ * assignments into the 4-bit return-number fields and the wrapping one into
+ * extended_classification are laszip's too, not an oversight here.
+ */
+static void reader_recode_compat(ReaderObject *self)
+{
+    LazPoint *p = &self->point;
+    const U8 *extra = self->extra_bytes;
+    I16 scan_angle_remainder;
+    U8 extended_returns = extra[self->start_extended_returns];
+    U8 classification = extra[self->start_classification];
+    U8 flags_and_channel = extra[self->start_flags_and_channel];
+
+    memcpy(&scan_angle_remainder, extra + self->start_scan_angle, 2);
+    if (self->start_NIR_band >= 0)
+        memcpy(&p->rgb[3], extra + self->start_NIR_band, 2);
+
+    p->extended_scan_angle = (I16)(scan_angle_remainder +
+        I16_QUANTIZE(((F32)p->scan_angle_rank) / 0.006f));
+    p->extended_return_number =
+        ((extended_returns >> 4) & 0x0F) + p->return_number;
+    p->extended_number_of_returns =
+        (extended_returns & 0x0F) + p->number_of_returns;
+    p->extended_classification = classification + p->classification;
+    p->extended_scanner_channel = (flags_and_channel >> 1) & 0x03;
+    p->extended_classification_flags = ((flags_and_channel & 0x01) << 3)
+        | (p->withheld_flag << 2) | (p->keypoint_flag << 1) | p->synthetic_flag;
+    p->extended_point_type = 1;
+}
 
 static void Reader_dealloc(ReaderObject *self)
 {
@@ -1343,20 +1395,68 @@ static int parse_items(PyObject *seq, LazItem **out, U32 *out_n)
     return 0;
 }
 
+/*
+ * The `compatibility` argument: the five attribute starts, as
+ * lazpy/__init__.py read them out of the "extra bytes" VLR, or None.
+ *
+ * Only start_NIR_band may be absent, as -1. The bytes a start addresses have
+ * to be inside the extra bytes the item layout actually decodes, since the
+ * recoding reads them for every point with no further checking.
+ */
+static int parse_compatibility(ReaderObject *self, PyObject *obj)
+{
+    I32 starts[5];
+    int i;
+
+    if (obj == NULL || obj == Py_None) return 0;
+    if (!PyArg_ParseTuple(obj, "iiiii", &starts[0], &starts[1], &starts[2],
+                          &starts[3], &starts[4]))
+        return -1;
+
+    self->num_extra_bytes = self->raw_extra_bytes;
+    for (i = 0; i < 5; i++) {
+        /* two bytes for the scan angle remainder and the NIR band, one for
+         * each of the three that are packed into a byte apiece */
+        I32 size = (i == 0 || i == 4) ? 2 : 1;
+        if (i == 4 && starts[i] < 0) continue;          /* no NIR band */
+        /* by subtraction, so a start near U32_MAX cannot wrap past the end */
+        if (starts[i] < 0 || (U32)size > self->raw_extra_bytes ||
+            (U32)starts[i] > self->raw_extra_bytes - (U32)size) {
+            PyErr_SetString(LazErrorType, "a LAS 1.4 compatibility attribute "
+                            "lies outside the extra bytes");
+            return -1;
+        }
+        /* everything from the first compatibility attribute on belongs to the
+         * reconstituted point rather than to the caller's extra bytes */
+        if ((U32)starts[i] < self->num_extra_bytes)
+            self->num_extra_bytes = (U32)starts[i];
+    }
+
+    self->compat = LAZ_TRUE;
+    self->start_scan_angle = starts[0];
+    self->start_extended_returns = starts[1];
+    self->start_classification = starts[2];
+    self->start_flags_and_channel = starts[3];
+    self->start_NIR_band = starts[4];
+    return 0;
+}
+
 static int Reader_tp_init(ReaderObject *self, PyObject *args, PyObject *kwds)
 {
-    PyObject *fp, *items_obj;
+    PyObject *fp, *items_obj, *compatibility = NULL;
     unsigned int compressor, coder = 0, chunk_size = 0;
     unsigned int selective = LAZ_DECOMPRESS_SELECTIVE_ALL;
     long long start_offset = -1;
     LazItem *items = NULL;
     U32 num_items = 0;
     static char *kwlist[] = {"fp", "items", "compressor", "coder", "chunk_size",
-                             "start_offset", "decompress_selective", NULL};
+                             "start_offset", "decompress_selective",
+                             "compatibility", NULL};
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "OOI|IILI", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "OOI|IILIO", kwlist,
                                      &fp, &items_obj, &compressor, &coder,
-                                     &chunk_size, &start_offset, &selective))
+                                     &chunk_size, &start_offset, &selective,
+                                     &compatibility))
         return -1;
 
     if (parse_items(items_obj, &items, &num_items) < 0) return -1;
@@ -1372,11 +1472,15 @@ static int Reader_tp_init(ReaderObject *self, PyObject *args, PyObject *kwds)
     }
     PyMem_Free(items);
 
-    self->num_extra_bytes = self->rp.num_extra_bytes;
-    if (self->num_extra_bytes) {
-        self->extra_bytes = (U8 *)calloc(self->num_extra_bytes, 1);
+    self->raw_extra_bytes = self->rp.num_extra_bytes;
+    self->num_extra_bytes = self->raw_extra_bytes;
+    if (self->raw_extra_bytes) {
+        self->extra_bytes = (U8 *)calloc(self->raw_extra_bytes, 1);
         if (!self->extra_bytes) { PyErr_NoMemory(); return -1; }
     }
+    /* may trim num_extra_bytes: the compatibility attributes are decoded but
+     * are not the caller's extra bytes */
+    if (parse_compatibility(self, compatibility) < 0) return -1;
     self->point.num_extra_bytes = (I32)self->num_extra_bytes;
     self->point.extra_bytes = self->extra_bytes;
 
@@ -1436,6 +1540,7 @@ static PyObject *Reader_read(ReaderObject *self, PyObject *Py_UNUSED(i))
     ok = laz_readpoint_read(&self->rp, &self->point, self->extra_bytes);
 
     if (!ok) return reader_error(self);
+    if (self->compat) reader_recode_compat(self);
     self->index++;
     Py_INCREF(self->point_view);
     return self->point_view;
@@ -1464,6 +1569,7 @@ static PyObject *Reader_checksum(ReaderObject *self, PyObject *args)
         int i;
 
         if (!laz_readpoint_read(&self->rp, p, self->extra_bytes)) { ok = LAZ_FALSE; break; }
+        if (self->compat) reader_recode_compat(self);
 
         memcpy(rec + 0, &p->X, 4);
         memcpy(rec + 4, &p->Y, 4);
@@ -1605,6 +1711,7 @@ static PyObject *Reader_read_into(ReaderObject *self, PyObject *args)
             ok = LAZ_FALSE;
             break;
         }
+        if (self->compat) reader_recode_compat(self);
         for (i = 0; i < n; i++) {
             memcpy(cols[i].dst, cols[i].src, (size_t)cols[i].size);
             cols[i].dst += cols[i].size;      /* on to this column's next */
@@ -1694,7 +1801,8 @@ static PyGetSetDef Reader_getset[] = {
     {"index", (getter)Reader_get_index, NULL, NULL, NULL},
     {"chunk_starts", (getter)Reader_get_chunk_starts, NULL, NULL, NULL},
     {"num_extra_bytes", (getter)Reader_get_num_extra_bytes, NULL,
-     "size of the extra-bytes buffer implied by the item layout", NULL},
+     "how many extra bytes a decoded point carries -- the item layout's, less "
+     "any the LAS 1.4 compatibility attributes take up", NULL},
     {"warning", (getter)Reader_get_warning, NULL, NULL, NULL},
     {NULL}
 };

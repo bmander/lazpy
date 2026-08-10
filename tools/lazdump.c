@@ -35,6 +35,15 @@ int main(int argc, char** argv)
     laszip_POINTER reader;
     if (laszip_create(&reader)) { fprintf(stderr, "create failed\n"); return 1; }
 
+    /* Ask for LAS 1.4 compatibility mode, which lazpy always applies: a legacy
+     * file that turns out to be a disguised LAS 1.4 one is then reported as
+     * the 1.4 file it is, with its points put back together. Files that are
+     * not disguised are unaffected. */
+    if (laszip_request_compatibility_mode(reader, 1)) {
+        fprintf(stderr, "requesting compatibility mode failed\n");
+        return 1;
+    }
+
     laszip_BOOL is_compressed = 0;
     if (laszip_open_reader(reader, argv[1], &is_compressed)) {
         laszip_CHAR* err; laszip_get_error(reader, &err);
@@ -50,6 +59,25 @@ int main(int argc, char** argv)
     /* LAS 1.4 zeroes the legacy count for the extended point formats */
     laszip_I64 npoints = header->number_of_point_records;
     if (npoints == 0) npoints = (laszip_I64)header->extended_number_of_point_records;
+
+    /*
+     * How many extra bytes a point really has.
+     *
+     * Normally that is point->num_extra_bytes, but a compatibility-mode file
+     * leaves it as the raw item size: the five (or seven) bytes the LAS 1.4
+     * fields travelled in are still in the buffer even though the upgraded
+     * header no longer counts them, and laszip never trims it. Believing the
+     * header is what reports the extra bytes the file is actually about, and
+     * is what lazpy hands back.
+     */
+    static const int base_size[11] =
+        { 20, 28, 26, 34, 57, 63, 30, 36, 38, 59, 67 };
+    int num_extra_bytes = point->num_extra_bytes;
+    if (header->point_data_format <= 10) {
+        num_extra_bytes = (int)header->point_data_record_length
+                          - base_size[header->point_data_format];
+        if (num_extra_bytes < 0) num_extra_bytes = 0;
+    }
 
     FILE* out = NULL;
     if (!hash_mode) {
@@ -112,8 +140,8 @@ int main(int argc, char** argv)
             memcpy(rec + 41, point->wave_packet, 23);   /* first 23 of 29 */
             hash = fnv1a(hash, rec, 64);
             hash = fnv1a(hash, point->wave_packet + 23, 6);
-            if (point->num_extra_bytes > 0)
-                hash = fnv1a(hash, point->extra_bytes, point->num_extra_bytes);
+            if (num_extra_bytes > 0)
+                hash = fnv1a(hash, point->extra_bytes, num_extra_bytes);
             continue;
         }
 
@@ -144,11 +172,11 @@ int main(int argc, char** argv)
             (int)point->extended_scan_angle,
             (unsigned)point->extended_return_number,
             (unsigned)point->extended_number_of_returns,
-            (unsigned)point->num_extra_bytes);
+            (unsigned)num_extra_bytes);
 
         for (int b = 0; b < 29; b++)
             fprintf(out, " %u", (unsigned)point->wave_packet[b]);
-        for (int b = 0; b < point->num_extra_bytes; b++)
+        for (int b = 0; b < num_extra_bytes; b++)
             fprintf(out, " %u", (unsigned)point->extra_bytes[b]);
         fprintf(out, "\n");
     }

@@ -138,8 +138,22 @@ wkt = reader.header["extended_variable_length_records"][(b"LASF_Projection", 211
 wkt["data"]     # read from the file here, not when it was opened
 ```
 
-Not yet: *writing* extended variable-length records, spatial indexing, and LAS
-1.4 compatibility mode.
+Ordinary variable-length records are keyed the same way, in
+`header["variable_length_records"]`.
+
+LAS 1.4 compatibility mode is read: a file that says it is LAS 1.2 or 1.3 but
+carries a `lascompatible` record is a LAS 1.4 file in disguise — its points are
+written in a legacy format with the 1.4-only fields packed into extra bytes.
+lazpy puts them back together, so such a file reads as the 1.4 file it stands
+in for: `version_minor` 4, `point_format` 6–10, the extended fields populated,
+and the extra bytes that carried them no longer among a point's own. This is
+what laszip's `laszip_request_compatibility_mode()` does, and lazpy always does
+it. The one variant left alone is the LAS 1.5 form, which lazpy has no header
+for. Note that `header_size` and `offset_to_point_data` then describe the LAS
+1.4 file being reported rather than the bytes on disk, as they do in laszip.
+
+Not yet: *writing* extended variable-length records or compatibility-mode
+files, and spatial indexing.
 
 Anything that goes wrong reading or writing a file raises `lazpy.LazError`,
 except an error from the underlying file object, which propagates as itself.
