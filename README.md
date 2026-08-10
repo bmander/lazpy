@@ -83,7 +83,7 @@ else can be set through `writer.header` until then.
 The compressor follows the file name — `.las` writes plain LAS — and the item
 version follows the point format, as laszip's own default does: v2 for formats
 0–5, v3 for 6–10. `laz_version=` overrides it. `chunk_size=` sets how many
-points share a chunk, which is what random access on the way back in costs.
+points share a chunk.
 
 ## Example: LAZ to GeoTIFF
 
