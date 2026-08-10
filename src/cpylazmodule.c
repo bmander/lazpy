@@ -840,7 +840,7 @@ static PyTypeObject IntComp_Type = {
 /* ================================================================= Point == */
 
 /*
- * A view onto a decoded point.
+ * A decoded point -- either a view onto one, or one of its own.
  *
  * PointReader.read() hands back the reader's own Point rather than a fresh
  * object, so reading 40M points does not allocate 40M objects; call copy() to
@@ -851,6 +851,12 @@ static PyTypeObject IntComp_Type = {
  * reader is destroyed gets detached first (see Reader_dealloc), copying the
  * last decoded values into its own storage, so a stale Point is frozen rather
  * than dangling.
+ *
+ * Points are also writable, because a file has to be written from something:
+ * Point(X=..., ...) builds one from nothing, and every attribute assigns. A
+ * point that is still viewing a reader's buffer detaches on the first
+ * assignment, so writing to what read() returned modifies a copy and never the
+ * reader's own point.
  */
 typedef struct {
     PyObject_HEAD
@@ -977,33 +983,229 @@ static PyObject *Point_get_extra_bytes(PointObject *self, void *c)
     return PyBytes_FromStringAndSize((const char *)self->extra, self->num_extra);
 }
 
+/*
+ * Setters. A Point assigned to writes through to whatever it is looking at,
+ * which for the one a reader hands back is that reader's own point -- the same
+ * buffer the next read() overwrites. That is the contract read() already has,
+ * and the alternative is worse: quietly detaching would leave the reader
+ * holding a Point that no longer follows it.
+ *
+ * Most of these fields are narrower than the C type holding them -- five bits
+ * of classification, three of return number -- so each carries the range it
+ * accepts and refuses anything outside it rather than truncating silently.
+ */
+static int point_settable(PyObject *v)
+{
+    if (v != NULL) return 0;
+    PyErr_SetString(PyExc_AttributeError, "cannot delete a point attribute");
+    return -1;
+}
+
+static int point_uvalue(PyObject *v, unsigned long max, unsigned long *out)
+{
+    unsigned long value;
+
+    if (point_settable(v) < 0) return -1;
+    value = PyLong_AsUnsignedLong(v);
+    if (value == (unsigned long)-1 && PyErr_Occurred()) return -1;
+    if (value > max) {
+        PyErr_Format(PyExc_ValueError, "%lu is out of range (0 to %lu)", value, max);
+        return -1;
+    }
+    *out = value;
+    return 0;
+}
+
+static int point_ivalue(PyObject *v, long min, long max, long *out)
+{
+    long value;
+
+    if (point_settable(v) < 0) return -1;
+    value = PyLong_AsLong(v);
+    if (value == -1 && PyErr_Occurred()) return -1;
+    if (value < min || value > max) {
+        PyErr_Format(PyExc_ValueError, "%ld is out of range (%ld to %ld)",
+                     value, min, max);
+        return -1;
+    }
+    *out = value;
+    return 0;
+}
+
+#define POINT_USETTER(name, max)                                               \
+    static int Point_set_##name(PointObject *self, PyObject *v, void *c)       \
+    {                                                                          \
+        unsigned long value;                                                   \
+        (void)c;                                                               \
+        if (point_uvalue(v, (max), &value) < 0) return -1;                     \
+        self->p->name = value;                                                 \
+        return 0;                                                              \
+    }
+#define POINT_ISETTER(name, min, max)                                          \
+    static int Point_set_##name(PointObject *self, PyObject *v, void *c)       \
+    {                                                                          \
+        long value;                                                            \
+        (void)c;                                                               \
+        if (point_ivalue(v, (min), (max), &value) < 0) return -1;              \
+        self->p->name = value;                                                 \
+        return 0;                                                              \
+    }
+
+POINT_ISETTER(X, I32_MIN, I32_MAX)
+POINT_ISETTER(Y, I32_MIN, I32_MAX)
+POINT_ISETTER(Z, I32_MIN, I32_MAX)
+POINT_USETTER(intensity, 0xFFFF)
+POINT_USETTER(return_number, 0x7)
+POINT_USETTER(number_of_returns, 0x7)
+POINT_USETTER(scan_direction_flag, 1)
+POINT_USETTER(edge_of_flight_line, 1)
+POINT_USETTER(classification, 0x1F)
+POINT_USETTER(synthetic_flag, 1)
+POINT_USETTER(keypoint_flag, 1)
+POINT_USETTER(withheld_flag, 1)
+POINT_ISETTER(scan_angle_rank, -128, 127)
+POINT_USETTER(user_data, 0xFF)
+POINT_USETTER(point_source_ID, 0xFFFF)
+POINT_ISETTER(extended_scan_angle, -32768, 32767)
+POINT_USETTER(extended_point_type, 0x3)
+POINT_USETTER(extended_scanner_channel, 0x3)
+POINT_USETTER(extended_classification_flags, 0xF)
+POINT_USETTER(extended_classification, 0xFF)
+POINT_USETTER(extended_return_number, 0xF)
+POINT_USETTER(extended_number_of_returns, 0xF)
+
+static int Point_set_gps_time(PointObject *self, PyObject *v, void *c)
+{
+    double value;
+    (void)c;
+    if (point_settable(v) < 0) return -1;
+    value = PyFloat_AsDouble(v);
+    if (value == -1.0 && PyErr_Occurred()) return -1;
+    self->p->gps_time = value;
+    return 0;
+}
+
+/* Three channels or four: NIR is only in point formats 8 and 10, and a
+ * three-channel assignment leaves it alone rather than guessing at zero. */
+static int Point_set_rgb(PointObject *self, PyObject *v, void *c)
+{
+    PyObject *seq;
+    Py_ssize_t n, i;
+    U16 channels[4];
+
+    (void)c;
+    if (point_settable(v) < 0) return -1;
+    seq = PySequence_Fast(v, "rgb must be a sequence of 3 or 4 channels");
+    if (!seq) return -1;
+    n = PySequence_Fast_GET_SIZE(seq);
+    if (n != 3 && n != 4) {
+        PyErr_Format(PyExc_ValueError, "rgb takes 3 or 4 channels, not %zd", n);
+        Py_DECREF(seq);
+        return -1;
+    }
+    for (i = 0; i < n; i++) {
+        unsigned long value = PyLong_AsUnsignedLong(PySequence_Fast_GET_ITEM(seq, i));
+        if (value == (unsigned long)-1 && PyErr_Occurred()) { Py_DECREF(seq); return -1; }
+        if (value > 0xFFFF) {
+            PyErr_Format(PyExc_ValueError, "channel %zd is out of range (0 to 65535)", i);
+            Py_DECREF(seq);
+            return -1;
+        }
+        channels[i] = (U16)value;
+    }
+    Py_DECREF(seq);
+
+    for (i = 0; i < n; i++) self->p->rgb[i] = channels[i];
+    return 0;
+}
+
+static int Point_set_wave_packet(PointObject *self, PyObject *v, void *c)
+{
+    char *data;
+    Py_ssize_t len;
+
+    (void)c;
+    if (point_settable(v) < 0) return -1;
+    if (PyBytes_AsStringAndSize(v, &data, &len) < 0) return -1;
+    if (len != 29) {
+        PyErr_Format(PyExc_ValueError, "a wave packet is 29 bytes, not %zd", len);
+        return -1;
+    }
+    memcpy(self->p->wave_packet, data, 29);
+    return 0;
+}
+
+/* The one attribute that can change how much storage a point needs, and so the
+ * one a reader's point cannot take freely: that buffer is the reader's, sized
+ * by the file's item layout. Same length, and it is written in place like any
+ * other field; a different length needs a point of one's own. */
+static int Point_set_extra_bytes(PointObject *self, PyObject *v, void *c)
+{
+    char *data;
+    Py_ssize_t len;
+    U8 *storage = NULL;
+
+    (void)c;
+    if (point_settable(v) < 0) return -1;
+    if (PyBytes_AsStringAndSize(v, &data, &len) < 0) return -1;
+    if (len > (Py_ssize_t)U32_MAX) {
+        PyErr_SetString(PyExc_ValueError, "too many extra bytes");
+        return -1;
+    }
+
+    if ((U32)len == self->num_extra) {
+        if (len) memcpy(self->extra, data, (size_t)len);
+        return 0;
+    }
+    if (self->extra != self->extra_storage) {
+        PyErr_Format(PyExc_ValueError,
+                     "this point's extra bytes belong to a reader and are %u "
+                     "bytes; copy() it to give it %zd", self->num_extra, len);
+        return -1;
+    }
+
+    if (len) {
+        storage = (U8 *)malloc((size_t)len);
+        if (!storage) { PyErr_NoMemory(); return -1; }
+        memcpy(storage, data, (size_t)len);
+    }
+    free(self->extra_storage);
+    self->extra_storage = storage;
+    self->extra = storage;
+    self->num_extra = (U32)len;
+    return 0;
+}
+
 static PyGetSetDef Point_getset[] = {
-    {"X", (getter)Point_get_X, NULL, "unscaled x", NULL},
-    {"Y", (getter)Point_get_Y, NULL, "unscaled y", NULL},
-    {"Z", (getter)Point_get_Z, NULL, "unscaled z", NULL},
-    {"intensity", (getter)Point_get_intensity, NULL, NULL, NULL},
-    {"return_number", (getter)Point_get_return_number, NULL, NULL, NULL},
-    {"number_of_returns", (getter)Point_get_number_of_returns, NULL, NULL, NULL},
-    {"scan_direction_flag", (getter)Point_get_scan_direction_flag, NULL, NULL, NULL},
-    {"edge_of_flight_line", (getter)Point_get_edge_of_flight_line, NULL, NULL, NULL},
-    {"classification", (getter)Point_get_classification, NULL, NULL, NULL},
-    {"synthetic_flag", (getter)Point_get_synthetic_flag, NULL, NULL, NULL},
-    {"keypoint_flag", (getter)Point_get_keypoint_flag, NULL, NULL, NULL},
-    {"withheld_flag", (getter)Point_get_withheld_flag, NULL, NULL, NULL},
-    {"scan_angle_rank", (getter)Point_get_scan_angle_rank, NULL, NULL, NULL},
-    {"user_data", (getter)Point_get_user_data, NULL, NULL, NULL},
-    {"point_source_ID", (getter)Point_get_point_source_ID, NULL, NULL, NULL},
-    {"extended_scan_angle", (getter)Point_get_extended_scan_angle, NULL, NULL, NULL},
-    {"extended_point_type", (getter)Point_get_extended_point_type, NULL, NULL, NULL},
-    {"extended_scanner_channel", (getter)Point_get_extended_scanner_channel, NULL, NULL, NULL},
-    {"extended_classification_flags", (getter)Point_get_extended_classification_flags, NULL, NULL, NULL},
-    {"extended_classification", (getter)Point_get_extended_classification, NULL, NULL, NULL},
-    {"extended_return_number", (getter)Point_get_extended_return_number, NULL, NULL, NULL},
-    {"extended_number_of_returns", (getter)Point_get_extended_number_of_returns, NULL, NULL, NULL},
-    {"gps_time", (getter)Point_get_gps_time, NULL, NULL, NULL},
-    {"rgb", (getter)Point_get_rgb, NULL, "(red, green, blue, nir)", NULL},
-    {"wave_packet", (getter)Point_get_wave_packet, NULL, NULL, NULL},
-    {"extra_bytes", (getter)Point_get_extra_bytes, NULL, NULL, NULL},
+#define POINT_GETSET(name, doc) \
+    {#name, (getter)Point_get_##name, (setter)Point_set_##name, doc, NULL}
+    POINT_GETSET(X, "unscaled x"),
+    POINT_GETSET(Y, "unscaled y"),
+    POINT_GETSET(Z, "unscaled z"),
+    POINT_GETSET(intensity, NULL),
+    POINT_GETSET(return_number, NULL),
+    POINT_GETSET(number_of_returns, NULL),
+    POINT_GETSET(scan_direction_flag, NULL),
+    POINT_GETSET(edge_of_flight_line, NULL),
+    POINT_GETSET(classification, NULL),
+    POINT_GETSET(synthetic_flag, NULL),
+    POINT_GETSET(keypoint_flag, NULL),
+    POINT_GETSET(withheld_flag, NULL),
+    POINT_GETSET(scan_angle_rank, NULL),
+    POINT_GETSET(user_data, NULL),
+    POINT_GETSET(point_source_ID, NULL),
+    POINT_GETSET(extended_scan_angle, NULL),
+    POINT_GETSET(extended_point_type, NULL),
+    POINT_GETSET(extended_scanner_channel, NULL),
+    POINT_GETSET(extended_classification_flags, NULL),
+    POINT_GETSET(extended_classification, NULL),
+    POINT_GETSET(extended_return_number, NULL),
+    POINT_GETSET(extended_number_of_returns, NULL),
+    POINT_GETSET(gps_time, NULL),
+    POINT_GETSET(rgb, "(red, green, blue, nir)"),
+    POINT_GETSET(wave_packet, NULL),
+    POINT_GETSET(extra_bytes, NULL),
+#undef POINT_GETSET
     {NULL}
 };
 
@@ -1012,6 +1214,39 @@ static PyMethodDef Point_methods[] = {
      "copy() -> Point  (detached from the reader's buffer)"},
     {NULL}
 };
+
+/* Owns its storage from the start, so no accessor has to wonder. */
+static PyObject *Point_tp_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    PointObject *o;
+
+    (void)args; (void)kwds;
+    o = PyObject_New(PointObject, type);
+    if (!o) return NULL;
+    memset(&o->storage, 0, sizeof(o->storage));
+    o->p = &o->storage;
+    o->extra = NULL;
+    o->extra_storage = NULL;
+    o->num_extra = 0;
+    return (PyObject *)o;
+}
+
+/* Point(X=1, classification=2, ...): every keyword is an attribute, so the
+ * accepted names are exactly the settable ones and nothing lists them twice. */
+static int Point_tp_init(PointObject *self, PyObject *args, PyObject *kwds)
+{
+    PyObject *key, *value;
+    Py_ssize_t pos = 0;
+
+    if (PyTuple_GET_SIZE(args) != 0) {
+        PyErr_SetString(PyExc_TypeError, "Point takes keyword arguments only");
+        return -1;
+    }
+    while (kwds && PyDict_Next(kwds, &pos, &key, &value)) {
+        if (PyObject_SetAttr((PyObject *)self, key, value) < 0) return -1;
+    }
+    return 0;
+}
 
 static PyObject *Point_repr(PointObject *self)
 {
@@ -1028,6 +1263,8 @@ static PyTypeObject Point_Type = {
     .tp_name = "lazpy._cpylaz.Point",
     .tp_basicsize = sizeof(PointObject),
     .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_new = Point_tp_new,
+    .tp_init = (initproc)Point_tp_init,
     .tp_dealloc = (destructor)Point_dealloc,
     .tp_getset = Point_getset,
     .tp_methods = Point_methods,
@@ -1369,6 +1606,11 @@ typedef struct {
     U8 *extra_bytes;
     BOOL ready;             /* clear before init finishes and after done() */
     U64 index;              /* number of points written so far */
+    /* what a LAS header cannot be finished without, tallied here because this
+     * is what sees every point: bounds are unscaled, and the return counts are
+     * indexed by return number, so entry 0 is the invalid one */
+    I32 min_xyz[3], max_xyz[3];
+    U64 by_return[16];
 } WriterObject;
 
 static void Writer_dealloc(WriterObject *self)
@@ -1462,31 +1704,101 @@ static PyObject *writer_error(WriterObject *self)
     return NULL;
 }
 
-static PyObject *Writer_write(WriterObject *self, PyObject *arg)
+/* Fills self->point from a record, as the matching reader would. */
+static int writer_take_record(WriterObject *self, PyObject *arg)
 {
     char *data;
     Py_ssize_t len;
+
+    if (PyBytes_AsStringAndSize(arg, &data, &len) < 0) return -1;
+    if (len != self->record_size) {
+        PyErr_Format(PyExc_ValueError, "point %llu is %zd bytes, expected %zd",
+                     (unsigned long long)self->index, len, self->record_size);
+        return -1;
+    }
+
+    laz_stream_array_reset(self->record, (const U8 *)data, len);
+    if (!laz_readpoint_read(&self->scatter, &self->point, self->extra_bytes)) {
+        if (!PyErr_Occurred())
+            PyErr_SetString(LazErrorType, self->scatter.last_error);
+        return -1;
+    }
+    return 0;
+}
+
+/*
+ * Fills self->point from another Point, by copying rather than by writing
+ * through the caller's: the LAS 1.4 flag below is stamped on whatever is about
+ * to be written, and a Point handed in from a reader is not ours to mark.
+ *
+ * A point carrying fewer extra bytes than the layout has is padded with zeros,
+ * which is what an unset field is everywhere else; more than the layout has is
+ * an error, because there is nowhere for them to go.
+ */
+static int writer_take_point(WriterObject *self, PointObject *point)
+{
+    U32 want = self->wp.num_extra_bytes;
+
+    if (point->num_extra > want) {
+        PyErr_Format(PyExc_ValueError,
+                     "point carries %u extra bytes, but the layout has room "
+                     "for %u", point->num_extra, want);
+        return -1;
+    }
+
+    self->point = *point->p;
+    /* the copy brought the other point's extra-bytes buffer with it */
+    self->point.num_extra_bytes = (I32)want;
+    self->point.extra_bytes = self->extra_bytes;
+    if (want) {
+        memcpy(self->extra_bytes, point->extra, point->num_extra);
+        memset(self->extra_bytes + point->num_extra, 0, want - point->num_extra);
+    }
+
+    /* point formats 6-10 are marked, everything else is not: a point built by
+     * hand has never been through a reader, and one copied from another file
+     * may have been through the wrong sort */
+    self->point.extended_point_type = 0;
+    laz_readpoint_init_point(&self->scatter, &self->point);
+    return 0;
+}
+
+/* The running header fields. Bounds start at the first point rather than at
+ * the extremes of I32, so a one-point file has bounds equal to that point. */
+static void writer_tally(WriterObject *self)
+{
+    const I32 xyz[3] = {self->point.X, self->point.Y, self->point.Z};
+    U32 return_number;
+    int i;
+
+    for (i = 0; i < 3; i++) {
+        if (self->index == 0 || xyz[i] < self->min_xyz[i]) self->min_xyz[i] = xyz[i];
+        if (self->index == 0 || xyz[i] > self->max_xyz[i]) self->max_xyz[i] = xyz[i];
+    }
+
+    return_number = self->point.extended_point_type
+                    ? self->point.extended_return_number
+                    : self->point.return_number;
+    self->by_return[return_number & 0xF]++;
+}
+
+static PyObject *Writer_write(WriterObject *self, PyObject *arg)
+{
+    int taken;
 
     if (!self->ready) {
         PyErr_SetString(PyExc_ValueError, "writer is closed");
         return NULL;
     }
-    if (PyBytes_AsStringAndSize(arg, &data, &len) < 0) return NULL;
-    if (len != self->record_size) {
-        PyErr_Format(PyExc_ValueError, "point %llu is %zd bytes, expected %zd",
-                     (unsigned long long)self->index, len, self->record_size);
-        return NULL;
-    }
 
-    laz_stream_array_reset(self->record, (const U8 *)data, len);
-    if (!laz_readpoint_read(&self->scatter, &self->point, self->extra_bytes)) {
-        if (PyErr_Occurred()) return NULL;
-        PyErr_SetString(LazErrorType, self->scatter.last_error);
-        return NULL;
-    }
+    taken = PyObject_TypeCheck(arg, &Point_Type)
+            ? writer_take_point(self, (PointObject *)arg)
+            : writer_take_record(self, arg);
+    if (taken < 0) return NULL;
 
     if (!laz_writepoint_write(&self->wp, &self->point, self->extra_bytes))
         return writer_error(self);
+    writer_tally(self);
     self->index++;
     Py_RETURN_NONE;
 }
@@ -1520,9 +1832,34 @@ static PyObject *Writer_get_index(WriterObject *self, void *c)
 static PyObject *Writer_get_number_chunks(WriterObject *self, void *c)
 { (void)c; return PyLong_FromUnsignedLong(self->wp.number_chunks); }
 
+static PyObject *Writer_get_bounds(WriterObject *self, void *c)
+{
+    (void)c;
+    if (self->index == 0) Py_RETURN_NONE;         /* nothing to bound */
+    return Py_BuildValue("(iiiiii)",
+                         self->min_xyz[0], self->min_xyz[1], self->min_xyz[2],
+                         self->max_xyz[0], self->max_xyz[1], self->max_xyz[2]);
+}
+
+static PyObject *Writer_get_points_by_return(WriterObject *self, void *c)
+{
+    PyObject *t;
+    int i;
+
+    (void)c;
+    t = PyTuple_New(16);
+    if (!t) return NULL;
+    for (i = 0; i < 16; i++) {
+        PyObject *v = PyLong_FromUnsignedLongLong(self->by_return[i]);
+        if (!v) { Py_DECREF(t); return NULL; }
+        PyTuple_SET_ITEM(t, i, v);
+    }
+    return t;
+}
+
 static PyMethodDef Writer_methods[] = {
     {"write", (PyCFunction)Writer_write, METH_O,
-     "write(record) -> None  (one point, as the bytes its items occupy on disk)"},
+     "write(point) -> None  (a Point, or the bytes its items occupy on disk)"},
     {"chunk", (PyCFunction)Writer_chunk, METH_NOARGS,
      "chunk() -> None  (close the open chunk; variable-size chunking only)"},
     {"done", (PyCFunction)Writer_done, METH_NOARGS,
@@ -1535,6 +1872,10 @@ static PyGetSetDef Writer_getset[] = {
      "number of points written so far", NULL},
     {"number_chunks", (getter)Writer_get_number_chunks, NULL,
      "number of chunks closed so far", NULL},
+    {"bounds", (getter)Writer_get_bounds, NULL,
+     "(min_x, min_y, min_z, max_x, max_y, max_z), unscaled, or None", NULL},
+    {"points_by_return", (getter)Writer_get_points_by_return, NULL,
+     "how many points carried each return number, 0 through 15", NULL},
     {NULL}
 };
 

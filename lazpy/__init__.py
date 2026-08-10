@@ -1,14 +1,17 @@
-"""Read LAS and LAZ point cloud files.
+"""Read and write LAS and LAZ point cloud files.
 
-Header and variable-length-record parsing happen here; everything from the
-first point onward is handled by the ``lazpy._cpylaz`` C extension, which is a
-port of LASzip's decompressor.
+Header and variable-length-record parsing and construction happen here;
+everything from the first point onward is handled by the ``lazpy._cpylaz`` C
+extension, which is a port of LASzip.
 
     >>> reader = Reader("cloud.laz")
     >>> reader.num_points
     43271750
     >>> for point in reader:
     ...     print(point.X, point.Y, point.Z, point.classification)
+
+    >>> with Writer("out.laz", point_format=1) as writer:
+    ...     writer.write(Point(X=1, Y=2, Z=3, gps_time=4.0))
 
 LAS file specification
     1.2: https://www.asprs.org/a/society/committees/standards/asprs_las_format_v12.pdf
@@ -18,11 +21,13 @@ LAS file specification
 from enum import IntEnum
 import sys
 
-from ._cpylaz import PointReader, Point, LazError  # noqa: F401 (re-exported)
+from ._cpylaz import (PointReader, PointWriter, Point,  # noqa: F401 (re-exported)
+                      LazError)
 from ._utils import (unsigned_int, signed_int, u32_array, u64_array, double,
-                     cstr)
+                     cstr, pack_unsigned_int, pack_signed_int, pack_cstr,
+                     PACKERS)
 
-__all__ = ["Reader", "Point", "Compressor", "Coder", "ItemType",
+__all__ = ["Reader", "Writer", "Point", "Compressor", "Coder", "ItemType",
            "Selective", "LazError", "UnsupportedFileError"]
 
 LASZIP_VLR_RECORD_ID = 22204
@@ -145,6 +150,22 @@ def items_for_point_format(point_format, point_size):
     if extra:
         items.append((ItemType.BYTE14 if point14 else ItemType.BYTE, extra, 0))
     return items
+
+
+def _versioned_items(items, version):
+    """The same layout, encoded at a given LASzip item version.
+
+    WAVEPACKET13 is the exception: it never got a version 2, so it stays at 1
+    inside a v2 file -- which is how laszip's own VLR declares it.
+    """
+    return [(t, size, 1 if t == ItemType.WAVEPACKET13 else version)
+            for t, size, _ in items]
+
+
+def _as_i32(value):
+    """A chunk size as the LASzip VLR stores it: signed, so the U32_MAX that
+    selects variable-size chunks is written as -1."""
+    return value - 0x100000000 if value > 0x7FFFFFFF else value
 
 
 class Reader:
@@ -481,6 +502,341 @@ class Reader:
 
     def __iter__(self):
         return self.points(self.index)
+
+    def __len__(self):
+        return self.num_points
+
+
+class Writer:
+    """Write points to a LAS or LAZ file.
+
+    The mirror of :class:`Reader`: the header and the LASzip VLR are built
+    here, and everything from the first point onward is the C extension's.
+
+        >>> with Writer("out.laz", point_format=6, scales=(0.01, 0.01, 0.01)) as w:
+        ...     for point in points:
+        ...         w.write(point)
+
+    A point is a :class:`Point` -- one built with ``Point(X=..., ...)``, or one
+    that came from a reader -- or the raw bytes of its record, which is what a
+    file being converted already has.
+
+    One wrinkle in the LAS 1.4 point formats is worth knowing when building
+    points by hand: three of the four classification flags exist twice over. A
+    record keeps synthetic, keypoint and withheld in the same four bits as
+    overlap, but a decoded point splits them, and what goes back into a record
+    is ``synthetic_flag``, ``keypoint_flag`` and ``withheld_flag`` -- only the
+    overlap bit is taken from ``extended_classification_flags``. That is
+    LASzip's rule, kept because matching it byte for byte is what makes these
+    files the files laszip would have written.
+
+    Three header fields are not knowable until the last point has been written:
+    the point count, the counts by return number, and the bounding box. They
+    are filled in by ``close()``, which is why the output has to be seekable.
+    Everything else can be set through ``writer.header`` until then, so long as
+    it does not change how long the header is.
+    """
+
+    #: LASzip's own version, which is what the LASzip VLR records: the encoding
+    #: of the point block, not the software that produced it. lazpy names
+    #: itself in the header's ``generating_software`` instead.
+    LASZIP_VERSION = (3, 5, 1)
+
+    #: LASzip's default item version per point format, from
+    #: ``LASzip::get_default_version``.
+    DEFAULT_LAZ_VERSION = {False: 2, True: 3}      # keyed by "is a 1.4 format"
+
+    def __init__(self, filename, point_format, *, scales=(0.01, 0.01, 0.01),
+                 offsets=(0.0, 0.0, 0.0), compressed=None, laz_version=None,
+                 chunk_size=50000, num_extra_bytes=0, version_minor=None,
+                 system_identifier=b'', generating_software=None,
+                 file_creation=(0, 0)):
+        """Open *filename* for writing points of *point_format*.
+
+        ``compressed`` defaults to LAZ unless the name ends in ``.las``.
+        ``laz_version`` picks the LASzip item encoding: 1 or 2 for point
+        formats 0-5, 3 or 4 for 6-10, defaulting to what laszip itself would
+        choose. ``version_minor`` picks the LAS version, defaulting to the
+        oldest one that can describe the point format.
+
+        ``scales`` and ``offsets`` are how the integer coordinates of a point
+        become georeferenced ones; they are recorded in the header and applied
+        to nothing here, since points are written as they are given.
+        """
+        self.fp = None
+        self.header = None
+        self._writer = None
+        self._closed = False
+        self._owns_fp = False
+
+        if sys.byteorder != 'little':
+            raise UnsupportedFileError("only little-endian hosts are supported")
+        if point_format not in _POINT_FORMATS:
+            raise UnsupportedFileError(f"unknown point data format {point_format}")
+
+        base_size, _, _, _, wavepacket, point14 = _POINT_FORMATS[point_format]
+        if num_extra_bytes < 0:
+            raise ValueError("num_extra_bytes cannot be negative")
+
+        if compressed is None:
+            compressed = not str(filename).lower().endswith('.las')
+        if version_minor is None:
+            version_minor = 4 if point14 else (3 if wavepacket else 2)
+        self._check_version(point_format, version_minor, point14, wavepacket)
+
+        self.point_format = point_format
+        self.num_extra_bytes = num_extra_bytes
+        self.compressed = bool(compressed)
+        self.items = items_for_point_format(point_format,
+                                            base_size + num_extra_bytes)
+        if self.compressed:
+            if laz_version is None:
+                laz_version = self.DEFAULT_LAZ_VERSION[point14]
+            self._check_laz_version(laz_version, point14)
+            self.items = _versioned_items(self.items, laz_version)
+            # the layered container exists for the LAS 1.4 items and only them
+            self.compressor = (Compressor.LAYERED_CHUNKED if point14
+                               else Compressor.POINTWISE_CHUNKED)
+        else:
+            if laz_version not in (None, 0):
+                raise ValueError("an uncompressed file has no item version")
+            laz_version = 0
+            self.compressor = Compressor.NONE
+        self.laz_version = laz_version
+        self.chunk_size = chunk_size
+
+        self._open(filename)
+        try:
+            self.header = self._build_header(
+                base_size + num_extra_bytes, version_minor, scales, offsets,
+                system_identifier, generating_software, file_creation)
+            self.fp.write(self._pack_header(self.header))
+            if self.compressed:
+                self.fp.write(self._pack_laszip_vlr())
+            self._writer = PointWriter(self.fp, self.items,
+                                       int(self.compressor),
+                                       chunk_size=chunk_size)
+        except Exception:
+            self._close_file()
+            raise
+
+    # -- construction ----------------------------------------------------
+
+    @staticmethod
+    def _check_version(point_format, version_minor, point14, wavepacket):
+        if version_minor not in (2, 3, 4):
+            raise UnsupportedFileError(
+                f"lazpy writes LAS 1.2 to 1.4, not 1.{version_minor}")
+        if point14 and version_minor < 4:
+            raise UnsupportedFileError(
+                f"point data format {point_format} needs LAS 1.4")
+        if wavepacket and version_minor < 3:
+            raise UnsupportedFileError(
+                f"point data format {point_format} needs LAS 1.3")
+
+    @staticmethod
+    def _check_laz_version(laz_version, point14):
+        allowed = (3, 4) if point14 else (1, 2)
+        if laz_version not in allowed:
+            raise UnsupportedFileError(
+                f"LASzip item version {laz_version} is not one of "
+                f"{allowed} for this point format")
+
+    def _open(self, filename):
+        if hasattr(filename, 'write'):
+            self.fp = filename
+            self._owns_fp = False
+        else:
+            self.fp = open(filename, 'wb')
+            self._owns_fp = True
+        # close() has to go back and fill in the counts and the bounding box
+        if not (hasattr(self.fp, 'seek') and
+                getattr(self.fp, 'seekable', lambda: True)()):
+            self._close_file()
+            raise ValueError("writing needs a seekable file, because the point "
+                             "count and bounding box are only known at the end")
+
+    def _build_header(self, record_length, version_minor, scales, offsets,
+                      system_identifier, generating_software, file_creation):
+        header_size = self._header_size(version_minor)
+        vlr_size = 54 + self._laszip_vlr_size() if self.compressed else 0
+        day, year = file_creation
+
+        header = {
+            'file_signature': b'LASF',
+            'file_source_id': 0,
+            'global_encoding': 0,
+            'guid_data_1': 0, 'guid_data_2': 0, 'guid_data_3': 0,
+            'guid_data_4': b'',
+            'version_major': 1,
+            'version_minor': version_minor,
+            'system_identifier': system_identifier,
+            'generating_software': (b'lazpy' if generating_software is None
+                                    else generating_software),
+            'file_creation_day': day,
+            'file_creation_year': year,
+            'header_size': header_size,
+            'offset_to_point_data': header_size + vlr_size,
+            'number_of_variable_length_records': 1 if self.compressed else 0,
+            # the high bit is what tells a reader the points are compressed
+            'point_data_format_id': self.point_format | (0x80 if self.compressed
+                                                         else 0),
+            'point_data_record_length': record_length,
+            'number_of_point_records': 0,
+            'number_of_points_by_return': [0] * 5,
+            'max_x': 0.0, 'min_x': 0.0,
+            'max_y': 0.0, 'min_y': 0.0,
+            'max_z': 0.0, 'min_z': 0.0,
+        }
+        for axis, scale, offset in zip('xyz', scales, offsets):
+            header[f'{axis}_scale_factor'] = scale
+            header[f'{axis}_offset'] = offset
+        if version_minor >= 3:
+            header['start_of_waveform_data_packet_record'] = 0
+        if version_minor >= 4:
+            header['start_of_first_extended_variable_length_record'] = 0
+            header['number_of_extended_variable_length_records'] = 0
+            header['extended_number_of_point_records'] = 0
+            header['extended_number_of_points_by_return'] = [0] * 15
+        return header
+
+    @classmethod
+    def _header_formats(cls, version_minor):
+        formats = [Reader.HEADER_FORMAT_12]
+        if version_minor >= 3:
+            formats.append(Reader.HEADER_FORMAT_13)
+        if version_minor >= 4:
+            formats.append(Reader.HEADER_FORMAT_14)
+        return formats
+
+    @classmethod
+    def _header_size(cls, version_minor):
+        return sum(size
+                   for fmt in cls._header_formats(version_minor)
+                   for _, size, _ in fmt)
+
+    def _pack_header(self, header):
+        """The header bytes, from the same field tables Reader parses with."""
+        out = bytearray()
+        for fmt in self._header_formats(header['version_minor']):
+            for name, size, parse in fmt:
+                out += PACKERS[parse](header[name], size)
+        return bytes(out)
+
+    def _laszip_vlr_size(self):
+        return 34 + 6 * len(self.items)
+
+    def _pack_laszip_vlr(self):
+        """The LASzip VLR, the inverse of Reader._parse_laszip_record."""
+        major, minor, revision = self.LASZIP_VERSION
+        record = bytearray()
+        record += pack_unsigned_int(self.compressor, 2)
+        record += pack_unsigned_int(Coder.ARITHMETIC, 2)
+        record += pack_unsigned_int(major, 1)
+        record += pack_unsigned_int(minor, 1)
+        record += pack_unsigned_int(revision, 2)
+        record += pack_unsigned_int(0, 4)                    # options
+        # signed, because -1 there is what selects variable-size chunks
+        record += pack_signed_int(_as_i32(self.chunk_size), 4)
+        record += pack_signed_int(-1, 8)                     # special EVLRs:
+        record += pack_signed_int(-1, 8)                     # none, as laszip
+        record += pack_unsigned_int(len(self.items), 2)
+        for item_type, size, version in self.items:
+            record += pack_unsigned_int(item_type, 2)
+            record += pack_unsigned_int(size, 2)
+            record += pack_unsigned_int(version, 2)
+
+        header = bytearray()
+        header += pack_unsigned_int(0, 2)                    # reserved
+        header += pack_cstr(LASZIP_VLR_USER_ID, 16)
+        header += pack_unsigned_int(LASZIP_VLR_RECORD_ID, 2)
+        header += pack_unsigned_int(len(record), 2)
+        header += pack_cstr(b'lazpy', 32)                    # description
+        return bytes(header + record)
+
+    # -- writing ---------------------------------------------------------
+
+    def write(self, point):
+        """Append one point, as a :class:`Point` or as its record bytes."""
+        self._check_open()
+        self._writer.write(point)
+
+    def chunk(self):
+        """Close the open chunk, for variable-size chunking.
+
+        Only meaningful for a file opened with ``chunk_size=0xFFFFFFFF``, where
+        the boundaries are the caller's to choose.
+        """
+        self._check_open()
+        self._writer.chunk()
+
+    def _check_open(self):
+        if self._closed or self._writer is None:
+            raise ValueError("writer is closed")
+
+    def close(self):
+        """Finish the point block and fill in the header fields that needed
+        every point to be known. Idempotent."""
+        if self._closed or self._writer is None:
+            return
+        self._closed = True
+        try:
+            self._writer.done()
+            self._patch_header()
+        finally:
+            self._close_file()
+
+    def _close_file(self):
+        if self.fp is not None and self._owns_fp:
+            self.fp.close()
+        self.fp = None
+
+    def _patch_header(self):
+        """Rewrite the header with the counts and bounds the points implied.
+
+        The whole header goes back rather than the individual fields: it is a
+        few hundred bytes, and picking them out by offset is what the field
+        tables exist to avoid.
+        """
+        count = self._writer.index
+        by_return = self._writer.points_by_return
+        header = self.header
+
+        # LAS 1.4 keeps the real count in its own field and zeroes the legacy
+        # one for the extended point formats, which is what Reader compensates
+        # for when it reads a file back.
+        legacy = self.point_format < 6 and count <= 0xFFFFFFFF
+        header['number_of_point_records'] = count if legacy else 0
+        header['number_of_points_by_return'] = (list(by_return[1:6]) if legacy
+                                                else [0] * 5)
+        if header['version_minor'] >= 4:
+            header['extended_number_of_point_records'] = count
+            header['extended_number_of_points_by_return'] = list(by_return[1:16])
+
+        bounds = self._writer.bounds
+        if bounds is not None:
+            for i, axis in enumerate('xyz'):
+                scale = header[f'{axis}_scale_factor']
+                offset = header[f'{axis}_offset']
+                header[f'min_{axis}'] = bounds[i] * scale + offset
+                header[f'max_{axis}'] = bounds[i + 3] * scale + offset
+
+        end = self.fp.tell()
+        self.fp.seek(0)
+        self.fp.write(self._pack_header(header))
+        self.fp.seek(end)          # a file object the caller lent us
+
+    @property
+    def num_points(self):
+        """How many points have been written."""
+        return 0 if self._writer is None else self._writer.index
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
 
     def __len__(self):
         return self.num_points
