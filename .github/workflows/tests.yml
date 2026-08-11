@@ -117,6 +117,19 @@ jobs:
         with:
           platforms: s390x
 
+      # Pulled in a step of its own, and retried, because this is the only job
+      # whose coverage nothing else provides and the registry is the one part
+      # of it that fails for reasons having nothing to do with the code. A
+      # Docker Hub 500 has already turned a green pull request red once.
+      - name: Pull the image
+        run: |
+          for attempt in 1 2 3; do
+            if docker pull --platform linux/s390x debian:trixie; then exit 0; fi
+            echo "pull failed (attempt $attempt); retrying"
+            sleep 15
+          done
+          exit 1
+
       # Debian and apt rather than the python image and pip, because numpy
       # publishes no s390x wheel: pip would build it from source under
       # emulation, which costs more than everything else here put together.
