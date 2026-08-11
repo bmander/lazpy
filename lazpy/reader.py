@@ -131,9 +131,9 @@ def _numpy():
 class ExtendedVariableLengthRecord(Mapping):
     """One EVLR, whose payload is read the first time it is asked for.
 
-    Reads like the dict a regular VLR is: every field of the record header is a
-    key, plus ``offset_to_data`` -- where the payload begins in the file -- and
-    ``data``, the payload itself.
+    Behaves like the dict a regular VLR is: every field of the record header
+    is a key, plus ``offset_to_data`` -- where the payload begins in the file
+    -- and ``data``, the payload itself.
 
     ``data`` is the one lazy key. An EVLR payload can be enormous -- a
     waveform data packet record can run to gigabytes -- so opening a file
@@ -193,7 +193,7 @@ class Reader:
     """Read the points of a LAS or LAZ file: in order, by index, or as arrays.
 
     Open one by path or from an open binary file, then iterate it point by
-    point, or reach for :meth:`seek`, :meth:`arrays` and
+    point, or use :meth:`seek`, :meth:`arrays` and
     :meth:`points_within`.
 
     ``reader.header`` is a dict of every LAS header field, plus the variable
@@ -711,9 +711,9 @@ class Reader:
         it. An index inside the file is preferred to one beside it: it travels
         with the file, so it is the one that cannot be stale.
 
-        An index that is there but unreadable raises rather than being passed
-        over. Falling back to a full scan would answer the same question far
-        more slowly and say nothing about why.
+        An index that is there but unreadable raises rather than being
+        ignored. Falling back to a full scan would answer the same question
+        far more slowly and say nothing about why.
         """
         if not self._index_looked_for:
             self._index_looked_for = True

@@ -330,7 +330,7 @@ PyDoc_STRVAR(writer_doc,
 "something else wrote. lazpy.Writer is that something else.\n"
 "\n"
 "write() takes a Point or the bytes of one on-disk record; call done()\n"
-"when the last point is in.\n");
+"once every point is written.\n");
 
 PyTypeObject Writer_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)

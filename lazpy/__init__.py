@@ -2,9 +2,9 @@
 
 Most programs need two names: :class:`Reader`, which opens a file and hands
 back its header and points -- one at a time, or as numpy arrays -- and
-:class:`Writer`, which builds a file from points handed to it. Everything
-else here is a type they exchange: the :class:`Point` they trade in, the
-enumerations that describe a file, and the errors they raise.
+:class:`Writer`, which builds a file from the points given to it.
+Everything else here is a type they exchange: the :class:`Point` itself,
+the enumerations that describe a file, and the errors they raise.
 
     >>> reader = Reader("cloud.laz")
     >>> reader.num_points

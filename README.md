@@ -119,7 +119,7 @@ with Writer("out.laz", point_format=1, scales=(0.01, 0.01, 0.01)) as writer:
                        return_number=1, number_of_returns=1))
 ```
 
-The header, the LASzip VLR and the chunk table are the writer's business. The
+The header, the LASzip VLR and the chunk table are handled by the writer. The
 point count, the counts by return number and the bounding box are filled in
 when the file is closed, which is why the output has to be seekable; anything
 else can be set through `writer.header` until then.
@@ -240,7 +240,7 @@ own points and chunk size, the point block lazpy produces is byte-identical to
 laszip's. `tools/` holds the harness that regenerated that reference data;
 running the tests does not require laszip.
 
-The out-of-memory paths are covered too, which takes a hand from the C side:
+The out-of-memory paths are covered too, which needs help from the C side:
 model memory is allocated lazily, so nothing an input file can do reaches
 those failure branches. `_cpylaz._alloc_fail_after(n)` makes the model
 allocator start returning NULL after `n` allocations, and the tests sweep it
