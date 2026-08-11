@@ -242,7 +242,7 @@ wkt["data"]     # read from the file here, not when it was opened
 Ordinary variable-length records are keyed the same way, in
 `header["variable_length_records"]`.
 
-LAS 1.4 compatibility mode is read: a file that says it is LAS 1.2 or 1.3 but
+LAS 1.4 compatibility mode is read and written. A file that says it is LAS 1.2 or 1.3 but
 carries a `lascompatible` record is a LAS 1.4 file in disguise — its points are
 written in a legacy format with the 1.4-only fields packed into extra bytes.
 lazpy puts them back together, so such a file reads as the 1.4 file it stands
@@ -253,10 +253,25 @@ it. The one variant left alone is the LAS 1.5 form, which lazpy has no header
 for. Note that `header_size` and `offset_to_point_data` then describe the LAS
 1.4 file being reported rather than the bytes on disk, as they do in laszip.
 
+Writing one is `compatibility=True`, which is where the mode earns its name —
+a file for readers that predate LAS 1.4:
+
+```python
+with Writer("legacy.laz", point_format=8, compatibility=True) as writer:
+    writer.write(point)          # a LAS 1.4 point, written as a 1.2 one
+```
+
+The points go out as format 1, 3, 4 or 5, with what those cannot hold folded
+into extra bytes: the scan angle keeps a rank and the remainder rides along,
+the return numbers and the classification keep as much as their narrower
+fields allow. Reading it back — with lazpy, or with laszip asked for the same
+mode — gives the LAS 1.4 points that went in. Anything else sees a legacy
+file whose points are as nearly right as a legacy file can make them.
+
 The LASzip spatial index is read, both as a sidecar `.lax` and as the extended
 record an appended one lives in; see "Reading a region" above.
 
-Not yet: *writing* compatibility-mode files or spatial indexes.
+Not yet: *writing* spatial indexes.
 
 Both host byte orders work. LAS and LAZ are little-endian on disk and a
 decoded point is in host order, so a big-endian host converts between the two

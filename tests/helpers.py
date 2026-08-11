@@ -37,6 +37,32 @@ def fixture(name):
     return os.path.join(TESTDATA, name)
 
 
+# The header fields a writer works out from the points it was given, which
+# the fixture generator did not: it left the counts by return number at zero
+# and wrote a nominal coordinate range rather than the extent of its points.
+# A comparison against a fixture has to take those from the fixture.
+COMPUTED_HEADER_FIELDS = ("number_of_points_by_return", "min_x", "max_x",
+                          "min_y", "max_y", "min_z", "max_z",
+                          "extended_number_of_points_by_return")
+
+
+def assert_is_the_file_laszip_wrote(ours, theirs, version_minor):
+    """`ours` is `theirs` byte for byte, but for the fields close() computes.
+
+    The strongest claim a writing test can make, and what the fixtures are
+    for: given the same points and the same free text, everything lazpy writes
+    is what laszip wrote.
+    """
+    patched = bytearray(ours)
+    for field in COMPUTED_HEADER_FIELDS:
+        try:
+            offset, size = field_span(field, version_minor)
+        except KeyError:
+            continue                # a field this version's header has not
+        patched[offset:offset + size] = theirs[offset:offset + size]
+    assert bytes(patched) == bytes(theirs)
+
+
 def a_record(user_id, record_id, data, description=b""):
     """One variable length record, in the shape a Writer takes -- which is
     the shape a Reader hands back, minus the fields it derives."""

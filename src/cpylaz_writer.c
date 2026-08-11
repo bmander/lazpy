@@ -43,7 +43,84 @@ typedef struct {
      * indexed by return number, so entry 0 is the invalid one */
     I32 min_xyz[3], max_xyz[3];
     U64 by_return[16];
+    /* LAS 1.4 compatibility mode: where the hidden fields go in the extra
+     * bytes, with -1 for COMPAT_NIR when there is no NIR band */
+    BOOL compat;
+    I32 compat_starts[COMPAT_ATTRIBUTES];
+    const I16 *scan_angle_of_rank;      /* what a rank stands for, tabulated */
 } WriterObject;
+
+/*
+ * Write a LAS 1.4 point as a legacy one.
+ *
+ * The exact inverse of reader_recode_compat: what the legacy record cannot
+ * express is put in the extra bytes, and what it can hold is narrowed to fit
+ * -- the scan angle to a rank, the return numbers to three bits, the
+ * classification to five. Each narrowing leaves a remainder behind, and it is
+ * the remainder that goes in the extra bytes, so that adding the two back
+ * together is all reading one takes.
+ *
+ * This is laszip_write_point()'s recoding step in laszip_dll.cpp. The three
+ * classification flags are not touched: they are already in the legacy field
+ * the record is written from, which is where a Writer takes them from for a
+ * native LAS 1.4 file too.
+ */
+static void writer_recode_compat(WriterObject *self)
+{
+    LazPoint *p = &self->point;
+    U8 *extra = self->extra_bytes;
+    const I32 *at = self->compat_starts;
+    I8 rank = I8_CLAMP(COMPAT_RANK_OF_SCAN_ANGLE(p->extended_scan_angle));
+    U8 extended_returns = laz_point_extended_return_number(p);
+    U8 extended_number = laz_point_extended_number_of_returns(p);
+    U8 return_number, number_of_returns, classification;
+
+    p->scan_angle_rank = rank;
+    /* the extra bytes are on-disk data, so little-endian whatever the host */
+    laz_le_put16(extra + at[COMPAT_SCAN_ANGLE],
+                 (U16)(I16)(p->extended_scan_angle
+                            - self->scan_angle_of_rank[(U8)rank]));
+
+    /*
+     * Above seven returns the legacy pair cannot say which return this is, so
+     * laszip says the count is seven and keeps the return number as near the
+     * end of the sweep as three bits allow: the last four returns keep their
+     * distance from the end, and everything before them is a fourth return.
+     */
+    if (extended_number <= 7) {
+        return_number = extended_returns;
+        number_of_returns = extended_number;
+    } else {
+        number_of_returns = 7;
+        if (extended_returns <= 4)
+            return_number = extended_returns;
+        else if (extended_returns >= extended_number - 3)
+            return_number = (U8)(extended_returns - (extended_number - 7));
+        else
+            return_number = 4;
+    }
+    laz_point_set_return_number(p, return_number);
+    laz_point_set_number_of_returns(p, number_of_returns);
+    extra[at[COMPAT_EXTENDED_RETURNS]] =
+        (U8)(((extended_returns - return_number) << 4)
+             | (extended_number - number_of_returns));
+
+    /* five bits hold classifications up to 31; past that the legacy field
+     * says nothing and the whole value travels in the extra bytes */
+    classification = p->extended_classification;
+    laz_point_set_classification(p, classification <= 31 ? classification : 0);
+    extra[at[COMPAT_CLASSIFICATION]] =
+        (U8)(classification - laz_point_classification(p));
+
+    /* of the four classification flags only overlap is new in LAS 1.4; the
+     * other three are already in the legacy field */
+    extra[at[COMPAT_FLAGS_AND_CHANNEL]] =
+        (U8)(((laz_point_extended_classification_flags(p) >> 3) & 0x01)
+             | (laz_point_extended_scanner_channel(p) << 1));
+
+    if (at[COMPAT_NIR] >= 0)
+        laz_le_put16(extra + at[COMPAT_NIR], p->rgb[3]);
+}
 
 static void Writer_dealloc(WriterObject *self)
 {
@@ -58,18 +135,19 @@ static void Writer_dealloc(WriterObject *self)
 
 static int Writer_tp_init(WriterObject *self, PyObject *args, PyObject *kwds)
 {
-    PyObject *fp, *items_obj;
+    PyObject *fp, *items_obj, *compatibility = NULL;
     unsigned int compressor, coder = 0, chunk_size = 0;
     long long start_offset = -1;
     LazItem *items = NULL;
     U32 num_items = 0;
-    int failed;
+    int failed, compat;
     static char *kwlist[] = {"fp", "items", "compressor", "coder", "chunk_size",
-                             "start_offset", NULL};
+                             "start_offset", "compatibility", NULL};
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "OOI|IIL", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "OOI|IILO", kwlist,
                                      &fp, &items_obj, &compressor, &coder,
-                                     &chunk_size, &start_offset))
+                                     &chunk_size, &start_offset,
+                                     &compatibility))
         return -1;
 
     if (parse_items(items_obj, &items, &num_items) < 0) return -1;
@@ -86,6 +164,12 @@ static int Writer_tp_init(WriterObject *self, PyObject *args, PyObject *kwds)
                                                          : self->scatter.last_error);
         return -1;
     }
+
+    compat = parse_compat_starts(compatibility, self->wp.num_extra_bytes,
+                                 self->compat_starts);
+    if (compat < 0) return -1;
+    self->compat = (BOOL)compat;
+    if (self->compat) self->scan_angle_of_rank = compat_scan_angle_of_rank();
 
     self->record_size = (Py_ssize_t)self->wp.point_size;
     if (self->wp.num_extra_bytes) {
@@ -211,7 +295,11 @@ static void writer_tally(WriterObject *self)
         }
     }
 
-    return_number = laz_point_extended_point_type(&self->point)
+    /* In compatibility mode the point about to be written is a legacy one,
+     * but the counts a LAS 1.4 header states are of LAS 1.4 return numbers --
+     * which is why this runs before the recoding narrows them. */
+    return_number = (self->compat
+                     || laz_point_extended_point_type(&self->point))
                     ? laz_point_extended_return_number(&self->point)
                     : laz_point_return_number(&self->point);
     self->by_return[return_number & 0xF]++;
@@ -226,14 +314,25 @@ static PyObject *Writer_write(WriterObject *self, PyObject *arg)
         return NULL;
     }
 
-    taken = PyObject_TypeCheck(arg, &Point_Type)
-            ? writer_take_point(self, (PointObject *)arg)
-            : writer_take_record(self, arg);
+    if (PyObject_TypeCheck(arg, &Point_Type)) {
+        taken = writer_take_point(self, (PointObject *)arg);
+    } else if (self->compat) {
+        PyErr_SetString(PyExc_ValueError,
+                        "compatibility mode takes points, not records: a "
+                        "record here would already be the legacy one it is "
+                        "about to build");
+        return NULL;
+    } else {
+        taken = writer_take_record(self, arg);
+    }
     if (taken < 0) return NULL;
+
+    /* before the recoding, which is what makes the tally the LAS 1.4 one */
+    writer_tally(self);
+    if (self->compat) writer_recode_compat(self);
 
     if (!laz_writepoint_write(&self->wp, &self->point, self->extra_bytes))
         return writer_error(self);
-    writer_tally(self);
     self->index++;
     Py_RETURN_NONE;
 }
@@ -320,7 +419,8 @@ static PyGetSetDef Writer_getset[] = {
 };
 
 PyDoc_STRVAR(writer_doc,
-"PointWriter(fp, items, compressor, coder=0, chunk_size=0, start_offset=-1)\n"
+"PointWriter(fp, items, compressor, coder=0, chunk_size=0, start_offset=-1,\n"
+"            compatibility=None)\n"
 "\n"
 "The compress side of PointReader: points in, a LAZ point block out.\n"
 "\n"
@@ -328,6 +428,12 @@ PyDoc_STRVAR(writer_doc,
 "it writes no header and no LASzip VLR, only the points and the chunk\n"
 "table behind them, so what it produces has to be described by a header\n"
 "something else wrote. lazpy.Writer is that something else.\n"
+"\n"
+"`compatibility` is PointReader's argument put to the opposite use: given\n"
+"the five attribute starts, a LAS 1.4 point handed to write() is written as\n"
+"the legacy point the items describe, with what that cannot express folded\n"
+"into the extra bytes at those starts. Points only there -- a record would\n"
+"already be the legacy one this is about to build.\n"
 "\n"
 "write() takes a Point or the bytes of one on-disk record; call done()\n"
 "once every point is written.\n");

@@ -12,8 +12,8 @@ from lazpy.compat import _extra_bytes_attributes
 from lazpy.headers import VLR_HEADER_SIZE
 from helpers import (EXTENDED_POINT_COUNT_OFFSET, LAS14_FORMATS,
                      LEGACY_FORMATS, LEGACY_POINT_COUNT_OFFSET, REFERENCE_HASH,
-                     a_record, field_span, fixture, las_records, load,
-                     point_block)
+                     a_record, assert_is_the_file_laszip_wrote, fixture,
+                     las_records, load, point_block)
 
 
 # ---------------------------------------------------------------------------
@@ -588,16 +588,7 @@ def test_a_written_file_is_the_file_laszip_wrote(point_format):
         vlr_description=header["variable_length_records"][
             LASZIP_VLR_KEY]["description"])
 
-    computed = ["number_of_points_by_return",
-                "min_x", "max_x", "min_y", "max_y", "min_z", "max_z"]
-    if header["version_minor"] >= 4:
-        computed.append("extended_number_of_points_by_return")
-
-    ours, theirs = bytearray(data), bytearray(f.data)
-    for field in computed:
-        offset, size = field_span(field, header["version_minor"])
-        ours[offset:offset + size] = theirs[offset:offset + size]
-    assert bytes(ours) == bytes(theirs)
+    assert_is_the_file_laszip_wrote(data, f.data, header["version_minor"])
 
 
 # ---------------------------------------------------------------------------
@@ -761,11 +752,13 @@ def test_the_attributes_describe_what_they_were_given():
     assert [a.start for a in attributes] == list(range(6))
     # scale and offset, where the descriptor keeps them -- behind the name,
     # four unused bytes and the three no-data/min/max triples -- and the
-    # option bits that say they were set at all
+    # option bits that say they were set at all. One value per dimension, of
+    # which a scalar attribute has one; the other two are what laszip leaves
+    # there, which means no scaling.
     first = record["data"]
     assert first[3] == 0x08 | 0x10
-    assert struct.unpack_from("<3d", first, 4 + 32 + 4 + 3 * 24) == (0.5,) * 3
-    assert struct.unpack_from("<3d", first, 4 + 32 + 4 + 4 * 24) == (2.0,) * 3
+    assert struct.unpack_from("<3d", first, 4 + 32 + 4 + 3 * 24) == (0.5, 1, 1)
+    assert struct.unpack_from("<3d", first, 4 + 32 + 4 + 4 * 24) == (2.0, 0, 0)
 
 
 def test_a_descriptor_that_contradicts_the_record_length_is_refused():
