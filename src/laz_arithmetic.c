@@ -194,7 +194,18 @@ void laz_decoder_setup(LazDecoder *d, LazStream *stream)
 {
     d->stream = stream;
     d->value = 0;
-    d->length = 0;
+    /*
+     * The interval length starts where init would put it, not at zero.
+     *
+     * A decoder is meant to be init'd before it is read, and every decoder of
+     * a well-formed file is. A malformed one can reach a decode first -- a
+     * layered chunk that declares no bytes for a layer the reader goes on to
+     * read from -- and the first thing laz_decode_symbol does is divide by
+     * this, so a zero here is the process dying on SIGFPE rather than the
+     * file being reported as corrupt. Decoding from a stream that has nothing
+     * in it sets eof, which is what overran() already turns into an error.
+     */
+    d->length = AC_MAX_LENGTH;
 }
 
 void laz_decoder_init(LazDecoder *d, LazStream *stream, BOOL really_init)

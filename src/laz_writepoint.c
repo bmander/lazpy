@@ -45,6 +45,14 @@ BOOL laz_writepoint_setup(LazWritePoint *wp, U32 num_items, const LazItem *items
     wp->layered_las14_compression = LAZ_FALSE;
     wp->chunk_size = U32_MAX;
 
+    /* as on the read side: a compressor this does not know would be written
+     * as chunked-but-not-layered and declared in the VLR as whatever it says,
+     * which is a file no reader could open */
+    if (compressor > LAZ_COMPRESSOR_LAYERED_CHUNKED) {
+        set_error(wp, "compressor %u is not supported", compressor);
+        return LAZ_FALSE;
+    }
+
     if (compressor) {
         if (coder != LAZ_CODER_ARITHMETIC) {
             set_error(wp, "entropy coder %u is not supported", coder);
@@ -311,7 +319,17 @@ BOOL laz_writepoint_chunk(LazWritePoint *wp)
      * an empty one is not something a reader could make sense of */
     if (wp->writers != wp->writers_compressed) return LAZ_TRUE;
 
-    return close_and_record(wp);
+    if (!close_and_record(wp)) return LAZ_FALSE;
+
+    /* As in write() and done(): closing a chunk emits the layer sizes and the
+     * layer bytes, so it is a place the file object can raise, and the sink
+     * records that rather than reporting it. Without this the exception is
+     * left pending behind a chunk() that returned None. */
+    if (wp->outstream->failed) {
+        set_error(wp, "error writing to the underlying file");
+        return LAZ_FALSE;
+    }
+    return LAZ_TRUE;
 }
 
 BOOL laz_writepoint_done(LazWritePoint *wp)

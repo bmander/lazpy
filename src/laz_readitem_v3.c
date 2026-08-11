@@ -131,6 +131,12 @@ static void layer_load(Layer *l, LazStream *in, U8 *buf, U64 *offset)
             *offset += l->num_bytes;
             l->changed = LAZ_TRUE;
         } else {
+            /* No bytes for this layer in this chunk, which is ordinary: a
+             * one-point chunk codes nothing, its only point being the raw
+             * one. `changed` is what keeps the readers off this decoder --
+             * and a corrupt chunk that says zero and then asks for a point
+             * anyway decodes from an empty stream, which sets eof and
+             * surfaces through overran(). See laz_decoder_setup. */
             laz_stream_array_reset(l->stream, NULL, 0);
             l->changed = LAZ_FALSE;
         }
@@ -144,6 +150,22 @@ static void layer_load(Layer *l, LazStream *in, U8 *buf, U64 *offset)
 static BOOL layer_overran(const Layer *l)
 {
     return l->stream && l->stream->eof;
+}
+
+/*
+ * Whether a chunk's layers could really be as big as the header says.
+ *
+ * The counts are u32s straight out of the file, summed and handed to realloc,
+ * so a corrupt header is an allocation of whatever it asks for -- eleven
+ * gigabytes, for one file in testdata/malformed. The layers of one chunk
+ * cannot outweigh what is left in the stream. See laz_stream_remaining for
+ * why reading needs no equivalent check, and for the pipe that cannot be
+ * measured and so is not held to this.
+ */
+static BOOL layers_could_fit(LazStream *in, U64 total)
+{
+    I64 remaining = laz_stream_remaining(in);
+    return remaining < 0 || total <= (U64)remaining;
 }
 
 /* Grows `*buf` to at least `need` bytes. */
@@ -310,7 +332,12 @@ static BOOL p14_chunk_sizes(LazReadItem *self)
     r->user_data.num_bytes = laz_stream_get32(in);
     r->point_source.num_bytes = laz_stream_get32(in);
     r->gps_time.num_bytes = laz_stream_get32(in);
-    return LAZ_TRUE;
+    return layers_could_fit(in, (U64)r->channel_returns_XY.num_bytes
+                            + r->Z.num_bytes + r->classification.num_bytes
+                            + r->flags.num_bytes + r->intensity.num_bytes
+                            + r->scan_angle.num_bytes + r->user_data.num_bytes
+                            + r->point_source.num_bytes
+                            + r->gps_time.num_bytes);
 }
 
 static BOOL p14_init(LazReadItem *self, const U8 *item, U32 *context)
@@ -737,7 +764,7 @@ static BOOL rgb14_chunk_sizes(LazReadItem *self)
 {
     Rgb14v3 *r = (Rgb14v3 *)self;
     r->rgb.num_bytes = laz_stream_get32(self->dec->stream);
-    return LAZ_TRUE;
+    return layers_could_fit(self->dec->stream, r->rgb.num_bytes);
 }
 
 static BOOL rgb14_init(LazReadItem *self, const U8 *item, U32 *context)
@@ -941,7 +968,8 @@ static BOOL rgbnir14_chunk_sizes(LazReadItem *self)
     RgbNir14v3 *r = (RgbNir14v3 *)self;
     r->rgb.num_bytes = laz_stream_get32(self->dec->stream);
     r->nir.num_bytes = laz_stream_get32(self->dec->stream);
-    return LAZ_TRUE;
+    return layers_could_fit(self->dec->stream,
+                            (U64)r->rgb.num_bytes + r->nir.num_bytes);
 }
 
 static BOOL rgbnir14_init(LazReadItem *self, const U8 *item, U32 *context)
@@ -1118,7 +1146,7 @@ static BOOL wave14_chunk_sizes(LazReadItem *self)
 {
     Wave14v3 *r = (Wave14v3 *)self;
     r->wavepacket.num_bytes = laz_stream_get32(self->dec->stream);
-    return LAZ_TRUE;
+    return layers_could_fit(self->dec->stream, r->wavepacket.num_bytes);
 }
 
 static BOOL wave14_init(LazReadItem *self, const U8 *item, U32 *context)
@@ -1295,10 +1323,13 @@ static BOOL byte14_create_and_init(Byte14v3 *r, U32 context, const U8 *item)
 static BOOL byte14_chunk_sizes(LazReadItem *self)
 {
     Byte14v3 *r = (Byte14v3 *)self;
+    U64 total = 0;
     U32 i;
-    for (i = 0; i < r->number; i++)
+    for (i = 0; i < r->number; i++) {
         r->layers[i].num_bytes = laz_stream_get32(self->dec->stream);
-    return LAZ_TRUE;
+        total += r->layers[i].num_bytes;
+    }
+    return layers_could_fit(self->dec->stream, total);
 }
 
 static BOOL byte14_init(LazReadItem *self, const U8 *item, U32 *context)

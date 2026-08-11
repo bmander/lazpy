@@ -893,8 +893,18 @@ class Reader:
 
     @staticmethod
     def _read_variable_length_record(fp):
-        record, _ = unpack_format(VLR_HEADER_FORMAT, fp.read(VLR_HEADER_SIZE))
+        # Short reads are checked rather than left to unpack_format, which
+        # slices and so would turn the end of the file into a record of
+        # zeros. A header that declares 4 billion records -- the count is a
+        # u32, and a corrupt one reads as 0xFFFFFFFF -- would otherwise be
+        # four billion of those before the loop ended.
+        data = fp.read(VLR_HEADER_SIZE)
+        if len(data) < VLR_HEADER_SIZE:
+            raise LazError("file ends inside a variable length record")
+        record, _ = unpack_format(VLR_HEADER_FORMAT, data)
         record['data'] = fp.read(record['record_length_after_header'])
+        if len(record['data']) < record['record_length_after_header']:
+            raise LazError("file ends inside a variable length record")
         return record
 
     @classmethod

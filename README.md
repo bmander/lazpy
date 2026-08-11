@@ -208,6 +208,10 @@ emulation, since nothing else in the matrix is big-endian.
 
 Anything that goes wrong reading or writing a file raises `lazpy.LazError`,
 except an error from the underlying file object, which propagates as itself.
+That holds for a malformed file too: a corrupt header or chunk is an
+exception, not a crash, a hang, or a decode of bytes that were never there.
+`tools/fuzz.py` is what checks it, and `testdata/malformed/` holds what it has
+found so far.
 
 ## Development
 

@@ -1394,10 +1394,28 @@ static void reader_recode_compat(ReaderObject *self)
  * deliberately does not come this way: those points are passed over, not
  * handed out.
  */
+/*
+ * Whether the file object underneath is still answering.
+ *
+ * The core reads a stream that cannot fail: past the end it hands back zeros
+ * and sets `eof`, so a decode carries on rather than stopping. When the
+ * failure is Python's -- a file object whose seek() or read() raised -- that
+ * is not something to decode through: the stream records it in `failed` and
+ * leaves the exception set for whoever is holding the GIL to find, which is
+ * this file. Without this check the exception would dangle until the
+ * interpreter noticed it on the way out, and the caller would be handed a
+ * point decoded from zeros.
+ */
+static BOOL reader_stream_ok(ReaderObject *self)
+{
+    return !self->stream || !self->stream->failed;
+}
+
 static BOOL reader_next(ReaderObject *self)
 {
     if (!laz_readpoint_read(&self->rp, &self->point, self->extra_bytes))
         return LAZ_FALSE;
+    if (!reader_stream_ok(self)) return LAZ_FALSE;
     if (self->compat) reader_recode_compat(self);
     return LAZ_TRUE;
 }
@@ -1798,7 +1816,7 @@ static PyObject *Reader_seek(ReaderObject *self, PyObject *args)
     ok = laz_readpoint_seek(&self->rp, self->index, (U64)target);
     Py_END_ALLOW_THREADS
 
-    if (!ok) return reader_error(self);
+    if (!ok || !reader_stream_ok(self)) return reader_error(self);
     self->index = (U64)target;
     Py_RETURN_NONE;
 }

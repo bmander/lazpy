@@ -119,6 +119,8 @@ typedef struct {
     I64 base;       /* file offset corresponding to buf[0] */
     I64 fill;       /* valid bytes in buf */
     I64 pos;        /* read cursor within buf */
+    I64 length;     /* whole file, found on demand; -2 until then, -1 if it
+                     * cannot be found (see laz_stream_remaining) */
 } FileImpl;
 
 /* Refills the buffer from the current logical position. Returns bytes read. */
@@ -311,6 +313,7 @@ LazStream *laz_stream_new_file(void *py_fp)
     f->base = file_start_position(f->fp);
     f->pos = 0;
     f->fill = 0;
+    f->length = -2;                       /* not looked for yet */
 
     s->impl = f;
     s->get_byte = file_get_byte;
@@ -588,6 +591,45 @@ U64 laz_stream_get64(LazStream *s)
     U8 b[8];
     s->get_bytes(s, b, 8);
     return laz_le_get64(b);
+}
+
+/* The whole length of a file stream, found once and remembered. Costs a seek
+ * to the end and back, so it is worth not doing twice. */
+static I64 file_length(LazStream *s)
+{
+    FileImpl *f = (FileImpl *)s->impl;
+    I64 here;
+
+    if (f->length != -2) return f->length;
+    f->length = -1;                       /* unless the seeks below work */
+    if (!s->seekable || s->failed) return f->length;
+
+    here = file_tell(s);
+    if (laz_stream_seek_end(s, 0)) {
+        I64 end = file_tell(s);
+        if (laz_stream_seek(s, here) && end >= 0) f->length = end;
+    }
+    return f->length;
+}
+
+I64 laz_stream_remaining(LazStream *s)
+{
+    I64 length, here;
+
+    /* An array stream measures itself for free through the same three vtable
+     * calls; only a file stream is worth remembering the answer for, which is
+     * what file_length does. */
+    if (s->seek != file_seek) {
+        here = laz_stream_tell(s);
+        if (!laz_stream_seek_end(s, 0)) return -1;
+        length = laz_stream_tell(s);
+        if (!laz_stream_seek(s, here)) return -1;
+    } else {
+        length = file_length(s);
+        if (length < 0) return -1;
+        here = laz_stream_tell(s);
+    }
+    return here > length ? 0 : length - here;
 }
 
 void laz_outstream_put32(LazOutStream *s, U32 value)
