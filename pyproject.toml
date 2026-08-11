@@ -48,6 +48,12 @@ packages = ["lazpy"]
 name = "lazpy._cpylaz"
 sources = [
     "src/cpylazmodule.c",
+    "src/cpylaz_models.c",
+    "src/cpylaz_intcomp.c",
+    "src/cpylaz_point.c",
+    "src/cpylaz_reader.c",
+    "src/cpylaz_writer.c",
+    "src/cpylaz_index.c",
     "src/laz_stream.c",
     "src/laz_arithmetic.c",
     "src/laz_intcompressor.c",
