@@ -9,3 +9,4 @@ wheelhouse
 *.pyd
 *.egg
 *.egg-info
+docs/_build/

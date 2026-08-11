@@ -27,8 +27,12 @@ from enum import Enum, IntEnum
 import io
 import os
 
-# Point, PointReader and PointWriter are re-exported: they are the API for
-# driving the container directly, without a Reader or Writer over it.
+# Point, PointReader, PointWriter and SpatialIndex are re-exported: they are
+# the API for driving the container directly, without a Reader or Writer over
+# it. Only Point is in __all__ below, because only Point is part of reading a
+# file the ordinary way; the other three are for the caller who has a point
+# block and no LAS header to describe it, who can name them to import them.
+# docs/api.rst gives them a section of their own for the same reason.
 from ._cpylaz import (PointReader, PointWriter, Point,  # noqa: F401
                       SpatialIndex, LazError)
 from ._utils import (unsigned_int, signed_int, u32_array, u64_array, double,
@@ -67,6 +71,17 @@ class UnsupportedFileError(LazError):
 
 
 class Compressor(IntEnum):
+    """How the points are packed, as the LASzip VLR declares it.
+
+    NONE is plain LAS, and the other three are the containers LASzip has had
+    in turn. POINTWISE is the original: one stream from the first point to
+    the last, with nothing to seek by. The chunked two cut it into
+    independently decodable chunks and put a table of their offsets behind
+    the points, which is what makes random access cheap. LAYERED_CHUNKED
+    additionally splits each chunk into a byte layer per attribute, so a
+    reader can skip the ones it was not asked for; the LAS 1.4 point formats
+    are written that way.
+    """
     NONE = 0
     POINTWISE = 1
     POINTWISE_CHUNKED = 2
@@ -74,6 +89,7 @@ class Compressor(IntEnum):
 
 
 class Coder(IntEnum):
+    """The entropy coder, of which LASzip has only ever defined one."""
     ARITHMETIC = 0
 
 
@@ -114,6 +130,15 @@ class Selective(IntEnum):
 
 
 class ItemType(IntEnum):
+    """What a LASzip item holds, which is how a point format is described.
+
+    A point is a list of items, each with a type from here, a size in bytes
+    and a coder version; the LASzip VLR carries that list, and
+    :func:`items_for_point_format` reconstructs it for an uncompressed file.
+    POINT10 through WAVEPACKET13 are the LAS 1.0-1.3 groupings, POINT14
+    onward their LAS 1.4 replacements, and BYTE and BYTE14 are extra bytes.
+    The scalar types are laszip's own and no point format uses them.
+    """
     BYTE = 0
     SHORT = 1
     INT = 2
@@ -873,6 +898,11 @@ class Reader:
                               h['y_offset'], h['z_offset'])
 
     def close(self):
+        """Release the point reader, and the file if this reader opened it.
+
+        A file object handed in is left open, since closing what someone else
+        opened is not this reader's to do.
+        """
         self._reader = None
         # dropped rather than left to be looked for: finding an index means
         # reading the file, and there is no file any more
@@ -1053,6 +1083,11 @@ class Reader:
 
     @property
     def num_points(self):
+        """How many points the file holds, which is also ``len(reader)``.
+
+        The LAS 1.4 count where the header has one, since the legacy field
+        is only 32 bits and saturates.
+        """
         return self.header['number_of_point_records']
 
     @property
@@ -1086,19 +1121,33 @@ class Reader:
 
     @property
     def point_format(self):
+        """Which LAS point data format, 0 to 10, the points are in.
+
+        With the high bit that flags compression cleared, and reported as
+        the 1.4 format a compatibility-mode file stands in for rather than
+        the legacy one it is written as.
+        """
         return self.header['point_data_format_id']
 
     @property
     def is_compressed(self):
+        """Whether this is a LAZ file rather than a plain LAS one."""
         return self.laz_header is not None
 
     @property
     def scales(self):
+        """``(x, y, z)`` scale factors: what a stored coordinate means.
+
+        A point's X, Y and Z are integers; multiplying by these and adding
+        :attr:`offsets` gives the georeferenced coordinate, which is what
+        :meth:`scale` does.
+        """
         h = self.header
         return (h['x_scale_factor'], h['y_scale_factor'], h['z_scale_factor'])
 
     @property
     def offsets(self):
+        """``(x, y, z)`` offsets, added after :attr:`scales` multiplies."""
         return (self.header['x_offset'], self.header['y_offset'],
                 self.header['z_offset'])
 
