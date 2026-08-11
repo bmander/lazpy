@@ -1263,6 +1263,39 @@ class Reader:
         """Whether a rectangle query can skip past most of the file."""
         return self.spatial_index is not None
 
+    def _region(self, min_x, min_y, max_x, max_y):
+        """What the C side needs to answer a rectangle query.
+
+        A pair: the region -- the rectangle, then the scale and offset that
+        put a point in it, as eight floats the C side takes as one argument
+        -- and the half-open ``(start, stop)`` spans of point indices to look
+        through. The spans are the index's intervals clamped against the
+        point count, or the whole file where there is no index; clamping here
+        is what keeps the core from needing to know how many points the file
+        claims.
+        """
+        if min_x > max_x or min_y > max_y:
+            raise ValueError("rectangle is inside out: "
+                             "min must not exceed max")
+
+        index = self.spatial_index
+        num_points = self.num_points
+        if index is None:
+            spans = [(0, num_points)]
+        else:
+            # an index is data out of a file like any other, and one that
+            # names points this file does not have is not worth decoding
+            # towards
+            spans = [(start, min(end + 1, num_points))
+                     for start, end in index.intervals(min_x, min_y,
+                                                       max_x, max_y)
+                     if start < num_points]
+
+        scales, offsets = self.scales, self.offsets
+        region = (min_x, min_y, max_x, max_y,
+                  scales[0], scales[1], offsets[0], offsets[1])
+        return region, spans
+
     def points_within(self, min_x, min_y, max_x, max_y):
         """Yield the points inside a rectangle, in file order.
 
@@ -1282,35 +1315,14 @@ class Reader:
         wherever the last interval ended, so :meth:`seek` before reading
         sequentially again.
         """
-        if min_x > max_x or min_y > max_y:
-            raise ValueError("rectangle is inside out: "
-                             "min must not exceed max")
-
-        index = self.spatial_index
-        num_points = self.num_points
-        if index is None:
-            spans = [(0, num_points - 1)] if num_points else []
-        else:
-            spans = index.intervals(min_x, min_y, max_x, max_y)
-
-        sx, sy = self._scale_offset[0], self._scale_offset[1]
-        ox, oy = self._scale_offset[3], self._scale_offset[4]
-        read = self._reader.read          # hoisted: this loop runs per point
-        for start, end in spans:
-            # an index is data out of a file like any other, and one that names
-            # points this file does not have is not worth decoding towards
-            if start >= num_points:
-                continue
-            end = min(end, num_points - 1)
+        region, spans = self._region(min_x, min_y, max_x, max_y)
+        read_within = self._reader.read_within
+        for start, stop in spans:
             self.seek(start)
-            for _ in range(end - start + 1):
-                point = read()
-                x = point.X * sx + ox
-                if x < min_x or x >= max_x:
-                    continue
-                y = point.Y * sy + oy
-                if y < min_y or y >= max_y:
-                    continue
+            while True:
+                point = read_within(stop, region)
+                if point is None:
+                    break
                 yield point
 
     # -- reading as arrays -----------------------------------------------
@@ -1354,7 +1366,6 @@ class Reader:
         file in blocks -- which is how a file too big to hold at once gets
         read.
         """
-        np = _numpy()
         if start is not None:
             self.seek(start)
         remaining = self.num_points - self.index
@@ -1364,6 +1375,22 @@ class Reader:
             names = _fields_for_point_format(self.point_format,
                                              self.num_extra_bytes)
 
+        out, targets, packed = self._array_columns(names, count)
+        self._reader.read_into(targets, count)
+        return self._finish_columns(out, packed, count)
+
+    def _array_columns(self, names, count):
+        """Arrays for *names*, and the read_into targets that fill them.
+
+        Returns ``(out, targets, packed)``. ``out`` holds a column per name,
+        with the sub-byte fields left as None until :meth:`_finish_columns`
+        derives them from the byte they share. No names at all means every
+        field this file's points carry.
+        """
+        np = _numpy()
+        if not names:
+            names = _fields_for_point_format(self.point_format,
+                                             self.num_extra_bytes)
         out, targets, packed, byte_columns = {}, [], [], {}
         for name in names:
             f = self._array_field(name)
@@ -1378,14 +1405,70 @@ class Reader:
             if f.offset not in byte_columns:
                 byte_columns[f.offset] = np.empty(count, dtype=f.dtype)
                 targets.append((byte_columns[f.offset], f.offset, 1))
-            packed.append((name, f))
+            packed.append((name, f, byte_columns[f.offset]))
             out[name] = None            # placeholder: holds its place in out
+        return out, targets, packed
 
-        self._reader.read_into(targets, count)
+    @staticmethod
+    def _finish_columns(out, packed, count):
+        """Derive the sub-byte fields, and cut every column down to *count*.
 
-        for name, f in packed:
-            out[name] = (byte_columns[f.offset] >> f.shift) & f.mask
+        The cut is what a rectangle query needs: it sizes its arrays for
+        every candidate, since how many are inside is what the query is for,
+        and does not know the answer until it has read them. A copy rather
+        than a view where most of the array is being dropped, so that a
+        selective query does not go on holding the candidates it rejected.
+        """
+        for name, f, byte_column in packed:
+            column = byte_column[:count] >> f.shift
+            column &= f.mask
+            out[name] = column
+        for name, column in out.items():
+            if len(column) != count:
+                out[name] = (column[:count].copy() if count * 2 < len(column)
+                             else column[:count])
         return out
+
+    def arrays_within(self, *names, rect):
+        """The points inside a rectangle, as numpy arrays.
+
+        :meth:`arrays` and :meth:`points_within` in one: the fields *names*
+        asks for, of the points ``rect`` -- ``(min_x, min_y, max_x, max_y)``
+        -- contains, selected the same way and with the same half-open edges.
+
+        This is the combination worth having, since the index decides which
+        points to decode and the array path decides how cheaply to hand them
+        over::
+
+            a = reader.arrays_within("X", "Y", "Z", rect=(x0, y0, x1, y1))
+
+        Arrays are sized for every candidate the index turns up and trimmed
+        to what was really inside, so a query whose rectangle is a small part
+        of a large file briefly holds rather more than it returns. The reader
+        is left wherever the last interval ended.
+        """
+        region, spans = self._region(*rect)
+        candidates = sum(stop - start for start, stop in spans)
+        out, targets, packed = self._array_columns(names, candidates)
+
+        found = 0
+        for start, stop in spans:
+            self.seek(start)
+            # each interval writes behind what the last one found, so the
+            # columns are handed over sliced from there
+            found += self._reader.read_into_within(
+                [(column[found:], offset, size)
+                 for column, offset, size in targets], stop, region)
+
+        return self._finish_columns(out, packed, found)
+
+    def xyz_within(self, rect):
+        """The georeferenced points inside a rectangle, as ``(N, 3)`` floats.
+
+        :meth:`xyz` restricted to ``rect``, which is
+        ``(min_x, min_y, max_x, max_y)`` as :meth:`arrays_within` takes it.
+        """
+        return self._scaled_xyz(self.arrays_within('X', 'Y', 'Z', rect=rect))
 
     def xyz(self, start=None, count=None):
         """The georeferenced points, as an ``(N, 3)`` array of floats.
@@ -1394,8 +1477,12 @@ class Reader:
         coordinates the file is about rather than the integers it stores.
         *start* and *count* are as in :meth:`arrays`.
         """
+        return self._scaled_xyz(
+            self.arrays('X', 'Y', 'Z', start=start, count=count))
+
+    def _scaled_xyz(self, columns):
+        """X, Y and Z columns as one georeferenced (N, 3) array."""
         np = _numpy()
-        columns = self.arrays('X', 'Y', 'Z', start=start, count=count)
         # scaled a column at a time into the answer, which is the only
         # full-size float array this makes
         xyz = np.empty((len(columns['X']), 3), dtype=np.float64)

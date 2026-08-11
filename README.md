@@ -78,6 +78,18 @@ reader.spatial_index.bounds        # the indexed area
 reader.spatial_index.intervals(min_x, min_y, max_x, max_y)
 ```
 
+The array API has the same form, which is how to read a region and read it
+fast at once:
+
+```python
+a = reader.arrays_within("X", "Y", "classification", rect=(x0, y0, x1, y1))
+xyz = reader.xyz_within(rect=(x0, y0, x1, y1))     # (N, 3) scaled floats
+```
+
+They select exactly what `points_within` selects. Arrays are sized for every
+point the index turns up as a candidate and cut down to the ones really
+inside, since how many that is is what the query is for.
+
 `intervals()` is the index itself: the runs of point indices a rectangle
 reaches, which is what `points_within` seeks between. Writing a `.lax` is not
 supported; `lasindex` from LAStools writes them.
