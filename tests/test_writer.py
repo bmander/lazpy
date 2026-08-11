@@ -12,7 +12,8 @@ from lazpy.compat import _extra_bytes_attributes
 from lazpy.headers import VLR_HEADER_SIZE
 from helpers import (EXTENDED_POINT_COUNT_OFFSET, LAS14_FORMATS,
                      LEGACY_FORMATS, LEGACY_POINT_COUNT_OFFSET, REFERENCE_HASH,
-                     field_span, fixture, las_records, load, point_block)
+                     a_record, field_span, fixture, las_records, load,
+                     point_block)
 
 
 # ---------------------------------------------------------------------------
@@ -608,11 +609,6 @@ def test_a_written_file_is_the_file_laszip_wrote(point_format):
 # alongside the LASzip one it builds itself, and they go in front of it, which
 # is where laszip puts its own -- it appends to the records it was given.
 # ---------------------------------------------------------------------------
-
-
-def a_record(user_id, record_id, data, description=b""):
-    return {"user_id": user_id, "record_id": record_id, "data": data,
-            "description": description}
 
 
 WKT = a_record(b"LASF_Projection", 2112, b"COMPD_CS[" + b"x" * 300 + b"]",

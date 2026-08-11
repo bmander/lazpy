@@ -144,6 +144,22 @@ how *that* file was compressed; the writer builds the one that describes this
 one. Records have to be given up front, because the header records how far
 past itself the points begin.
 
+LAS 1.4's extended records go in `evlrs=`, or into `writer.evlrs` at any point
+before the file is closed — they sit behind the point data, so unlike the
+ordinary records they need not be known before the points are written, which
+is what writing something computed *from* the points needs:
+
+```python
+with Writer("out.laz", point_format=6) as writer:
+    for point in points:
+        writer.write(point)
+    writer.evlrs.append(
+        {"user_id": b"LASF_Projection", "record_id": 2112, "data": wkt})
+```
+
+They are what carries a payload no ordinary record can — over 64 KB — and
+they need LAS 1.4, whose header is the only one with fields to point at them.
+
 The one record lazpy will build for you is the "extra bytes" descriptor, which
 says what the opaque bytes on the end of each point mean. A writer given one
 takes `num_extra_bytes` from it:
@@ -240,8 +256,7 @@ for. Note that `header_size` and `offset_to_point_data` then describe the LAS
 The LASzip spatial index is read, both as a sidecar `.lax` and as the extended
 record an appended one lives in; see "Reading a region" above.
 
-Not yet: *writing* extended variable-length records, compatibility-mode files,
-or spatial indexes.
+Not yet: *writing* compatibility-mode files or spatial indexes.
 
 Both host byte orders work. LAS and LAZ are little-endian on disk and a
 decoded point is in host order, so a big-endian host converts between the two

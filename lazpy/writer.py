@@ -9,8 +9,8 @@ from .formats import (EXTRA_BYTES_VLR_KEY, LASZIP_VLR_KEY, Compressor,
                       Coder, UnsupportedFileError, _POINT_FORMATS,
                       items_for_point_format, _versioned_items,
                       _min_version_minor)
-from .headers import (EXTRA_BYTES_ATTRIBUTE_FORMAT, MAX_VLR_PAYLOAD,
-                      VLR_HEADER_FORMAT, LASZIP_RECORD_FORMAT,
+from .headers import (EVLR_HEADER_FORMAT, EXTRA_BYTES_ATTRIBUTE_FORMAT,
+                      MAX_VLR_PAYLOAD, VLR_HEADER_FORMAT, LASZIP_RECORD_FORMAT,
                       LASZIP_ITEM_FORMAT, header_formats, pack_format,
                       _header_size, _can_seek)
 
@@ -51,7 +51,10 @@ def _records(vlrs):
 
     Accepts a mapping keyed by ``(user_id, record_id)``, as
     ``header["variable_length_records"]`` is, or any iterable of records --
-    so copying a file's records is handing them over as they came.
+    so copying a file's records is handing them over as they came. Records
+    this has already been over pass through it unchanged, which is what lets
+    the extended ones be checked when they are given and again when they are
+    written.
 
     A LASzip record among them is dropped rather than refused, which is what
     laszip does with one too: it describes how the file it came from was
@@ -78,10 +81,6 @@ def _records(vlrs):
 
 def _record(key, data, description, reserved=0):
     """One record, sized by the payload it holds."""
-    if len(data) > MAX_VLR_PAYLOAD:
-        raise ValueError(
-            f"record {key[0]!r} {key[1]} holds {len(data)} bytes, over the "
-            f"{MAX_VLR_PAYLOAD} a variable length record can declare")
     return {
         'reserved': reserved,
         'user_id': key[0],
@@ -93,7 +92,18 @@ def _record(key, data, description, reserved=0):
 
 
 def _pack_vlr(record):
-    """One record on disk: its 54-byte header, then its payload."""
+    """One record on disk: its 54-byte header, then its payload.
+
+    The ceiling on the payload is checked here, because it is this header
+    that imposes it: the length field is two bytes wide. An extended record,
+    whose field is eight, is what carries a payload larger than that.
+    """
+    length = record['record_length_after_header']
+    if length > MAX_VLR_PAYLOAD:
+        raise ValueError(
+            f"record {record['user_id']!r} {record['record_id']} holds "
+            f"{length} bytes, over the {MAX_VLR_PAYLOAD} a variable length "
+            f"record can declare; an extended record is what holds that much")
     return pack_format(VLR_HEADER_FORMAT, record) + record['data']
 
 
@@ -228,11 +238,12 @@ class Writer:
     ``extended_classification_flags`` -- LASzip's rule, matched so these are
     byte for byte the files laszip would have written.
 
-    Three header fields are not knowable until the last point has been written:
-    the point count, the counts by return number, and the bounding box. They
-    are filled in by ``close()``, which is why the output has to be seekable.
-    Everything else can be set through ``writer.header`` until then, so long as
-    it does not change how long the header is.
+    Some header fields are not knowable until the last point has been written:
+    the point count, the counts by return number, the bounding box, and where
+    the extended records that follow the points begin. They are filled in by
+    ``close()``, which is why the output has to be seekable. Everything else
+    can be set through ``writer.header`` until then, so long as it does not
+    change how long the header is.
     """
 
     #: LASzip's own version, which is what the LASzip VLR records: the encoding
@@ -244,8 +255,8 @@ class Writer:
                  offsets=(0.0, 0.0, 0.0), compressed=None, compressor=None,
                  laz_version=None, chunk_size=50000, num_extra_bytes=None,
                  version_minor=None, system_identifier=b'',
-                 generating_software=None, vlrs=(), vlr_description=b'lazpy',
-                 file_creation=(0, 0)):
+                 generating_software=None, vlrs=(), evlrs=(),
+                 vlr_description=b'lazpy', file_creation=(0, 0)):
         """Open *filename* for writing points of *point_format*.
 
         ``compressed`` defaults to LAZ unless the name ends in ``.las``.
@@ -272,6 +283,15 @@ class Writer:
         an "extra bytes" descriptor, whatever a file being copied had. They
         are taken here rather than later because the header records how far
         past itself the points begin.
+
+        ``evlrs`` are the extended records, which LAS 1.4 keeps behind the
+        point data and which may hold payloads no ordinary record can. They
+        are written by ``close()``, so unlike ``vlrs`` they need not all be
+        known here: ``writer.evlrs`` is the list, and appending to it up to
+        the last moment is as good as passing it in. What is passed in is
+        read now rather than at the end, so that records taken from a reader
+        -- whose payloads are read on demand -- do not depend on that reader
+        outliving this writer.
 
         ``num_extra_bytes`` is how many opaque bytes ride on the end of each
         point. It defaults to what the "extra bytes" record among ``vlrs``
@@ -303,6 +323,12 @@ class Writer:
         if version_minor is None:
             version_minor = _min_version_minor(point_format)
         self._check_version(point_format, version_minor)
+
+        #: The extended records to write behind the point data, which may be
+        #: added to until the file is closed.
+        self.evlrs = _records(evlrs)
+        if self.evlrs:
+            self._check_extended(version_minor)
 
         self.point_format = point_format
         self.num_extra_bytes = num_extra_bytes
@@ -358,6 +384,15 @@ class Writer:
         if version_minor < minimum:
             raise UnsupportedFileError(
                 f"point data format {point_format} needs LAS 1.{minimum}")
+
+    @staticmethod
+    def _check_extended(version_minor):
+        """Refuse extended records to a file that cannot point at them."""
+        if version_minor < 4:
+            raise UnsupportedFileError(
+                f"extended variable length records need LAS 1.4, and this is "
+                f"a LAS 1.{version_minor} file, whose header has no fields to "
+                f"say where they are")
 
     @staticmethod
     def _check_laz_version(laz_version, point14):
@@ -510,13 +545,15 @@ class Writer:
         self._writer.chunk()
 
     def close(self):
-        """Finish the point block and fill in the header fields that needed
-        every point to be known. Idempotent."""
+        """Finish the point block, write the extended records behind it, and
+        fill in the header fields that needed every point to be known.
+        Idempotent."""
         if self._closed:
             return
         self._closed = True
         try:
             self._writer.done()
+            self._write_extended_records()
             self._patch_header()
         finally:
             self._close_file()
@@ -525,6 +562,30 @@ class Writer:
         if self.fp is not None and self._owns_fp:
             self.fp.close()
         self.fp = None
+
+    def _write_extended_records(self):
+        """Write the extended records behind the point block, and aim the
+        header at them.
+
+        Behind the point block is what makes them cheap: everything in front
+        of them is already written and none of it moves, so the two header
+        fields that address them are two more for _patch_header to fill in.
+        """
+        records = _records(self.evlrs)
+        if not records:
+            return
+        self._check_extended(self.header['version_minor'])
+
+        start = self.fp.tell()
+        for record in records:
+            # the payload goes out on its own rather than joined to its
+            # header, since an extended record is exactly what holds a
+            # payload too big to want a second copy of
+            self.fp.write(pack_format(EVLR_HEADER_FORMAT, record))
+            self.fp.write(record['data'])
+        self.header['start_of_first_extended_variable_length_record'] = start
+        self.header['number_of_extended_variable_length_records'] = \
+            len(records)
 
     def _patch_header(self):
         """Rewrite the header with the counts and bounds the points implied.

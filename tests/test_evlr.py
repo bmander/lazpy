@@ -3,8 +3,9 @@ import struct
 
 import pytest
 
-from lazpy import Reader, LazError
-from helpers import FIXTURES, REFERENCE_HASH, fixture, load
+from lazpy import Point, Reader, LazError, UnsupportedFileError, Writer
+from helpers import (FIXTURES, REFERENCE_HASH, a_record, field_span, fixture,
+                     load)
 
 
 # ---------------------------------------------------------------------------
@@ -280,3 +281,118 @@ def test_a_payload_cannot_be_read_once_the_file_is_closed(tmp_path):
         record = evlrs_of(reader)[(b"lazpy", 1)]
     with pytest.raises(LazError, match="closed"):
         record["data"]
+
+
+# ---------------------------------------------------------------------------
+# Writing them.
+#
+# They go behind the point block, so the writer can leave them to close():
+# everything in front is already written and none of it moves, and the two
+# header fields that address them join the ones close() was going back for
+# anyway. That is also why they need not all be known up front, unlike the
+# ordinary records, which the header counts before the points begin.
+# ---------------------------------------------------------------------------
+
+def written(evlrs=(), point_format=6, points=1, **kwargs):
+    """A small LAS 1.4 file carrying `evlrs`, as bytes."""
+    buf = io.BytesIO()
+    with Writer(buf, point_format, evlrs=evlrs, **kwargs) as writer:
+        for index in range(points):
+            writer.write(Point(X=index))
+    return buf.getvalue()
+
+
+def test_extended_records_are_written_and_read_back():
+    data = written([a_record(b"lazpy", 1, b"payload", b"a description"),
+                    a_record(b"LASF_Spec", 65535, b"more")])
+
+    with Reader(io.BytesIO(data)) as reader:
+        header = reader.header
+        assert header["number_of_extended_variable_length_records"] == 2
+        assert (header["start_of_first_extended_variable_length_record"] >
+                header["offset_to_point_data"])
+        records = evlrs_of(reader)
+        assert list(records) == [(b"lazpy", 1), (b"LASF_Spec", 65535)]
+        assert records[(b"lazpy", 1)]["data"] == b"payload"
+        assert records[(b"lazpy", 1)]["description"] == b"a description"
+        assert records[(b"LASF_Spec", 65535)]["data"] == b"more"
+        assert reader.warning is None
+
+
+def test_a_payload_no_ordinary_record_could_hold():
+    """The whole reason the record type exists: a length field of eight bytes
+    rather than two."""
+    payload = b"WKT" * 40_000
+
+    data = written([a_record(b"LASF_Projection", 2112, payload)])
+
+    with Reader(io.BytesIO(data)) as reader:
+        assert evlrs_of(reader)[(b"LASF_Projection", 2112)]["data"] == payload
+
+
+def test_a_record_added_after_the_writer_was_opened():
+    """Which is what writing something computed from the points needs."""
+    buf = io.BytesIO()
+    with Writer(buf, 6) as writer:
+        writer.write(Point(X=1))
+        writer.evlrs.append(a_record(b"lazpy", 2, b"afterwards"))
+
+    with Reader(io.BytesIO(buf.getvalue())) as reader:
+        assert evlrs_of(reader)[(b"lazpy", 2)]["data"] == b"afterwards"
+
+
+def test_the_points_are_untouched_by_records_behind_them():
+    """The chunk table sits between the points and the records, and nothing
+    that follows it moves anything in front of it."""
+    plain = written(points=20)
+    with_records = written([a_record(b"lazpy", 1, b"x" * 500)], points=20)
+
+    with Reader(io.BytesIO(with_records)) as reader:
+        assert [point.X for point in reader] == list(range(20))
+
+    # everything in front of the records is the file that has none, but for
+    # the two header fields that say where they are
+    front = bytearray(with_records[:len(plain)])
+    assert front != plain
+    for name in ("start_of_first_extended_variable_length_record",
+                 "number_of_extended_variable_length_records"):
+        offset, size = field_span(name, 4)
+        front[offset:offset + size] = plain[offset:offset + size]
+    assert bytes(front) == plain
+
+
+@pytest.mark.parametrize("version_minor", [2, 3])
+def test_below_las_14_there_is_nowhere_to_point_at_them(version_minor):
+    with pytest.raises(UnsupportedFileError, match="need LAS 1.4"):
+        written([a_record(b"lazpy", 1, b"payload")], point_format=1,
+                version_minor=version_minor)
+
+
+def test_one_added_late_to_a_file_that_cannot_hold_it_is_refused():
+    buf = io.BytesIO()
+    with pytest.raises(UnsupportedFileError, match="need LAS 1.4"):
+        with Writer(buf, 1, version_minor=2) as writer:
+            writer.write(Point(X=1))
+            writer.evlrs.append(a_record(b"lazpy", 1, b"late"))
+
+
+def test_two_records_sharing_a_key_are_refused():
+    """A reader keys them by user id and record id, so it could only find
+    one of them."""
+    with pytest.raises(ValueError, match="two records claim"):
+        written([a_record(b"lazpy", 1, b"one"), a_record(b"lazpy", 1, b"two")])
+
+
+def test_a_files_extended_records_survive_a_copy():
+    """What a reader hands back is what a writer takes."""
+    source = written([a_record(b"lazpy", 1, b"payload", b"described"),
+                      a_record(b"LASF_Projection", 2112, b"WKT" * 1000)])
+
+    with Reader(io.BytesIO(source)) as reader:
+        copy = written(evlrs_of(reader), points=0)
+
+    with Reader(io.BytesIO(copy)) as reader:
+        copied = evlrs_of(reader)
+        assert list(copied) == [(b"lazpy", 1), (b"LASF_Projection", 2112)]
+        assert copied[(b"lazpy", 1)]["description"] == b"described"
+        assert copied[(b"LASF_Projection", 2112)]["data"] == b"WKT" * 1000
