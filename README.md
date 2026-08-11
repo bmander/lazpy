@@ -161,6 +161,14 @@ tables, files whose chunk table is missing because the compressor was
 interrupted, and selective decompression of LAS 1.4 attribute layers
 (`decompress_selective=` with a `Selective` mask).
 
+Which of those a file uses is on the reader — and matters, since chunking is
+what makes `seek()` cheap:
+
+```python
+reader.chunking      # Chunking.NONE, .FIXED or .ADAPTIVE
+reader.chunk_size    # points per chunk; None unless chunking is FIXED
+```
+
 The extended variable-length records LAS 1.4 keeps behind the point data are
 read as well, keyed by `(user_id, record_id)` — the id alone is not a key,
 since LAS namespaces records by user id:

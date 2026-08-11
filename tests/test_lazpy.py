@@ -12,9 +12,10 @@ import encoder
 import lazpy
 import models
 from lazpy import _cpylaz as cpylaz
-from lazpy import (Compressor, LASZIP_VLR_KEY, LASZIP_VLR_RECORD_ID,
-                   LASZIP_VLR_USER_ID, Point, Reader, Selective, ItemType,
-                   LazError, UnsupportedFileError, Writer)
+from lazpy import (Chunking, Compressor, LASZIP_VLR_KEY,
+                   LASZIP_VLR_RECORD_ID, LASZIP_VLR_USER_ID, Point, Reader,
+                   Selective, ItemType, LazError, UnsupportedFileError,
+                   Writer)
 
 
 class TestArithmeticModel:
@@ -1493,12 +1494,16 @@ def load(name):
     with open(fixture(name), "rb") as fh:
         data = fh.read()
     with Reader(io.BytesIO(data)) as reader:
-        compressor = (Compressor.NONE if reader.laz_header is None
-                      else reader.laz_header["compressor"])
+        # the VLR's own fields rather than Reader.chunk_size, which is None
+        # for the containers that do not chunk: what these helpers want is the
+        # field to write back out when re-encoding the fixture
+        laz = reader.laz_header
+        compressor = Compressor.NONE if laz is None else laz["compressor"]
+        chunk_size = 0 if laz is None else laz["chunk_size"]
         return FixtureFile(data, reader.header, reader.num_points,
                            tuple((int(t), size, version)
                                  for t, size, version in reader.items),
-                           int(compressor), reader.chunk_size)
+                           int(compressor), chunk_size)
 
 
 def las_records(name):
@@ -2179,7 +2184,24 @@ class TestFileProperties:
 
     def test_chunk_size_from_laszip_vlr(self):
         with Reader(fixture("pt1_v2.laz")) as reader:
+            assert reader.chunking is Chunking.FIXED
             assert reader.chunk_size == 137
+
+    def test_a_pointwise_file_reports_no_chunking(self):
+        """However large a chunk size its LASzip VLR carries.
+
+        The POINTWISE container is one stream from the first point to the
+        last, so the field is left over rather than descriptive.
+        """
+        with Reader(fixture("pt1_v1_pointwise.laz")) as reader:
+            assert reader.laz_header["chunk_size"] == 50000   # what it says
+            assert reader.chunking is Chunking.NONE
+            assert reader.chunk_size is None
+
+    def test_an_uncompressed_file_reports_no_chunking(self):
+        with Reader(fixture("pt1_v0.las")) as reader:
+            assert reader.chunking is Chunking.NONE
+            assert reader.chunk_size is None
 
     def test_accepts_an_open_file_object(self):
         with open(fixture("pt0_v2.laz"), "rb") as fh:
@@ -3042,7 +3064,8 @@ class TestWriterContainers:
                             breaks=(1, 10, 200, 201))
 
         with Reader(io.BytesIO(data)) as reader:
-            assert reader.chunk_size == -1
+            assert reader.chunking is Chunking.ADAPTIVE
+            assert reader.chunk_size is None
             for index in (0, 300, 1, 205, len(points) - 1, 10, 200):
                 reader.seek(index)
                 assert reader.read().X == points[index].X, index
