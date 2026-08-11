@@ -12,7 +12,9 @@ values it writes little-endian, and on a big-endian host would emit garbage
 rather than fail. Nobody has needed it there, and `testdata/` is committed.
 
 The three C and C++ tools below need a LASzip checkout built as a shared
-library; the two Python ones drive what those produce:
+library. The Python ones need only lazpy: `compare_with_laszip.py` and
+`verify_sweep.py` read what those produce, and `fuzz.py` needs no reference at
+all, since what it looks for is a crash.
 
 ```bash
 git clone --depth 1 https://github.com/LASzip/LASzip.git
@@ -134,6 +136,28 @@ suite agreeing with a stale reference is agreeing with nothing, so
 `.github/workflows/verify.yml` runs this weekly against laszip's default
 branch. Unlike the tools above it needs no LASzip headers -- only the
 `lazdump` they built.
+
+## fuzz.py
+
+Mutates the fixtures and reads the results, looking for what a malformed file
+must never do: crash the interpreter, hang it, or leave a Python exception
+dangling behind a successful-looking return.
+
+```bash
+python tools/fuzz.py                        # 500 cases from seed 0
+python tools/fuzz.py --seed 8000 --count 20000
+python tools/fuzz.py --seed 1940 --count 1  # reproduce one case exactly
+```
+
+Every case is determined by its seed, and the seed is printed before the case
+runs, so a crash -- which prints nothing itself -- is named by the last line
+of output. Findings are written to `testdata/malformed/` and become part of
+the suite: `TestMalformedCorpus` reads every file there.
+
+Needs lazpy installed, and nothing else. It is a smoke test rather than a
+coverage-guided fuzzer -- it finds what random mutation finds, which is the
+shallow half. libFuzzer over the C entry points or Atheris over the Python
+API would go deeper, and would each need a build of their own.
 
 ## Regenerating testdata/
 

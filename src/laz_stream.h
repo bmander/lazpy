@@ -70,6 +70,19 @@ static inline BOOL laz_stream_eof(LazStream *s) { return s->eof; }
 U32 laz_stream_get32(LazStream *s);
 U64 laz_stream_get64(LazStream *s);
 
+/*
+ * How many bytes are left, or -1 where that cannot be known.
+ *
+ * For sizing an allocation against what the file could actually supply: a
+ * corrupt count read out of a chunk header is otherwise a malloc of whatever
+ * it happens to say. Reads themselves need no such check -- past the end a
+ * stream hands back zeros and sets eof, which the readers already test for.
+ *
+ * -1 means a stream that cannot be measured, which is a file object that
+ * cannot seek. The length of a file stream is found once and remembered.
+ */
+I64 laz_stream_remaining(LazStream *s);
+
 /* ---------------------------------------------------------------- output */
 
 /*

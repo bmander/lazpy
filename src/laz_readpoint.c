@@ -108,6 +108,11 @@ BOOL laz_readpoint_setup(LazReadPoint *rp, U32 num_items, const LazItem *items,
     rp->layered_las14_compression = LAZ_FALSE;
     rp->chunk_size = U32_MAX;
 
+    if (compressor > LAZ_COMPRESSOR_LAYERED_CHUNKED) {
+        set_error(rp, "compressor %u is not supported", compressor);
+        return LAZ_FALSE;
+    }
+
     if (compressor) {
         if (coder != LAZ_CODER_ARITHMETIC) {
             set_error(rp, "entropy coder %u is not supported", coder);
@@ -146,6 +151,25 @@ BOOL laz_readpoint_setup(LazReadPoint *rp, U32 num_items, const LazItem *items,
             if (!rp->readers_compressed[i]) {
                 set_error(rp, "item type %u version %u is not supported",
                           items[i].type, items[i].version);
+                return LAZ_FALSE;
+            }
+            /*
+             * The container and the item versions have to agree, and a file
+             * can declare a pair that does not: the LASzip VLR carries the
+             * compressor and the per-item versions as separate fields.
+             * Reading either one the other's way is undefined rather than
+             * merely wrong -- a flat item in a layered chunk is asked for
+             * layer sizes it has no function for, and crashes.
+             *
+             * Which kind an item is, is not restated here as a version
+             * table: a layered reader is exactly one that knows how to read
+             * its layer sizes. The mirror of laz_writepoint_setup's check.
+             */
+            if ((rp->readers_compressed[i]->chunk_sizes != NULL)
+                    != rp->layered_las14_compression) {
+                set_error(rp, "item type %u version %u cannot be read from "
+                          "compressor %u", items[i].type, items[i].version,
+                          compressor);
                 return LAZ_FALSE;
             }
         }
@@ -191,7 +215,7 @@ static BOOL read_chunk_table(LazReadPoint *rp)
     I64 chunk_table_start_position;
     I64 chunks_start;
     BOOL failed = LAZ_FALSE;
-    U32 version, i;
+    U32 version, declared, i;
 
     chunk_table_start_position = (I64)laz_stream_get64(rp->instream);
     chunks_start = laz_stream_tell(rp->instream);
@@ -234,7 +258,25 @@ static BOOL read_chunk_table(LazReadPoint *rp)
         version = laz_stream_get32(rp->instream);
         if (version != 0) { failed = LAZ_TRUE; break; }
 
-        rp->number_chunks = laz_stream_get32(rp->instream);
+        /*
+         * The count is a u32 out of the file and two arrays are sized from
+         * it, so a corrupt one is a couple of eight-byte-per-chunk mallocs of
+         * whatever it says -- eleven gigabytes each, for one file the fuzzer
+         * mutated. A chunk occupies at least a byte of the point data it
+         * describes, so there cannot be more chunks than there are bytes
+         * between the first one and the table itself.
+         *
+         * Rejected before it is adopted, not after: number_chunks staying
+         * U32_MAX is what tells the recovery below that no usable count was
+         * read, and what keeps it from leaving a count without the
+         * chunk_starts that every later read indexes.
+         */
+        declared = laz_stream_get32(rp->instream);
+        if ((I64)declared > chunk_table_start_position - chunks_start) {
+            failed = LAZ_TRUE;
+            break;
+        }
+        rp->number_chunks = declared;
         free(rp->chunk_totals); rp->chunk_totals = NULL;
         free(rp->chunk_starts); rp->chunk_starts = NULL;
 
