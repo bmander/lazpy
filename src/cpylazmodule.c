@@ -1206,8 +1206,8 @@ static int Point_set_extra_bytes(PointObject *self, PyObject *v, void *c)
 static PyGetSetDef Point_getset[] = {
 #define POINT_GETSET(name, doc) \
     {#name, (getter)Point_get_##name, (setter)Point_set_##name, doc, NULL}
-    POINT_GETSET(X, "unscaled x: multiply by the header's x scale and add its "
-                    "x offset for metres, which is what Reader.scale does"),
+    POINT_GETSET(X, "unscaled x: multiply by the header's x scale and add "
+                    "its x offset for metres; Reader.scale does this"),
     POINT_GETSET(Y, "unscaled y; see X"),
     POINT_GETSET(Z, "unscaled z; see X"),
     POINT_GETSET(intensity, "return magnitude, 0 to 65535, normalised by the "
@@ -2156,8 +2156,8 @@ static PyMethodDef Reader_methods[] = {
 
 static PyGetSetDef Reader_getset[] = {
     {"point", (getter)Reader_get_point, NULL,
-     "the Point read() hands back, before or after any read: one buffer for "
-     "the life of the reader, so what it holds is the last point decoded",
+     "the Point read() hands back: one buffer for the life of the reader, "
+     "holding the last point decoded",
      NULL},
     {"index", (getter)Reader_get_index, NULL,
      "which point read() will decode next, counting from 0", NULL},
@@ -2172,9 +2172,9 @@ static PyGetSetDef Reader_getset[] = {
      "how many extra bytes a decoded point carries -- the item layout's, less "
      "any the LAS 1.4 compatibility attributes take up", NULL},
     {"warning", (getter)Reader_get_warning, NULL,
-     "what went wrong that reading survived, or None. A missing or corrupt "
-     "chunk table is the case that raises this rather than an error: points "
-     "still decode, but seeking has to decode forward to reach them",
+     "a non-fatal problem met while reading, or None. A missing or corrupt "
+     "chunk table is the usual one: points still decode, but seeking has to "
+     "decode forward to reach them",
      NULL},
     {NULL}
 };
@@ -2537,15 +2537,13 @@ PyDoc_STRVAR(writer_doc,
 "\n"
 "The compress side of PointReader: points in, a LAZ point block out.\n"
 "\n"
-"The arguments are PointReader's, and mean the same things. As there, this\n"
-"is the container alone -- it writes no header and no LASzip VLR, only the\n"
-"points and the chunk table behind them, so what it produces has to be\n"
-"described by a header something else wrote. lazpy.Writer is that something\n"
-"else.\n"
+"The arguments are PointReader's. As there, this is the container alone --\n"
+"it writes no header and no LASzip VLR, only the points and the chunk\n"
+"table behind them, so what it produces has to be described by a header\n"
+"something else wrote. lazpy.Writer is that something else.\n"
 "\n"
-"write() takes a Point or the bytes of one on-disk record, and done() must\n"
-"be called to close the last chunk and write the chunk table -- otherwise\n"
-"the file ends mid-chunk and nothing can seek in it.\n");
+"write() takes a Point or the bytes of one on-disk record; call done()\n"
+"when the last point is in.\n");
 
 static PyTypeObject Writer_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
@@ -2705,8 +2703,8 @@ PyDoc_STRVAR(index_doc,
 "gets those runs back.\n"
 "\n"
 "`data` is the payload of a \".lax\" file or of the extended record an\n"
-"appended index lives in; which of the two it came from makes no difference\n"
-"here, and finding it is Reader.spatial_index's job.\n");
+"appended index lives in -- the two carry the same bytes. Finding one is\n"
+"Reader.spatial_index's job.\n");
 
 static PyTypeObject Index_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
