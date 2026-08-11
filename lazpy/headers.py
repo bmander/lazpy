@@ -119,6 +119,11 @@ LASZIP_RECORD_FORMAT = (
     ('number_of_items', 2, unsigned_int),
 )
 
+# The two fields of that record an appended spatial index is found by, and
+# how far into the payload they sit. Named here, where the table they are part
+# of is, so that a field added in front of them moves them with it.
+LASZIP_SPECIAL_EVLR_FORMAT = LASZIP_RECORD_FORMAT[7:9]
+
 LASZIP_ITEM_FORMAT = (
     ('type', 2, unsigned_int),
     ('size', 2, unsigned_int),
@@ -153,6 +158,8 @@ def format_size(fmt):
     """How many bytes a table occupies."""
     return sum(size for _, size, _ in fmt)
 
+
+LASZIP_SPECIAL_EVLRS_AT = format_size(LASZIP_RECORD_FORMAT[:7])
 
 VLR_HEADER_SIZE = format_size(VLR_HEADER_FORMAT)
 EVLR_HEADER_SIZE = format_size(EVLR_HEADER_FORMAT)

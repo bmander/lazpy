@@ -349,6 +349,123 @@ static PyObject *Reader_read(ReaderObject *self, PyObject *Py_UNUSED(i))
  * point: the hashes in testdata/reference_hashes.txt are a property of the
  * file, and must not depend on the host that computed them.
  */
+/*
+ * The box `count` points cover, in the integers they are stored as.
+ *
+ * The first of the two passes building an index takes: where each point falls
+ * cannot be settled until the extent of them all is known. In C for the
+ * reason the second pass is -- a point that never becomes a Python object is
+ * most of what makes indexing a large file bearable.
+ */
+static PyObject *Reader_bounds(ReaderObject *self, PyObject *args)
+{
+    unsigned long long count;
+    I32 min_xy[2] = {0, 0}, max_xy[2] = {0, 0};
+    U64 done = 0;
+    BOOL ok = LAZ_TRUE;
+
+    if (!PyArg_ParseTuple(args, "K", &count)) return NULL;
+    if (count == 0) {
+        PyErr_SetString(LazErrorType, "a file with no points has no extent");
+        return NULL;
+    }
+
+    Py_BEGIN_ALLOW_THREADS
+    while (done < count) {
+        const LazPoint *p = &self->point;
+        int i;
+        if (!reader_next(self)) { ok = LAZ_FALSE; break; }
+        if (done == 0) {
+            min_xy[0] = max_xy[0] = p->X;
+            min_xy[1] = max_xy[1] = p->Y;
+        } else {
+            const I32 xy[2] = {p->X, p->Y};
+            for (i = 0; i < 2; i++) {
+                if (xy[i] < min_xy[i]) min_xy[i] = xy[i];
+                if (xy[i] > max_xy[i]) max_xy[i] = xy[i];
+            }
+        }
+        done++;
+        self->index++;
+    }
+    Py_END_ALLOW_THREADS
+
+    if (!ok) return reader_error(self);
+    return Py_BuildValue("(iiii)", min_xy[0], min_xy[1], max_xy[0], max_xy[1]);
+}
+
+/*
+ * Builds a spatial index over every point from here to the end.
+ *
+ * The whole file goes through the builder without a Python object per point,
+ * which is what makes indexing a large file worth doing at all: it is two
+ * passes over the points, and this is the second.
+ */
+static PyObject *Reader_build_index(ReaderObject *self, PyObject *args)
+{
+    double min_x, max_x, min_y, max_y, scale_x, scale_y, offset_x, offset_y;
+    double cell_size;
+    unsigned long long count;
+    unsigned int minimum_points, threshold;
+    int maximum_intervals;
+    LazIndexBuilder builder;
+    LazOutStream *out;
+    PyObject *result = NULL;
+    const U8 *data;
+    I64 size = 0;
+    U64 done = 0;
+    BOOL ok = LAZ_TRUE;
+    if (!PyArg_ParseTuple(
+            args, "K(dddd)(dd)(dd)dIiI", &count,
+            &min_x, &min_y, &max_x, &max_y, &scale_x, &scale_y,
+            &offset_x, &offset_y, &cell_size, &minimum_points,
+            &maximum_intervals, &threshold))
+        return NULL;
+
+    if (!laz_indexbuilder_setup(&builder, min_x, max_x, min_y, max_y,
+                                (F32)cell_size, threshold)) {
+        PyErr_SetString(LazErrorType, builder.last_error);
+        return NULL;
+    }
+    out = laz_outstream_new_array();
+    if (!out) {
+        laz_indexbuilder_destroy(&builder);
+        return PyErr_NoMemory();
+    }
+
+    Py_BEGIN_ALLOW_THREADS
+    while (done < count) {
+        LazPoint *p = &self->point;
+        if (!reader_next(self)) { ok = LAZ_FALSE; break; }
+        if (!laz_indexbuilder_add(&builder,
+                                  p->X * scale_x + offset_x,
+                                  p->Y * scale_y + offset_y, done)) {
+            ok = LAZ_FALSE;
+            break;
+        }
+        done++;
+        self->index++;
+    }
+    if (ok) ok = laz_indexbuilder_complete(&builder, minimum_points,
+                                           maximum_intervals);
+    if (ok) ok = laz_indexbuilder_serialize(&builder, out);
+    Py_END_ALLOW_THREADS
+
+    if (ok) {
+        data = laz_outstream_array_data(out, &size);
+        result = PyBytes_FromStringAndSize((const char *)data,
+                                           (Py_ssize_t)size);
+    } else if (builder.has_error) {
+        /* read before the builder is destroyed, which clears it */
+        PyErr_SetString(LazErrorType, builder.last_error);
+    } else {
+        reader_error(self);
+    }
+    laz_outstream_destroy(out);
+    laz_indexbuilder_destroy(&builder);
+    return result;
+}
+
 static PyObject *Reader_checksum(ReaderObject *self, PyObject *args)
 {
     long long count = -1;
@@ -820,6 +937,18 @@ static PyMethodDef Reader_methods[] = {
      "Make index the next point to be read. Costs a chunk decode where "
      "there is a chunk table to jump by, and a decode from the last "
      "known boundary where there is not."},
+    {"bounds", (PyCFunction)Reader_bounds, METH_VARARGS,
+     "bounds(count) -> (min_X, min_Y, max_X, max_Y)\n\n"
+     "Decode count points and report the box they cover, in the integers "
+     "they are stored as. Runs in C with the GIL released."},
+    {"build_index", (PyCFunction)Reader_build_index, METH_VARARGS,
+     "build_index(count, bounds, scales, offsets, cell_size, "
+     "minimum_points, maximum_intervals, threshold) -> bytes\n\n"
+     "Decode count points and build a LASzip spatial index over them, "
+     "returning the bytes of one. `bounds` is (min_x, min_y, max_x, max_y) "
+     "in the georeferenced coordinates `scales` and `offsets` produce, and "
+     "is what the quadtree is laid over. Runs in C with the GIL released, "
+     "one pass over the points."},
     {"checksum", (PyCFunction)Reader_checksum, METH_VARARGS,
      "checksum(count=-1) -> (fnv1a_hash, points_read)\n\n"
      "Decode count points, hashing every field of each, and advance past "

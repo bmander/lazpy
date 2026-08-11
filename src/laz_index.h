@@ -31,9 +31,8 @@
  * coarser than the query, and an interval may span points from other cells --
  * so the caller still has to test each point it decodes.
  *
- * Only reading is ported. Building an index means deciding cell sizes and
- * coarsening thresholds, which belongs with a writer; see the note in
- * tools/README.md about how the test fixtures were made.
+ * Reading one is here; building one is laz_indexbuild.h, which is the same
+ * structures filled the other way.
  */
 #ifndef LAZ_INDEX_H
 #define LAZ_INDEX_H
@@ -132,5 +131,28 @@ BOOL laz_index_intersect_circle(LazIndex *ix, F64 center_x, F64 center_y,
                                 F64 radius);
 
 void laz_index_destroy(LazIndex *ix);
+
+/* ---------------------------------------------------- shared with building */
+
+/*
+ * Doubling growth for an array whose size is not known in advance. Returns
+ * NULL and leaves `base` valid on failure, as realloc does.
+ */
+void *laz_index_grow(void *base, U32 *alloc, U32 needed, size_t item);
+
+/* Where each level's cell indices begin; `level_offset` holds 17 of them. */
+void laz_index_level_offsets(U32 *level_offset);
+
+/* Which level a cell index belongs to, by that table. */
+U32 laz_index_level_of(const U32 *level_offset, U32 cell_index);
+
+/*
+ * Puts `n` runs in order and joins the ones no more than `threshold` apart,
+ * returning how many are left. The rule a query merges by and the rule a
+ * builder merges cells by, which have to be the same one.
+ */
+U32 laz_index_coalesce(LazInterval *intervals, U32 n, U64 threshold);
+
+
 
 #endif /* LAZ_INDEX_H */

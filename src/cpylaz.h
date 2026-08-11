@@ -22,6 +22,7 @@
 #include "laz_readpoint.h"
 #include "laz_writepoint.h"
 #include "laz_index.h"
+#include "laz_indexbuild.h"
 
 /*
  * The exception every decode failure raises. lazpy/__init__.py re-exports
