@@ -1,8 +1,8 @@
 """The on-disk layout: header, VLR and LASzip-record format tables, and
 the functions that read and write anything those tables describe."""
 
-from ._utils import (unsigned_int, signed_int, u32_array, u64_array, double,
-                     cstr, PACKERS)
+from ._utils import (unsigned_int, signed_int, u32_array, u64_array,
+                     double_array, double, cstr, raw, PACKERS)
 
 # ---------------------------------------------------------------------------
 # The on-disk layouts, each a table of (name, size, parser).
@@ -119,6 +119,29 @@ LASZIP_ITEM_FORMAT = (
     ('version', 2, unsigned_int),
 )
 
+# One attribute out of an "extra bytes" record, which is how a file says what
+# the opaque bytes on the end of its points mean. The records are laid end to
+# end, one fixed-width descriptor each.
+#
+# The type, the option byte and the name are what decide how a point is read;
+# the five triples behind them describe what its numbers mean, one value per
+# dimension. no_data, min and max are held as whatever type the attribute
+# itself has, so they are bytes here and the attribute's own type is what
+# reads them; scale and offset are doubles whatever the attribute is.
+EXTRA_BYTES_ATTRIBUTE_FORMAT = (
+    ('reserved', 2, unsigned_int),
+    ('data_type', 1, unsigned_int),
+    ('options', 1, unsigned_int),
+    ('name', 32, cstr),
+    ('unused', 4, unsigned_int),
+    ('no_data', 24, raw),
+    ('min', 24, raw),
+    ('max', 24, raw),
+    ('scale', 24, double_array),
+    ('offset', 24, double_array),
+    ('description', 32, cstr),
+)
+
 
 def format_size(fmt):
     """How many bytes a table occupies."""
@@ -127,6 +150,12 @@ def format_size(fmt):
 
 VLR_HEADER_SIZE = format_size(VLR_HEADER_FORMAT)
 EVLR_HEADER_SIZE = format_size(EVLR_HEADER_FORMAT)
+EXTRA_BYTES_ATTRIBUTE_SIZE = format_size(EXTRA_BYTES_ATTRIBUTE_FORMAT)
+
+# The longest payload a variable length record can declare, its length field
+# being two bytes wide where an extended record's is eight -- which is the
+# whole of the difference between the two tables above.
+MAX_VLR_PAYLOAD = 0xFFFF
 
 
 def unpack_format(fmt, data, offset=0):

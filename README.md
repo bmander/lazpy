@@ -124,6 +124,39 @@ point count, the counts by return number and the bounding box are filled in
 when the file is closed, which is why the output has to be seekable; anything
 else can be set through `writer.header` until then.
 
+Everything a file says about itself beyond that fixed header is a variable
+length record — where on the earth its coordinates are, above all — and
+`vlrs=` is where they go. They are the same records `Reader` hands back, so
+copying a file is passing them along:
+
+```python
+with Reader("cloud.laz") as reader:
+    header = reader.header
+    with Writer("copy.laz", point_format=reader.point_format,
+                scales=reader.scales, offsets=reader.offsets,
+                vlrs=header["variable_length_records"]) as writer:
+        for point in reader:
+            writer.write(point)
+```
+
+The source file's own LASzip record is dropped on the way, since it describes
+how *that* file was compressed; the writer builds the one that describes this
+one. Records have to be given up front, because the header records how far
+past itself the points begin.
+
+The one record lazpy will build for you is the "extra bytes" descriptor, which
+says what the opaque bytes on the end of each point mean. A writer given one
+takes `num_extra_bytes` from it:
+
+```python
+from lazpy import ExtraBytesAttribute, extra_bytes_record
+
+amplitude = ExtraBytesAttribute(b"amplitude", 3, scale=0.01)   # u16
+with Writer("out.laz", point_format=1,
+            vlrs=[extra_bytes_record([amplitude])]) as writer:
+    ...
+```
+
 The compressor follows the file name — `.las` writes plain LAS — and the item
 version follows the point format, as laszip's own default does: v2 for formats
 0–5, v3 for 6–10. `laz_version=` overrides it. `chunk_size=` sets how many

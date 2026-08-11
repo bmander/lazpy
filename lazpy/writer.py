@@ -1,11 +1,16 @@
 """The writing front end: :class:`Writer` and what only it needs."""
 
+from collections import namedtuple
+
 from ._cpylaz import PointWriter, LazError
-from .formats import (LASZIP_VLR_RECORD_ID, LASZIP_VLR_USER_ID, Compressor,
+from ._utils import cstr, pack_cstr
+from .compat import _attribute_size, _extra_bytes_attributes
+from .formats import (EXTRA_BYTES_VLR_KEY, LASZIP_VLR_KEY, Compressor,
                       Coder, UnsupportedFileError, _POINT_FORMATS,
                       items_for_point_format, _versioned_items,
                       _min_version_minor)
-from .headers import (VLR_HEADER_FORMAT, LASZIP_RECORD_FORMAT,
+from .headers import (EXTRA_BYTES_ATTRIBUTE_FORMAT, MAX_VLR_PAYLOAD,
+                      VLR_HEADER_FORMAT, LASZIP_RECORD_FORMAT,
                       LASZIP_ITEM_FORMAT, header_formats, pack_format,
                       _header_size, _can_seek)
 
@@ -16,11 +21,195 @@ def _as_i32(value):
     return value - 0x100000000 if value > 0x7FFFFFFF else value
 
 
+def _user_id(value):
+    """A record's user id as a reader will key it by.
+
+    Through the pair that writes the field and reads it back, so that a name
+    given padded, or as text, is the one thing it can be on the way out --
+    and one given too long is refused here rather than deeper down.
+    """
+    return cstr(pack_cstr(value, 16))
+
+
+# ---------------------------------------------------------------------------
+# Variable length records.
+#
+# A record is a mapping -- the shape Reader hands back -- with `user_id`,
+# `record_id` and `data`, and optionally `description` and `reserved`. The
+# payload length is taken from the payload rather than from the field that
+# states it, so a record copied from a file whose length field lies is written
+# as the bytes it really has.
+#
+# They are written in the order given, and the LASzip record last, which is
+# where laszip puts its own: it appends to the header's records rather than
+# leading with it.
+# ---------------------------------------------------------------------------
+
+
+def _records(vlrs):
+    """`vlrs` ready to write: a list of records, in file order.
+
+    Accepts a mapping keyed by ``(user_id, record_id)``, as
+    ``header["variable_length_records"]`` is, or any iterable of records --
+    so copying a file's records is handing them over as they came.
+
+    A LASzip record among them is dropped rather than refused, which is what
+    laszip does with one too: it describes how the file it came from was
+    compressed, and the file being written has its own answer to that.
+    """
+    if hasattr(vlrs, 'values'):
+        vlrs = vlrs.values()
+
+    records = []
+    keys = set()
+    for vlr in vlrs:
+        key = (_user_id(vlr['user_id']), vlr['record_id'])
+        if key == LASZIP_VLR_KEY:
+            continue
+        if key in keys:
+            raise ValueError(f"two records claim {key[0]!r} {key[1]}, and a "
+                             "reader can only find one of them")
+        records.append(_record(key, bytes(vlr['data']),
+                               vlr.get('description', b''),
+                               vlr.get('reserved', 0)))
+        keys.add(key)
+    return records
+
+
+def _record(key, data, description, reserved=0):
+    """One record, sized by the payload it holds."""
+    if len(data) > MAX_VLR_PAYLOAD:
+        raise ValueError(
+            f"record {key[0]!r} {key[1]} holds {len(data)} bytes, over the "
+            f"{MAX_VLR_PAYLOAD} a variable length record can declare")
+    return {
+        'reserved': reserved,
+        'user_id': key[0],
+        'record_id': key[1],
+        'record_length_after_header': len(data),
+        'description': description,
+        'data': data,
+    }
+
+
+def _pack_vlr(record):
+    """One record on disk: its 54-byte header, then its payload."""
+    return pack_format(VLR_HEADER_FORMAT, record) + record['data']
+
+
+def _extra_bytes_width(records, declared):
+    """How many extra bytes a point carries, given the records and what the
+    caller said.
+
+    The "extra bytes" record is the file's own account of them, so it decides
+    when it is there, and `declared` is only checked against it: a file whose
+    descriptor and record length disagree is one nothing can read, and it is
+    cheaper to refuse it here than to explain it later.
+    """
+    descriptor = next((record for record in records
+                       if (record['user_id'],
+                           record['record_id']) == EXTRA_BYTES_VLR_KEY), None)
+    if descriptor is None:
+        return 0 if declared is None else declared
+
+    described = sum(a.size for a in _extra_bytes_attributes(
+        descriptor['data']))
+    if declared is not None and declared != described:
+        raise ValueError(
+            f"the extra bytes record describes {described} bytes per point, "
+            f"but num_extra_bytes is {declared}")
+    return described
+
+
+# ---------------------------------------------------------------------------
+# The "extra bytes" record, which is how a file says what its extra bytes
+# mean. laszip builds one an attribute at a time, in laszip_add_attribute();
+# this builds the whole record from the attributes, since it has to be
+# complete before the header that counts it is written.
+# ---------------------------------------------------------------------------
+
+ExtraBytesAttribute = namedtuple(
+    "ExtraBytesAttribute", "name data_type description scale offset",
+    defaults=(b'', None, None))
+ExtraBytesAttribute.__doc__ = """One attribute of a point's extra bytes.
+
+    `data_type` is the LAS data type: 1 to 10 for the scalar types, in the
+    order the specification lists them, and the deprecated array types above
+    that. `scale` and `offset` are what turn the stored number into the
+    quantity it stands for; leaving them out says the number is the quantity.
+    """
+
+# The option bits that say a descriptor's scale and offset were set at all;
+# an attribute leaving them out is one whose numbers stand for themselves.
+_SCALE_GIVEN = 0x08
+_OFFSET_GIVEN = 0x10
+
+
+def _pack_attribute(attribute):
+    """One attribute descriptor, by the table that reads it back.
+
+    no_data, min and max are left empty: they describe the range of a
+    quantity rather than how to find it, and nothing here has an opinion
+    about that.
+    """
+    if attribute.data_type == 0:
+        raise ValueError(
+            "data type 0 means undocumented bytes, whose width is in the "
+            "option byte this puts scale and offset in; describe them with a "
+            "record built by hand")
+    _attribute_size(attribute.data_type, 0)     # raises for an unknown type
+
+    options = 0
+    if attribute.scale is not None:
+        options |= _SCALE_GIVEN
+    if attribute.offset is not None:
+        options |= _OFFSET_GIVEN
+
+    return pack_format(EXTRA_BYTES_ATTRIBUTE_FORMAT, {
+        'reserved': 0,
+        'data_type': attribute.data_type,
+        'options': options,
+        'name': attribute.name,
+        'unused': 0,
+        'no_data': b'', 'min': b'', 'max': b'',
+        # one value per dimension, of which only the first matters for the
+        # scalar types, and all three the same for the array ones
+        'scale': [float(attribute.scale or 0.0)] * 3,
+        'offset': [float(attribute.offset or 0.0)] * 3,
+        'description': attribute.description,
+    })
+
+
+def extra_bytes_record(attributes, description=b''):
+    """The "extra bytes" record describing `attributes`, as a record a
+    :class:`Writer` takes.
+
+    The attributes are laid out in the order given, which is the order they
+    sit in a point:
+
+        >>> record = extra_bytes_record([
+        ...     ExtraBytesAttribute(b"amplitude", 3, scale=0.01),
+        ...     ExtraBytesAttribute(b"echo width", 3)])
+        >>> Writer("out.laz", point_format=1, vlrs=[record])  # doctest: +SKIP
+
+    A writer given one takes the size of a point's extra bytes from it, so
+    ``num_extra_bytes`` need not be given as well -- and if it is, it has to
+    agree.
+    """
+    return {
+        'user_id': EXTRA_BYTES_VLR_KEY[0],
+        'record_id': EXTRA_BYTES_VLR_KEY[1],
+        'description': description,
+        'data': b''.join(_pack_attribute(a) for a in attributes),
+    }
+
+
 class Writer:
     """Write points to a LAS or LAZ file.
 
-    The mirror of :class:`Reader`: the header and the LASzip VLR are built
-    here, and everything from the first point onward is the C extension's.
+    The mirror of :class:`Reader`: the header and the variable length records
+    are built here, and everything from the first point onward is the C
+    extension's.
 
         >>> with Writer("out.laz", point_format=6, scales=(0.01,) * 3) as w:
         ...     for point in points:
@@ -53,9 +242,9 @@ class Writer:
 
     def __init__(self, filename, point_format, *, scales=(0.01, 0.01, 0.01),
                  offsets=(0.0, 0.0, 0.0), compressed=None, compressor=None,
-                 laz_version=None, chunk_size=50000, num_extra_bytes=0,
+                 laz_version=None, chunk_size=50000, num_extra_bytes=None,
                  version_minor=None, system_identifier=b'',
-                 generating_software=None, vlr_description=b'lazpy',
+                 generating_software=None, vlrs=(), vlr_description=b'lazpy',
                  file_creation=(0, 0)):
         """Open *filename* for writing points of *point_format*.
 
@@ -78,6 +267,16 @@ class Writer:
         become georeferenced ones; they are recorded in the header and applied
         to nothing here, since points are written as they are given.
 
+        ``vlrs`` are the variable length records the file carries besides the
+        LASzip one, which is the writer's own: a coordinate reference system,
+        an "extra bytes" descriptor, whatever a file being copied had. They
+        are taken here rather than later because the header records how far
+        past itself the points begin.
+
+        ``num_extra_bytes`` is how many opaque bytes ride on the end of each
+        point. It defaults to what the "extra bytes" record among ``vlrs``
+        describes, and to none when there is no such record.
+
         ``system_identifier``, ``generating_software`` and ``vlr_description``
         are free text the file carries about its own provenance.
         """
@@ -87,6 +286,8 @@ class Writer:
         self._closed = False
         self._owns_fp = False
 
+        records = _records(vlrs)
+        num_extra_bytes = _extra_bytes_width(records, num_extra_bytes)
         if num_extra_bytes < 0:
             raise ValueError("num_extra_bytes cannot be negative")
 
@@ -123,18 +324,22 @@ class Writer:
         self.compressor = compressor
         self.chunk_size = chunk_size
 
-        # built before the header, because the header records how far past
+        # the LASzip record goes last, where laszip puts its own: it appends
+        # to the records it was given
+        if self.compressed:
+            records.append(self._laszip_record(vlr_description))
+        # packed before the header, because the header records how far past
         # itself the points begin
-        vlr = (self._pack_laszip_vlr(vlr_description) if self.compressed
-               else b'')
+        block = b''.join(_pack_vlr(record) for record in records)
 
         self._open(filename)
         try:
             self.header = self._build_header(
-                record_length, version_minor, len(vlr), scales, offsets,
-                system_identifier, generating_software, file_creation)
+                record_length, version_minor, len(records), len(block),
+                scales, offsets, system_identifier, generating_software,
+                file_creation)
             self.fp.write(self._pack_header(self.header))
-            self.fp.write(vlr)
+            self.fp.write(block)
             self._writer = PointWriter(self.fp, self.items,
                                        int(self.compressor),
                                        chunk_size=chunk_size)
@@ -204,9 +409,9 @@ class Writer:
                 "writing needs a seekable file, because the point count and "
                 "bounding box are only known at the end")
 
-    def _build_header(self, record_length, version_minor, vlr_size, scales,
-                      offsets, system_identifier, generating_software,
-                      file_creation):
+    def _build_header(self, record_length, version_minor, num_records,
+                      vlr_size, scales, offsets, system_identifier,
+                      generating_software, file_creation):
         header_size = _header_size(version_minor)
         day, year = file_creation
 
@@ -225,7 +430,7 @@ class Writer:
             'file_creation_year': year,
             'header_size': header_size,
             'offset_to_point_data': header_size + vlr_size,
-            'number_of_variable_length_records': 1 if self.compressed else 0,
+            'number_of_variable_length_records': num_records,
             # the high bit is what tells a reader the points are compressed
             'point_data_format_id': (self.point_format
                                      | (0x80 if self.compressed else 0)),
@@ -265,10 +470,10 @@ class Writer:
         return b''.join(pack_format(fmt, header)
                         for fmt in header_formats(version_minor))
 
-    def _pack_laszip_vlr(self, description):
-        """The LASzip VLR, the inverse of Reader._parse_laszip_record."""
+    def _laszip_record(self, description):
+        """The LASzip record, the inverse of Reader._parse_laszip_record."""
         major, minor, revision = self.LASZIP_VERSION
-        record = pack_format(LASZIP_RECORD_FORMAT, {
+        payload = pack_format(LASZIP_RECORD_FORMAT, {
             'compressor': self.compressor,
             'coder': Coder.ARITHMETIC,
             'version_major': major,
@@ -281,17 +486,11 @@ class Writer:
             'number_of_items': len(self.items),
         })
         for item_type, size, version in self.items:
-            record += pack_format(LASZIP_ITEM_FORMAT,
-                                  {'type': item_type, 'size': size,
-                                   'version': version})
+            payload += pack_format(LASZIP_ITEM_FORMAT,
+                                   {'type': item_type, 'size': size,
+                                    'version': version})
 
-        return pack_format(VLR_HEADER_FORMAT, {
-            'reserved': 0,
-            'user_id': LASZIP_VLR_USER_ID,
-            'record_id': LASZIP_VLR_RECORD_ID,
-            'record_length_after_header': len(record),
-            'description': description,
-        }) + record
+        return _record(LASZIP_VLR_KEY, payload, description)
 
     # -- writing ---------------------------------------------------------
 
