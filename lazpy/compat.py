@@ -1,16 +1,17 @@
-"""LAS 1.4 compatibility mode: recognising a legacy file that is a LAS
-1.4 file in disguise, and rewriting its header as the file it stands
-in for."""
+"""LAS 1.4 compatibility mode, both directions: recognising a legacy file
+that is a LAS 1.4 file in disguise and rewriting its header as the file it
+stands in for, and building the records that put a file in the disguise."""
 
 from collections import namedtuple
 
 from ._utils import unsigned_int
+from .extra_bytes import (EXTRA_BYTES_ATTRIBUTE_SIZE, ExtraBytesAttribute,
+                          _described_width, _extra_bytes_attributes,
+                          _pack_attribute)
 from .formats import (LASCOMPATIBLE_VLR_KEY, EXTRA_BYTES_VLR_KEY,
-                      UnsupportedFileError, _POINT_FORMATS)
-from .headers import (EXTRA_BYTES_ATTRIBUTE_FORMAT,
-                      EXTRA_BYTES_ATTRIBUTE_SIZE, HEADER_FORMAT_13,
-                      HEADER_FORMAT_14, format_size, unpack_format,
-                      _header_size)
+                      _POINT_FORMATS)
+from .headers import (HEADER_FORMAT_13, HEADER_FORMAT_14, format_size,
+                      pack_format, unpack_format, _header_size)
 
 # ---------------------------------------------------------------------------
 # LAS 1.4 compatibility mode.
@@ -27,7 +28,9 @@ from .headers import (EXTRA_BYTES_ATTRIBUTE_FORMAT,
 # LAS 1.4 file it stands in for. laszip does this only when asked -- see
 # laszip_request_compatibility_mode() -- and lazpy always does, because the
 # alternative is handing back points whose 1.4 fields are zero when the file
-# does carry them.
+# does carry them. Writing one is asked for, as it is in laszip: a file that
+# need not be disguised should not be. The building of the two records is at
+# the foot of this file; the folding of each point is the C writer's.
 # ---------------------------------------------------------------------------
 
 # The compatibility record: two version numbers and a spare, then the LAS 1.4
@@ -46,6 +49,13 @@ COMPATIBILITY_RECORD_SIZE = format_size(COMPATIBILITY_RECORD_FORMAT)
 # header to report, so a 1.5 file is left as the legacy file it says it is
 # rather than half-upgraded into something it is not.
 _COMPATIBLE_VERSION_14 = 3
+
+# What laszip puts in the record's other version field: its own build date,
+# truncated to the sixteen bits there are for it. Nothing reads it -- the
+# field above is what decides anything -- but a file lazpy writes carries the
+# date of the LASzip release its output matches -- the release
+# Writer.LASZIP_VERSION names, which is the same one.
+_LASZIP_BUILD_DATE = 260810
 
 # The four fields every compatibility-mode file hides, in the order laszip
 # appends them, and the fifth it hides only for a point format with a
@@ -70,43 +80,25 @@ CompatibilityLayout = namedtuple(
 # band, so the unreachable halves never come up.
 _UPGRADED_FORMAT = {1: (6, 6), 3: (7, 8), 4: (9, 10), 5: (9, 10)}
 
-# The widths of data types 1 to 10. Type 0 means undocumented bytes, as many as
-# the option byte says; 11 to 30 were arrays of two and three, deprecated in
-# 2018 and gone from LASzip's own writer, but still sized by the same table.
-_ATTRIBUTE_SIZES = (1, 1, 2, 2, 4, 4, 8, 8, 4, 8)
-
-# An attribute, as _extra_bytes_attributes reports it: where its descriptor
-# sits in the record, and where and how wide the attribute is in a point.
-_Attribute = namedtuple("_Attribute", "name offset start size")
+# The other direction: what an extended format is written as when it is
+# disguised. Stated rather than read out of the table above, which cannot be
+# turned around -- two legacy formats lead to one extended one, and the
+# ambiguity is only resolved by which of them had RGB to begin with.
+_DISGUISED_FORMAT = {6: 1, 7: 3, 8: 3, 9: 4, 10: 5}
 
 
-def _attribute_size(data_type, options):
-    """The width of an attribute of this type, in a point's extra bytes."""
-    if data_type == 0:
-        return options
-    if data_type > 3 * len(_ATTRIBUTE_SIZES):
-        raise UnsupportedFileError(
-            f"unknown extra bytes attribute data type {data_type}")
-    # the deprecated types are the ten scalar ones over again, two and three
-    # to an attribute
-    dimensions, scalar = divmod(data_type - 1, len(_ATTRIBUTE_SIZES))
-    return _ATTRIBUTE_SIZES[scalar] * (dimensions + 1)
+def _layout_of(data):
+    """The :class:`CompatibilityLayout` an "extra bytes" record describes, or
+    None if it does not name all four of the fields one has to name.
 
-
-def _extra_bytes_attributes(data):
-    """The attributes an "extra bytes" record describes, in file order.
-
-    Each is an :class:`_Attribute`. The descriptors are a running layout --
-    every attribute begins where the one before it ended -- which is what
-    makes `start` derivable rather than stated.
+    ``nir`` is -1 for a file that hid no near-infrared band.
     """
-    start = 0
-    for offset in range(0, len(data) - EXTRA_BYTES_ATTRIBUTE_SIZE + 1,
-                        EXTRA_BYTES_ATTRIBUTE_SIZE):
-        fields, _ = unpack_format(EXTRA_BYTES_ATTRIBUTE_FORMAT, data, offset)
-        size = _attribute_size(fields['data_type'], fields['options'])
-        yield _Attribute(fields['name'], offset, start, size)
-        start += size
+    starts = {a.name: a.start for a in _extra_bytes_attributes(data)}
+    if not all(name in starts for name in _COMPATIBILITY_ATTRIBUTES):
+        return None
+    return CompatibilityLayout(
+        *(starts[name] for name in _COMPATIBILITY_ATTRIBUTES),
+        starts.get(_NIR_ATTRIBUTE, -1))
 
 
 def _compatibility_layout(header):
@@ -137,13 +129,7 @@ def _compatibility_layout(header):
     attributes = vlrs.get(EXTRA_BYTES_VLR_KEY)
     if attributes is None:
         return None
-    starts = {a.name: a.start
-              for a in _extra_bytes_attributes(attributes['data'])}
-    if not all(name in starts for name in _COMPATIBILITY_ATTRIBUTES):
-        return None
-    return CompatibilityLayout(
-        *(starts[name] for name in _COMPATIBILITY_ATTRIBUTES),
-        starts.get(_NIR_ATTRIBUTE, -1))
+    return _layout_of(attributes['data'])
 
 
 def _upgrade_to_las_14(header, layout, num_extra_bytes):
@@ -209,3 +195,88 @@ def _drop_compatibility_attributes(header):
     else:
         del header['variable_length_records'][EXTRA_BYTES_VLR_KEY]
         header['number_of_variable_length_records'] -= 1
+
+
+# ---------------------------------------------------------------------------
+# Writing one.
+#
+# The inverse of everything above: given LAS 1.4 points, build the two records
+# that describe the disguise and say where in the extra bytes each hidden
+# field goes. Folding the points themselves is the C writer's, from the same
+# layout this returns -- see writer_recode_compat.
+#
+# laszip does this only when asked, in laszip_request_compatibility_mode(),
+# and so does lazpy: a file that need not be disguised should not be.
+# ---------------------------------------------------------------------------
+
+# What the descriptor says about each hidden field: its LAS data type, and for
+# the scan angle the scale that says what its numbers stand for. The names are
+# the ones the read side looks for, so the two cannot drift apart.
+_HIDDEN_DESCRIPTION = b"additional attributes"
+_HIDDEN_TYPES_AND_SCALES = ((4, 0.006), (1, None), (1, None), (1, None))
+_HIDDEN_ATTRIBUTES = tuple(
+    ExtraBytesAttribute(name, data_type, _HIDDEN_DESCRIPTION, scale)
+    for name, (data_type, scale) in zip(_COMPATIBILITY_ATTRIBUTES,
+                                        _HIDDEN_TYPES_AND_SCALES))
+_NIR_HIDDEN_ATTRIBUTE = ExtraBytesAttribute(_NIR_ATTRIBUTE, 3,
+                                            _HIDDEN_DESCRIPTION)
+
+
+def _unknown_attributes(count):
+    """Descriptors for extra bytes a file has but has never described.
+
+    laszip writes these, and it has to: the attributes in a record are a
+    running layout, each beginning where the last ended, so the only way to
+    say where the hidden fields start is to account for everything in front
+    of them.
+    """
+    return [ExtraBytesAttribute(f"unknown {i}".encode(), 1,
+                                f"unknown {i}".encode())
+            for i in range(count)]
+
+
+def _disguise(point_format, num_extra_bytes, described):
+    """What writing `point_format` as a legacy file takes.
+
+    `described` is the "extra bytes" record the caller's own extra bytes
+    already have, as its payload, or None where there is none -- in which case
+    they are described here, since the hidden fields can only be placed by
+    accounting for everything in front of them.
+
+    Returns the payload of the record that now describes a point's extra bytes
+    whole, the :class:`CompatibilityLayout` saying where the hidden fields sit
+    in them, and how many of them there are.
+    """
+    if described is None:
+        described = b''.join(_pack_attribute(a) for a in
+                             _unknown_attributes(num_extra_bytes))
+
+    hidden = list(_HIDDEN_ATTRIBUTES)
+    if _POINT_FORMATS[point_format][3]:         # a near-infrared band to hide
+        hidden.append(_NIR_HIDDEN_ATTRIBUTE)
+
+    data = described + b''.join(_pack_attribute(a) for a in hidden)
+    return data, _layout_of(data), _described_width(data)
+
+
+def _compatibility_payload(count=0, by_return=(0,) * 15):
+    """The "lascompatible" record's payload: the LAS 1.4 header fields a
+    legacy header has nowhere to keep.
+
+    Built once before the points, where the record has to be, and again once
+    they have all been written and the counts are known -- it is a fixed
+    number of bytes at a fixed place, so the second one goes over the first.
+    laszip instead makes the caller state the counts up front, which is what
+    its own compatibility mode asks for.
+    """
+    fields = {'laszip_version': _LASZIP_BUILD_DATE & 0xFFFF,
+              'compatible_version': _COMPATIBLE_VERSION_14,
+              'unused': 0,
+              'extended_number_of_point_records': count,
+              'extended_number_of_points_by_return': list(by_return)}
+    # the rest are zero: a disguised file can carry neither waveform data nor
+    # extended records, both of which arrived with the versions it predates
+    for name, _, _ in HEADER_FORMAT_13 + HEADER_FORMAT_14:
+        fields.setdefault(name, 0)
+
+    return pack_format(COMPATIBILITY_RECORD_FORMAT, fields)

@@ -42,9 +42,10 @@ from .formats import (LASZIP_VLR_RECORD_ID, LASZIP_VLR_USER_ID,  # noqa: F401
                       Selective, ItemType, items_for_point_format)
 from .headers import (header_formats, format_size,  # noqa: F401
                       unpack_format, pack_format, EXTRA_BYTES_ATTRIBUTE_SIZE)
+from .extra_bytes import (ExtraBytesAttribute,  # noqa: F401
+                          extra_bytes_record)
 from .reader import Reader, ExtendedVariableLengthRecord  # noqa: F401
-from .writer import (Writer, ExtraBytesAttribute,  # noqa: F401
-                     extra_bytes_record)
+from .writer import Writer  # noqa: F401
 
 __all__ = ["Reader", "Writer", "Point", "Chunking", "Compressor", "Coder",
            "ItemType", "Selective", "LazError", "UnsupportedFileError",

@@ -19,31 +19,39 @@ typedef struct {
      * for COMPAT_NIR when there is no NIR band. compat is false and the starts
      * are meaningless for an ordinary file. */
     BOOL compat;
-    I32 compat_starts[5];
+    I32 compat_starts[COMPAT_ATTRIBUTES];
     /* the quantized scan angle rank for every rank there is; see
      * reader_recode_compat, which would otherwise divide once per point */
-    I16 scan_angle_of_rank[256];
+    const I16 *scan_angle_of_rank;
     PyObject *point_view;
     BOOL ready;
     U64 index;              /* number of points read so far */
 } ReaderObject;
 
-/*
- * Where the hidden LAS 1.4 fields sit in compat_starts, in the order
- * lazpy/__init__.py's CompatibilityLayout hands them over, and how wide each
- * one is. One statement of that order, rather than one per use.
- */
-enum {
-    COMPAT_SCAN_ANGLE, COMPAT_EXTENDED_RETURNS, COMPAT_CLASSIFICATION,
-    COMPAT_FLAGS_AND_CHANNEL, COMPAT_NIR, COMPAT_ATTRIBUTES
-};
-static const U32 compat_widths[COMPAT_ATTRIBUTES] = {2, 1, 1, 1, 2};
+/* The widths of the hidden attributes, in the order cpylaz.h names them. */
+const U32 compat_widths[COMPAT_ATTRIBUTES] = {2, 1, 1, 1, 2};
 
-/* laszip's own expression for the scan angle a rank stands for, kept as it is
- * written in laszip_dll.cpp so the two can be compared; lifted out because
- * reader_recode_compat wants it tabulated rather than evaluated per point. */
-#define COMPAT_SCAN_ANGLE_OF_RANK(rank) \
-    I16_QUANTIZE(((F32)(rank)) / 0.006f)
+/*
+ * The scan angle every rank stands for, built once and shared by both
+ * directions: a division per point is what tabulating it avoids, and the
+ * writer needs the same 256 values to work out what a rank leaves over.
+ *
+ * Filled on first use rather than at module init because almost no file is a
+ * compatibility-mode one. Two threads racing here write the same values.
+ */
+const I16 *compat_scan_angle_of_rank(void)
+{
+    static I16 table[256];
+    static BOOL filled = LAZ_FALSE;
+    int i;
+
+    if (!filled) {
+        for (i = 0; i < 256; i++)
+            table[i] = COMPAT_SCAN_ANGLE_OF_RANK((I8)i);
+        filled = LAZ_TRUE;
+    }
+    return table;
+}
 
 /*
  * Reconstitute a LAS 1.4 point that was written as a legacy one.
@@ -179,16 +187,16 @@ int parse_items(PyObject *seq, LazItem **out, U32 *out_n)
 
 /*
  * The `compatibility` argument: the five attribute starts, as
- * lazpy/__init__.py read them out of the "extra bytes" VLR, or None.
+ * lazpy/compat.py read them out of the "extra bytes" VLR, or None.
  *
  * Only start_NIR_band may be absent, as -1. The bytes a start addresses have
- * to be inside the extra bytes the item layout actually decodes, since the
- * recoding reads them for every point with no further checking.
+ * to be inside the extra bytes the layout holds, since the recoding reads
+ * them for every point with no further checking. Shared with the writer,
+ * which puts there what this takes back out.
  */
-static int parse_compatibility(ReaderObject *self, PyObject *obj)
+int parse_compat_starts(PyObject *obj, U32 num_extra_bytes,
+                        I32 starts[COMPAT_ATTRIBUTES])
 {
-    I32 *starts = self->compat_starts;
-    U32 decoded = self->rp.num_extra_bytes;
     int i;
 
     if (obj == NULL || obj == Py_None) return 0;
@@ -199,21 +207,31 @@ static int parse_compatibility(ReaderObject *self, PyObject *obj)
     for (i = 0; i < COMPAT_ATTRIBUTES; i++) {
         if (i == COMPAT_NIR && starts[i] < 0) continue;     /* no NIR band */
         /* by subtraction, so a start near U32_MAX cannot wrap past the end */
-        if (starts[i] < 0 || compat_widths[i] > decoded ||
-            (U32)starts[i] > decoded - compat_widths[i]) {
+        if (starts[i] < 0 || compat_widths[i] > num_extra_bytes ||
+            (U32)starts[i] > num_extra_bytes - compat_widths[i]) {
             PyErr_SetString(LazErrorType, "a LAS 1.4 compatibility attribute "
                             "lies outside the extra bytes");
             return -1;
         }
+    }
+    return 1;
+}
+
+static int parse_compatibility(ReaderObject *self, PyObject *obj)
+{
+    I32 *starts = self->compat_starts;
+    int i, found = parse_compat_starts(obj, self->rp.num_extra_bytes, starts);
+
+    if (found <= 0) return found;
+
+    for (i = 0; i < COMPAT_ATTRIBUTES; i++) {
         /* everything from the first compatibility attribute on belongs to the
          * reconstituted point rather than to the caller's extra bytes */
-        if ((U32)starts[i] < self->num_extra_bytes)
+        if (starts[i] >= 0 && (U32)starts[i] < self->num_extra_bytes)
             self->num_extra_bytes = (U32)starts[i];
     }
 
-    for (i = 0; i < 256; i++)
-        self->scan_angle_of_rank[i] = COMPAT_SCAN_ANGLE_OF_RANK((I8)i);
-
+    self->scan_angle_of_rank = compat_scan_angle_of_rank();
     self->compat = LAZ_TRUE;
     return 0;
 }

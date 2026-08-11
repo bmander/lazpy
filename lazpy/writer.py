@@ -1,16 +1,16 @@
 """The writing front end: :class:`Writer` and what only it needs."""
 
-from collections import namedtuple
-
 from ._cpylaz import PointWriter, LazError
 from ._utils import cstr, pack_cstr
-from .compat import _attribute_size, _extra_bytes_attributes
-from .formats import (EXTRA_BYTES_VLR_KEY, LASZIP_VLR_KEY, Compressor,
+from .compat import _compatibility_payload, _disguise, _DISGUISED_FORMAT
+from .extra_bytes import _described_width
+from .formats import (EXTRA_BYTES_VLR_KEY, LASCOMPATIBLE_VLR_KEY,
+                      LASZIP_VLR_KEY, Compressor,
                       Coder, UnsupportedFileError, _POINT_FORMATS,
                       items_for_point_format, _versioned_items,
                       _min_version_minor)
-from .headers import (EVLR_HEADER_FORMAT, EXTRA_BYTES_ATTRIBUTE_FORMAT,
-                      MAX_VLR_PAYLOAD, VLR_HEADER_FORMAT, LASZIP_RECORD_FORMAT,
+from .headers import (EVLR_HEADER_FORMAT, MAX_VLR_PAYLOAD, VLR_HEADER_FORMAT,
+                      VLR_HEADER_SIZE, LASZIP_RECORD_FORMAT,
                       LASZIP_ITEM_FORMAT, header_formats, pack_format,
                       _header_size, _can_seek)
 
@@ -122,96 +122,12 @@ def _extra_bytes_width(records, declared):
     if descriptor is None:
         return 0 if declared is None else declared
 
-    described = sum(a.size for a in _extra_bytes_attributes(
-        descriptor['data']))
+    described = _described_width(descriptor['data'])
     if declared is not None and declared != described:
         raise ValueError(
             f"the extra bytes record describes {described} bytes per point, "
             f"but num_extra_bytes is {declared}")
     return described
-
-
-# ---------------------------------------------------------------------------
-# The "extra bytes" record, which is how a file says what its extra bytes
-# mean. laszip builds one an attribute at a time, in laszip_add_attribute();
-# this builds the whole record from the attributes, since it has to be
-# complete before the header that counts it is written.
-# ---------------------------------------------------------------------------
-
-ExtraBytesAttribute = namedtuple(
-    "ExtraBytesAttribute", "name data_type description scale offset",
-    defaults=(b'', None, None))
-ExtraBytesAttribute.__doc__ = """One attribute of a point's extra bytes.
-
-    `data_type` is the LAS data type: 1 to 10 for the scalar types, in the
-    order the specification lists them, and the deprecated array types above
-    that. `scale` and `offset` are what turn the stored number into the
-    quantity it stands for; leaving them out says the number is the quantity.
-    """
-
-# The option bits that say a descriptor's scale and offset were set at all;
-# an attribute leaving them out is one whose numbers stand for themselves.
-_SCALE_GIVEN = 0x08
-_OFFSET_GIVEN = 0x10
-
-
-def _pack_attribute(attribute):
-    """One attribute descriptor, by the table that reads it back.
-
-    no_data, min and max are left empty: they describe the range of a
-    quantity rather than how to find it, and nothing here has an opinion
-    about that.
-    """
-    if attribute.data_type == 0:
-        raise ValueError(
-            "data type 0 means undocumented bytes, whose width is in the "
-            "option byte this puts scale and offset in; describe them with a "
-            "record built by hand")
-    _attribute_size(attribute.data_type, 0)     # raises for an unknown type
-
-    options = 0
-    if attribute.scale is not None:
-        options |= _SCALE_GIVEN
-    if attribute.offset is not None:
-        options |= _OFFSET_GIVEN
-
-    return pack_format(EXTRA_BYTES_ATTRIBUTE_FORMAT, {
-        'reserved': 0,
-        'data_type': attribute.data_type,
-        'options': options,
-        'name': attribute.name,
-        'unused': 0,
-        'no_data': b'', 'min': b'', 'max': b'',
-        # one value per dimension, of which only the first matters for the
-        # scalar types, and all three the same for the array ones
-        'scale': [float(attribute.scale or 0.0)] * 3,
-        'offset': [float(attribute.offset or 0.0)] * 3,
-        'description': attribute.description,
-    })
-
-
-def extra_bytes_record(attributes, description=b''):
-    """The "extra bytes" record describing `attributes`, as a record a
-    :class:`Writer` takes.
-
-    The attributes are laid out in the order given, which is the order they
-    sit in a point:
-
-        >>> record = extra_bytes_record([
-        ...     ExtraBytesAttribute(b"amplitude", 3, scale=0.01),
-        ...     ExtraBytesAttribute(b"echo width", 3)])
-        >>> Writer("out.laz", point_format=1, vlrs=[record])  # doctest: +SKIP
-
-    A writer given one takes the size of a point's extra bytes from it, so
-    ``num_extra_bytes`` need not be given as well -- and if it is, it has to
-    agree.
-    """
-    return {
-        'user_id': EXTRA_BYTES_VLR_KEY[0],
-        'record_id': EXTRA_BYTES_VLR_KEY[1],
-        'description': description,
-        'data': b''.join(_pack_attribute(a) for a in attributes),
-    }
 
 
 class Writer:
@@ -256,7 +172,8 @@ class Writer:
                  laz_version=None, chunk_size=50000, num_extra_bytes=None,
                  version_minor=None, system_identifier=b'',
                  generating_software=None, vlrs=(), evlrs=(),
-                 vlr_description=b'lazpy', file_creation=(0, 0)):
+                 vlr_description=b'lazpy', file_creation=(0, 0),
+                 compatibility=False):
         """Open *filename* for writing points of *point_format*.
 
         ``compressed`` defaults to LAZ unless the name ends in ``.las``.
@@ -297,6 +214,10 @@ class Writer:
         point. It defaults to what the "extra bytes" record among ``vlrs``
         describes, and to none when there is no such record.
 
+        ``compatibility`` writes a LAS 1.4 point format as the legacy file it
+        can be disguised as, for readers that predate LAS 1.4; see
+        :meth:`_disguise_as_legacy` for what that costs.
+
         ``system_identifier``, ``generating_software`` and ``vlr_description``
         are free text the file carries about its own provenance.
         """
@@ -305,24 +226,34 @@ class Writer:
         self._writer = None
         self._closed = False
         self._owns_fp = False
+        self._compatibility_at = None
 
         records = _records(vlrs)
         num_extra_bytes = _extra_bytes_width(records, num_extra_bytes)
         if num_extra_bytes < 0:
             raise ValueError("num_extra_bytes cannot be negative")
 
+        self.point_format = point_format
+        #: The point format the file itself declares, which is the one asked
+        #: for unless it is being disguised as a legacy one.
+        self.written_format = point_format
+        self.compat_layout = None
+        if compatibility:
+            records, num_extra_bytes = self._disguise_as_legacy(
+                records, num_extra_bytes, version_minor, vlr_description)
+
         # raises for a point format there is no layout for, so everything
         # below can look one up
-        record_length = (_POINT_FORMATS.get(point_format, (0,))[0]
+        record_length = (_POINT_FORMATS.get(self.written_format, (0,))[0]
                          + num_extra_bytes)
-        self.items = items_for_point_format(point_format, record_length)
-        point14 = _POINT_FORMATS[point_format][5]
+        self.items = items_for_point_format(self.written_format, record_length)
+        point14 = _POINT_FORMATS[self.written_format][5]
 
         if compressed is None:
             compressed = not str(filename).lower().endswith('.las')
         if version_minor is None:
-            version_minor = _min_version_minor(point_format)
-        self._check_version(point_format, version_minor)
+            version_minor = _min_version_minor(self.written_format)
+        self._check_version(self.written_format, version_minor)
 
         #: The extended records to write behind the point data, which may be
         #: added to until the file is closed.
@@ -330,7 +261,6 @@ class Writer:
         if self.evlrs:
             self._check_extended(version_minor)
 
-        self.point_format = point_format
         self.num_extra_bytes = num_extra_bytes
         self.compressed = bool(compressed)
         if self.compressed:
@@ -357,6 +287,11 @@ class Writer:
         # packed before the header, because the header records how far past
         # itself the points begin
         block = b''.join(_pack_vlr(record) for record in records)
+        # the record the counts go back into leads the block, which is where
+        # _disguise_as_legacy put it
+        if self.compatibility:
+            self._compatibility_at = _header_size(version_minor) \
+                + VLR_HEADER_SIZE
 
         self._open(filename)
         try:
@@ -368,12 +303,68 @@ class Writer:
             self.fp.write(block)
             self._writer = PointWriter(self.fp, self.items,
                                        int(self.compressor),
-                                       chunk_size=chunk_size)
+                                       chunk_size=chunk_size,
+                                       compatibility=self.compat_layout)
         except Exception:
             self._close_file()
             raise
 
     # -- construction ----------------------------------------------------
+
+    def _disguise_as_legacy(self, records, num_extra_bytes, version_minor,
+                            description):
+        """Set this writer up to hide a LAS 1.4 point format in a legacy file.
+
+        laszip's ``laszip_request_compatibility_mode()`` on the writing side:
+        the points go out as format 1, 3, 4 or 5, which is all a LAS 1.2 or
+        1.3 file may hold, with the fields only formats 6-10 have folded into
+        five extra bytes on the end of each record -- seven, where there is a
+        near-infrared band to hide as well. Two records say so, and are added
+        to `records` here: the "lascompatible" one holding the LAS 1.4 header
+        fields the legacy header cannot state, and the "extra bytes" one
+        naming the hidden fields among a point's real extra bytes.
+
+        What it costs is what the legacy fields cannot hold. The scan angle
+        keeps a rank and the remainder rides in the extra bytes; the return
+        numbers and the classification keep as much as their narrower fields
+        can and the difference rides along too. A reader that puts them back
+        together -- lazpy's own, or laszip asked for the same mode -- gets the
+        LAS 1.4 points that went in. One that does not sees a legacy file
+        whose points are as nearly right as a legacy file can make them.
+
+        Returns the records to write, the two that describe the disguise
+        leading them, and the extra bytes a record now holds.
+        """
+        if self.point_format not in _DISGUISED_FORMAT:
+            raise UnsupportedFileError(
+                f"compatibility mode is for the LAS 1.4 point formats 6 to "
+                f"10, not {self.point_format}")
+        if version_minor is not None and version_minor >= 4:
+            raise UnsupportedFileError(
+                "compatibility mode is how a LAS 1.4 point format reaches a "
+                "file that predates it; a LAS 1.4 file writes it as it is")
+
+        self.written_format = _DISGUISED_FORMAT[self.point_format]
+
+        # what the caller's own extra bytes are already described as, if they
+        # are: the hidden fields go behind them, and can only be placed by a
+        # record that accounts for everything in front of them
+        described = next((record['data'] for record in records
+                          if (record['user_id'],
+                              record['record_id']) == EXTRA_BYTES_VLR_KEY),
+                         None)
+        descriptor, self.compat_layout, num_extra_bytes = _disguise(
+            self.point_format, num_extra_bytes, described)
+
+        # the two that describe the disguise lead, as laszip writes them, and
+        # the descriptor that was among the caller's own is now one of them
+        disguise = [_record(LASCOMPATIBLE_VLR_KEY, _compatibility_payload(),
+                            description),
+                    _record(EXTRA_BYTES_VLR_KEY, descriptor, description)]
+        rest = [record for record in records
+                if (record['user_id'],
+                    record['record_id']) != EXTRA_BYTES_VLR_KEY]
+        return disguise + rest, num_extra_bytes
 
     @staticmethod
     def _check_version(point_format, version_minor):
@@ -467,7 +458,7 @@ class Writer:
             'offset_to_point_data': header_size + vlr_size,
             'number_of_variable_length_records': num_records,
             # the high bit is what tells a reader the points are compressed
-            'point_data_format_id': (self.point_format
+            'point_data_format_id': (self.written_format
                                      | (0x80 if self.compressed else 0)),
             'point_data_record_length': record_length,
             'number_of_point_records': 0,
@@ -514,7 +505,12 @@ class Writer:
             'version_major': major,
             'version_minor': minor,
             'version_revision': revision,
-            'options': 0,
+            # laszip sets the low bit for a file written in compatibility
+            # mode, and nothing else in the field. Reading one does not need
+            # it -- the two records say so themselves, which is how an
+            # uncompressed disguised file says it -- but a file lazpy writes
+            # says it the way laszip's does.
+            'options': 1 if self.compatibility else 0,
             'chunk_size': _as_i32(self.chunk_size),
             'number_of_special_evlrs': -1,      # none, as laszip writes it
             'offset_to_special_evlrs': -1,
@@ -600,8 +596,9 @@ class Writer:
 
         # LAS 1.4 keeps the real count in its own field and zeroes the legacy
         # one for the extended point formats, which is what Reader compensates
-        # for when it reads a file back.
-        legacy = self.point_format < 6 and count <= 0xFFFFFFFF
+        # for when it reads a file back. A disguised file has only the legacy
+        # fields to say it in, and says it there.
+        legacy = self.written_format < 6 and count <= 0xFFFFFFFF
         header['number_of_point_records'] = count if legacy else 0
         header['number_of_points_by_return'] = (list(by_return[1:6]) if legacy
                                                 else [0] * 5)
@@ -609,6 +606,10 @@ class Writer:
             header['extended_number_of_point_records'] = count
             header['extended_number_of_points_by_return'] = \
                 list(by_return[1:16])
+        elif self.compatibility:
+            # the counts are of LAS 1.4 return numbers, of which the legacy
+            # field states the five it has room for and the record the rest
+            self._patch_compatibility_record(count, by_return[1:16])
 
         # A file with no points keeps the zero bounds _build_header set, which
         # is what laszip leaves in an empty file too.
@@ -624,6 +625,25 @@ class Writer:
         self.fp.seek(0)
         self.fp.write(self._pack_header(header))
         self.fp.seek(end)          # a file object the caller lent us
+
+    def _patch_compatibility_record(self, count, by_return):
+        """Rewrite the "lascompatible" record with the LAS 1.4 counts.
+
+        It went out before the first point with those fields zero, because
+        that is where a variable length record has to be; it is a fixed number
+        of bytes, so the finished one goes over it.
+        """
+        payload = _compatibility_payload(count, by_return)
+        end = self.fp.tell()
+        self.fp.seek(self._compatibility_at)
+        self.fp.write(payload)
+        self.fp.seek(end)
+
+    @property
+    def compatibility(self):
+        """Whether this file is a LAS 1.4 one in a legacy disguise, which is
+        to say whether the format it wears is the format it holds."""
+        return self.written_format != self.point_format
 
     @property
     def num_points(self):

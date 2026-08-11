@@ -97,4 +97,44 @@ void Point_detach(PointObject *self);
 /* The (type, size, version) triples of a LASzip item list, malloc'd. */
 int parse_items(PyObject *seq, LazItem **out, U32 *out_n);
 
+/*
+ * LAS 1.4 compatibility mode, which the reader undoes and the writer does.
+ *
+ * A format 6-10 point is written as a legacy one plus five extra bytes -- or
+ * seven, with a near-infrared band -- holding what the legacy record cannot
+ * express. These say where those bytes are and how wide each is, in the order
+ * lazpy/compat.py's CompatibilityLayout hands them over. One statement of that
+ * order for both directions.
+ */
+enum {
+    COMPAT_SCAN_ANGLE, COMPAT_EXTENDED_RETURNS, COMPAT_CLASSIFICATION,
+    COMPAT_FLAGS_AND_CHANNEL, COMPAT_NIR, COMPAT_ATTRIBUTES
+};
+extern const U32 compat_widths[COMPAT_ATTRIBUTES];
+
+/*
+ * laszip's own expressions for the two directions of the scan angle, kept as
+ * they are written in laszip_dll.cpp so the two can be compared: a LAS 1.4
+ * angle is hundredths of a degree over 0.6, a legacy rank is degrees.
+ *
+ * The reader tabulates the first for all 256 ranks rather than dividing once
+ * per point, and the writer, which needs the same 256 values, shares that
+ * table -- see compat_scan_angle_of_rank().
+ */
+#define COMPAT_SCAN_ANGLE_OF_RANK(rank) \
+    I16_QUANTIZE(((F32)(rank)) / 0.006f)
+#define COMPAT_RANK_OF_SCAN_ANGLE(angle) \
+    I32_QUANTIZE(0.006f * (F32)(angle))
+
+/* The 256 values of COMPAT_SCAN_ANGLE_OF_RANK, indexed by rank as a U8. */
+const I16 *compat_scan_angle_of_rank(void);
+
+/*
+ * The five starts out of the `compatibility` argument, checked against the
+ * extra bytes they have to lie inside. 1 when there is a layout, 0 when the
+ * argument is absent or None, -1 with the exception set.
+ */
+int parse_compat_starts(PyObject *obj, U32 num_extra_bytes,
+                        I32 starts[COMPAT_ATTRIBUTES]);
+
 #endif

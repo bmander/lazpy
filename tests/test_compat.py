@@ -6,8 +6,9 @@ import pytest
 import lazpy
 from lazpy import _cpylaz as cpylaz
 from lazpy import (Compressor, LASZIP_VLR_RECORD_ID, Reader, ItemType,
-                   LazError, UnsupportedFileError)
-from helpers import FIXTURES, fixture, header_field, load
+                   LazError, UnsupportedFileError, Writer)
+from helpers import (FIXTURES, REFERENCE_HASH, assert_is_the_file_laszip_wrote,
+                     fixture, header_field, load)
 from lazpy.compat import (_compatibility_layout,
                           _extra_bytes_attributes)
 from lazpy.formats import _POINT_FORMATS
@@ -252,3 +253,140 @@ class TestExtraBytesAttributes:
         data = self.descriptor(b"a", 99)
         with pytest.raises(UnsupportedFileError, match="data type 99"):
             list(_extra_bytes_attributes(data))
+
+
+# ---------------------------------------------------------------------------
+# Writing one.
+#
+# The other direction, which is laszip_request_compatibility_mode() on the
+# writing side: LAS 1.4 points in, a legacy file out. The oracle is the same
+# fixtures the reading tests use -- given the points laszip was given, lazpy
+# writes the file laszip wrote, which is a stronger claim than a round trip
+# and covers every rule the disguise applies at once.
+# ---------------------------------------------------------------------------
+
+def disguised(name, **kwargs):
+    """A fixture's own points, written back out in compatibility mode."""
+    f = COMPAT_BY_NAME[name]
+    with Reader(fixture(name)) as reader:
+        points = [point.copy() for point in reader]
+        header = dict(reader.header)
+        layout = dict(num_extra_bytes=reader.num_extra_bytes,
+                      scales=reader.scales, offsets=reader.offsets)
+
+    buf = io.BytesIO()
+    with Writer(buf, f.upgraded, compatibility=True,
+                compressed=name.endswith(".laz"),
+                chunk_size=load(name).chunk_size or 50000,
+                system_identifier=header["system_identifier"],
+                generating_software=header["generating_software"],
+                # laszip names itself in every record it writes, having
+                # already named itself in the header
+                vlr_description=header["generating_software"],
+                file_creation=(header["file_creation_day"],
+                               header["file_creation_year"]),
+                **layout, **kwargs) as writer:
+        for point in points:
+            writer.write(point)
+    return buf.getvalue(), points
+
+
+@pytest.mark.parametrize("name", COMPAT_NAMES)
+def test_a_disguised_file_is_the_file_laszip_wrote(name):
+    """Every byte of it: the downgraded header, the two records that describe
+    the disguise, and points whose LAS 1.4 fields have been folded into their
+    extra bytes exactly as laszip folds them.
+    """
+    f = COMPAT_BY_NAME[name]
+
+    ours, _ = disguised(name)
+
+    assert_is_the_file_laszip_wrote(ours, load(name).data, f.minor)
+
+
+@pytest.mark.parametrize("name", COMPAT_NAMES)
+def test_a_disguised_file_reads_back_as_the_points_that_went_in(name):
+    """Which is what the disguise is for: lazpy's own reader, and laszip
+    asked for the same mode, put the LAS 1.4 points back together."""
+    data, points = disguised(name)
+
+    with Reader(io.BytesIO(data)) as reader:
+        assert reader.point_format == COMPAT_BY_NAME[name].upgraded
+        # the checksum is over every field of every point, and pins how many
+        # there were as well
+        assert reader.checksum() == REFERENCE_HASH[name]
+        assert len(points) == reader.num_points
+
+
+@pytest.mark.parametrize("name", COMPAT_NAMES)
+def test_the_header_is_the_legacy_one_the_file_wears(name):
+    """Read back, it is the LAS 1.4 file again; on disk it is not."""
+    f = COMPAT_BY_NAME[name]
+    data, _ = disguised(name)
+
+    assert header_field(data, "version_minor") == f.minor
+    assert header_field(data, "point_data_format_id") & 0x7F == f.legacy
+    assert (header_field(data, "point_data_record_length", f.minor) ==
+            _POINT_FORMATS[f.legacy][0] + f.extra + f.hidden)
+
+    with Reader(io.BytesIO(data)) as reader:
+        assert reader.point_format == f.upgraded
+        assert reader.num_extra_bytes == f.extra
+
+
+def test_the_counts_go_in_the_record_the_legacy_header_has_no_room_for():
+    """They are only known once the last point is written, and the record
+    was written before the first one: it is rewritten at close."""
+    data, points = disguised("pt6_compat_v0.las")
+
+    with Reader(io.BytesIO(data)) as reader:
+        by_return = collections.Counter(p.extended_return_number
+                                        for p in points)
+        assert (reader.header["extended_number_of_points_by_return"] ==
+                [by_return[n] for n in range(1, 16)])
+        # the legacy field states the five returns it has room for
+        assert header_field(data, "number_of_point_records") == len(points)
+
+
+def test_the_laszip_record_says_the_file_was_written_this_way():
+    """laszip sets the low bit of the options field for a disguised file."""
+    data, _ = disguised("pt6_compat_v2.laz")
+
+    with Reader(io.BytesIO(data)) as reader:
+        assert reader.laz_header["options"] == 1
+
+
+@pytest.mark.parametrize("point_format", [0, 1, 5])
+def test_a_legacy_format_has_nothing_to_disguise(point_format):
+    with pytest.raises(UnsupportedFileError, match="point formats 6 to 10"):
+        Writer(io.BytesIO(), point_format, compatibility=True)
+
+
+def test_las_14_writes_its_points_as_they_are():
+    with pytest.raises(UnsupportedFileError, match="predates it"):
+        Writer(io.BytesIO(), 6, compatibility=True, version_minor=4)
+
+
+def test_records_are_not_what_a_disguised_writer_takes():
+    """The bytes of a point would already be the legacy record it is about to
+    build, and there would be nothing left to fold."""
+    with Writer(io.BytesIO(), 6, compatibility=True) as writer:
+        with pytest.raises(ValueError, match="takes points, not records"):
+            writer.write(b"\0" * 39)
+
+
+def test_a_disguised_file_carries_the_records_it_was_given():
+    """The two the disguise needs go in front; whatever else the caller had
+    still travels."""
+    wkt = {"user_id": b"LASF_Projection", "record_id": 2112, "data": b"WKT",
+           "description": b""}
+
+    buf = io.BytesIO()
+    with Writer(buf, 6, compatibility=True, vlrs=[wkt]) as writer:
+        writer.write(lazpy.Point(X=1, extended_return_number=1))
+
+    with Reader(io.BytesIO(buf.getvalue())) as reader:
+        # the two that made it a disguise are gone from what Reader reports,
+        # having been undone; the caller's own is not
+        assert list(reader.header["variable_length_records"]) == [
+            (b"LASF_Projection", 2112), (b"laszip encoded", 22204)]
