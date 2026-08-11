@@ -1,8 +1,10 @@
 """Read and write LAS and LAZ point cloud files.
 
-Header and variable-length-record parsing and construction happen here;
-everything from the first point onward is handled by the ``lazpy._cpylaz`` C
-extension, which is a port of LASzip.
+Most programs need two names: :class:`Reader`, which opens a file and hands
+back its header and points -- one at a time, or as numpy arrays -- and
+:class:`Writer`, which builds a file from points handed to it. Everything
+else on this page is a type they exchange: the :class:`Point` they trade
+in, the enumerations that describe a file, and the errors they raise.
 
     >>> reader = Reader("cloud.laz")
     >>> reader.num_points
@@ -16,6 +18,10 @@ extension, which is a port of LASzip.
     >>> with Writer("out.laz", point_format=1) as writer:
     ...     writer.write(Point(X=1, Y=2, Z=3, gps_time=4.0))
 
+Headers and variable length records are parsed and built in this module;
+everything from the first point onward is the ``lazpy._cpylaz`` C
+extension, a port of LASzip.
+
 LAS file specification
     1.2: www.asprs.org/a/society/committees/standards/asprs_las_format_v12.pdf
     1.4: www.asprs.org/wp-content/uploads/2010/12/LAS_1_4_r13.pdf
@@ -27,8 +33,12 @@ from enum import Enum, IntEnum
 import io
 import os
 
-# Point, PointReader and PointWriter are re-exported: they are the API for
-# driving the container directly, without a Reader or Writer over it.
+# Point, PointReader, PointWriter and SpatialIndex are re-exported: they are
+# the API for driving the container directly, without a Reader or Writer over
+# it. Only Point is in __all__ below, because only Point is part of reading a
+# file the ordinary way; the other three are for the caller who has a point
+# block and no LAS header to describe it, who can name them to import them.
+# docs/api.rst gives them a section of their own for the same reason.
 from ._cpylaz import (PointReader, PointWriter, Point,  # noqa: F401
                       SpatialIndex, LazError)
 from ._utils import (unsigned_int, signed_int, u32_array, u64_array, double,
@@ -67,6 +77,17 @@ class UnsupportedFileError(LazError):
 
 
 class Compressor(IntEnum):
+    """How the points are packed, as the LASzip VLR declares it.
+
+    NONE is plain LAS, and the other three are the containers LASzip has had
+    in turn. POINTWISE is the original: one stream from the first point to
+    the last, with nothing to seek by. The chunked two cut it into
+    independently decodable chunks and put a table of their offsets behind
+    the points, which is what makes random access cheap. LAYERED_CHUNKED
+    additionally splits each chunk into a byte layer per attribute, so a
+    reader can skip the ones it was not asked for; the LAS 1.4 point formats
+    are written that way.
+    """
     NONE = 0
     POINTWISE = 1
     POINTWISE_CHUNKED = 2
@@ -74,11 +95,12 @@ class Compressor(IntEnum):
 
 
 class Coder(IntEnum):
+    """The entropy coder, of which LASzip has only ever defined one."""
     ARITHMETIC = 0
 
 
 class Chunking(Enum):
-    """How a file's points are grouped, which is what random access costs.
+    """How a file's points are grouped, which sets what random access costs.
 
     Not a field of any record: POINTWISE and POINTWISE_CHUNKED carry the same
     chunk size in the LASzip VLR, and the adaptive case declares it as -1, so
@@ -114,6 +136,15 @@ class Selective(IntEnum):
 
 
 class ItemType(IntEnum):
+    """The kinds of item a point record is made of.
+
+    A point is a list of items, each with a type from here, a size in bytes
+    and a coder version; the LASzip VLR carries that list, and
+    :func:`items_for_point_format` reconstructs it for an uncompressed file.
+    POINT10 through WAVEPACKET13 are the LAS 1.0-1.3 groupings, POINT14
+    onward their LAS 1.4 replacements, and BYTE and BYTE14 are extra bytes.
+    The scalar types are laszip's own and no point format uses them.
+    """
     BYTE = 0
     SHORT = 1
     INT = 2
@@ -688,18 +719,17 @@ def _can_seek(fp):
 
 
 class ExtendedVariableLengthRecord(Mapping):
-    """One EVLR, whose payload is fetched the first time it is asked for.
+    """One EVLR, whose payload is read the first time it is asked for.
 
     Reads like the dict a regular VLR is: every field of the record header is a
     key, plus ``offset_to_data`` -- where the payload begins in the file -- and
     ``data``, the payload itself.
 
-    ``data`` is what is not a dict. An EVLR payload is allowed to be enormous,
-    which is what its eight-byte length field is for -- a waveform data packet
-    record can run to gigabytes -- so opening a file reads the 60-byte headers
-    and no more, and the bytes are read only if something asks for them. That
-    means ``data`` needs the reader still open, since the reader is what holds
-    the file. Once read, the payload is kept, so it outlives the reader.
+    ``data`` is the one lazy key. An EVLR payload can be enormous -- a
+    waveform data packet record can run to gigabytes -- so opening a file
+    reads only the 60-byte headers, and the payload is read when first
+    accessed. That means ``data`` needs the reader still open; once read, it
+    is kept, and outlives the reader.
     """
 
     def __init__(self, fields, fp):
@@ -750,21 +780,25 @@ class ExtendedVariableLengthRecord(Mapping):
 
 
 class Reader:
-    """Sequential and random access to the points of a LAS or LAZ file.
+    """Read the points of a LAS or LAZ file: in order, by index, or as arrays.
 
-    ``header`` is what the file says about itself, field by field, plus its
-    variable length records keyed by ``(user_id, record_id)``. It is the file's
-    own account rather than the bytes on disk in one case: a LAS 1.4
-    compatibility-mode file is reported as the LAS 1.4 file it stands in for,
-    so ``header_size`` and ``offset_to_point_data`` describe that file and not
-    where anything sits in this one.
+    Open one by path or from an open binary file, then iterate it point by
+    point, or reach for :meth:`seek`, :meth:`arrays` and
+    :meth:`points_within`.
+
+    ``reader.header`` is a dict of every LAS header field, plus the variable
+    length records under ``header["variable_length_records"]``, keyed by
+    ``(user_id, record_id)``. For a LAS 1.4 compatibility-mode file the
+    header describes the LAS 1.4 file it stands in for, not the file on
+    disk: ``header_size`` and ``offset_to_point_data`` in particular locate
+    nothing in the physical file.
     """
 
     def __init__(self, filename=None, decompress_selective=None):
         """Open *filename*, if given.
 
         ``decompress_selective`` is a bitmask of ``Selective`` flags naming the
-        attributes worth decoding. It only has an effect on the layered LAS 1.4
+        attributes to decode. It only has an effect on the layered LAS 1.4
         formats (6-10), where each attribute is a separately skippable byte
         layer; everything else always decodes in full. Attributes that are
         skipped keep the value they had in the first point of the chunk.
@@ -873,6 +907,10 @@ class Reader:
                               h['y_offset'], h['z_offset'])
 
     def close(self):
+        """Release the point reader, and the file if this reader opened it.
+
+        A file object handed in is left open.
+        """
         self._reader = None
         # dropped rather than left to be looked for: finding an index means
         # reading the file, and there is no file any more
@@ -1053,6 +1091,11 @@ class Reader:
 
     @property
     def num_points(self):
+        """How many points the file holds, which is also ``len(reader)``.
+
+        The LAS 1.4 count where the header has one, since the legacy field
+        is only 32 bits and saturates.
+        """
         return self.header['number_of_point_records']
 
     @property
@@ -1070,15 +1113,14 @@ class Reader:
 
     @property
     def chunk_size(self):
-        """How many points share a chunk, or None if that is not a number.
+        """How many points share a chunk, or None where no one number applies.
 
         None for an unchunked file -- plain LAS, or the POINTWISE container,
-        which is a single stream however large a chunk size the LASzip VLR
-        happens to carry -- and None for adaptive chunking, where the chunks
-        are whatever sizes the writer chose and only the chunk table knows
-        them. Check :attr:`chunking` to tell those two apart; the underlying
-        ``PointReader.chunk_starts`` has the boundaries themselves, once
-        reading has read the table.
+        whatever chunk size its LASzip VLR carries -- and None for adaptive
+        chunking, where each chunk's size is the writer's choice and lives
+        only in the chunk table. :attr:`chunking` tells those two apart;
+        ``PointReader.chunk_starts`` has the boundaries themselves once the
+        table has been read.
         """
         if self.chunking is not Chunking.FIXED:
             return None
@@ -1086,19 +1128,33 @@ class Reader:
 
     @property
     def point_format(self):
+        """Which LAS point data format, 0 to 10, the points are in.
+
+        With the high bit that flags compression cleared, and reported as
+        the 1.4 format a compatibility-mode file stands in for rather than
+        the legacy one it is written as.
+        """
         return self.header['point_data_format_id']
 
     @property
     def is_compressed(self):
+        """Whether this is a LAZ file rather than a plain LAS one."""
         return self.laz_header is not None
 
     @property
     def scales(self):
+        """``(x, y, z)`` scale factors: what a stored coordinate means.
+
+        A point's X, Y and Z are integers; multiplying by these and adding
+        :attr:`offsets` gives the georeferenced coordinate. :meth:`scale`
+        does this.
+        """
         h = self.header
         return (h['x_scale_factor'], h['y_scale_factor'], h['z_scale_factor'])
 
     @property
     def offsets(self):
+        """``(x, y, z)`` offsets, added to the scaled coordinates."""
         return (self.header['x_offset'], self.header['y_offset'],
                 self.header['z_offset'])
 
@@ -1135,10 +1191,10 @@ class Reader:
     def checksum(self, count=None):
         """Decode *count* points and return ``(fnv1a_hash, points_read)``.
 
-        Defaults to every point remaining in the file. Hashes each decoded
-        field entirely in C, which is what makes whole-file verification
-        against a laszip reference practical at tens of millions of points.
-        Advances the reader.
+        Defaults to every point remaining in the file. Hashes every decoded
+        field entirely in C, so a whole file verifies against a laszip
+        reference quickly even at tens of millions of points. Advances the
+        reader.
         """
         if count is None:
             count = self.num_points - self.index
@@ -1260,7 +1316,8 @@ class Reader:
 
     @property
     def has_spatial_index(self):
-        """Whether a rectangle query can skip past most of the file."""
+        """Whether an index was found, in the file or beside it -- and so
+        whether a rectangle query can skip most of the file."""
         return self.spatial_index is not None
 
     def _region(self, min_x, min_y, max_x, max_y):
@@ -1305,10 +1362,9 @@ class Reader:
         rectangles therefore partition the points rather than sharing the ones
         on the seam, which is what laszip's own rectangle query does.
 
-        With a spatial index this decodes only the runs of points the index
-        says could be in the rectangle, which for a small rectangle in a large
-        file is a small fraction of it. Without one it is a filtered full scan:
-        the same points, at the cost of reading everything.
+        With a spatial index, only the runs of points the index says could be
+        inside are decoded. Without one it is a filtered full scan: the same
+        points, at the cost of reading everything.
 
         As with :meth:`points`, each iteration yields the same object with new
         contents; call ``point.copy()`` to keep one. The reader is left
@@ -1343,7 +1399,7 @@ class Reader:
 
         Returns ``{name: array}``, each array *count* long and in file order.
         Named without arguments it returns every field this point format
-        carries, which for a format with extra bytes includes them::
+        carries, extra bytes included::
 
             a = reader.arrays()
             ground = a["Z"][a["classification"] == 2]
@@ -1357,14 +1413,12 @@ class Reader:
         where ``Point`` groups them as ``rgb``. ``wave_packet`` and
         ``extra_bytes``, being opaque blobs, come back as ``(count, size)``
         arrays of bytes rather than one column of numbers -- and are most of
-        the memory the default costs on the formats that have them.
+        what the no-argument call costs in memory.
 
         Reading starts where the reader is, or at *start* if given, and runs
         to the end of the file unless *count* says otherwise; a *count* past
-        the end of the file stops at the end of the file, as slicing does. The
-        reader is left after the last point read, so successive calls walk the
-        file in blocks -- which is how a file too big to hold at once gets
-        read.
+        the end stops there, as slicing does. The reader is left after the
+        last point read, so successive calls walk the file in blocks.
         """
         if start is not None:
             self.seek(start)
@@ -1436,16 +1490,14 @@ class Reader:
         asks for, of the points ``rect`` -- ``(min_x, min_y, max_x, max_y)``
         -- contains, selected the same way and with the same half-open edges.
 
-        This is the combination worth having, since the index decides which
-        points to decode and the array path decides how cheaply to hand them
-        over::
+        The index decides which points to decode, and the array path decides
+        how cheaply to hand them over::
 
             a = reader.arrays_within("X", "Y", "Z", rect=(x0, y0, x1, y1))
 
         Arrays are sized for every candidate the index turns up and trimmed
-        to what was really inside, so a query whose rectangle is a small part
-        of a large file briefly holds rather more than it returns. The reader
-        is left wherever the last interval ended.
+        to what was really inside, so a query briefly holds more than it
+        returns. The reader is left wherever the last interval ended.
         """
         region, spans = self._region(*rect)
         candidates = sum(stop - start for start, stop in spans)
@@ -1473,8 +1525,8 @@ class Reader:
     def xyz(self, start=None, count=None):
         """The georeferenced points, as an ``(N, 3)`` array of floats.
 
-        The scale and offset from the header are applied, so these are the
-        coordinates the file is about rather than the integers it stores.
+        The scale and offset from the header are applied, so these are
+        georeferenced coordinates rather than the stored integers.
         *start* and *count* are as in :meth:`arrays`.
         """
         return self._scaled_xyz(
@@ -1508,13 +1560,13 @@ class Writer:
     file being converted already has.
 
     One wrinkle in the LAS 1.4 point formats is worth knowing when building
-    points by hand: three of the four classification flags exist twice over. A
-    record keeps synthetic, keypoint and withheld in the same four bits as
-    overlap, but a decoded point splits them, and what goes back into a record
-    is ``synthetic_flag``, ``keypoint_flag`` and ``withheld_flag`` -- only the
-    overlap bit is taken from ``extended_classification_flags``. That is
-    LASzip's rule, kept because matching it byte for byte is what makes these
-    files the files laszip would have written.
+    points by hand: three of the four classification flags exist twice over.
+    A record keeps synthetic, keypoint and withheld in the same four bits as
+    overlap, but a decoded point splits them. On the way back in, the writer
+    takes those three from ``synthetic_flag``, ``keypoint_flag`` and
+    ``withheld_flag``, and only the overlap bit from
+    ``extended_classification_flags`` -- LASzip's rule, matched so these are
+    byte for byte the files laszip would have written.
 
     Three header fields are not knowable until the last point has been written:
     the point count, the counts by return number, and the bounding box. They
@@ -1545,8 +1597,8 @@ class Writer:
         the LAS version, defaulting to the oldest one that can describe the
         point format.
 
-        ``chunk_size`` is how many points share a chunk, which is what random
-        access costs on the way back in. ``0xFFFFFFFF`` leaves the boundaries
+        ``chunk_size`` is how many points share a chunk, which sets what
+        random access costs on read-back. ``0xFFFFFFFF`` leaves the boundaries
         to the caller, who ends each chunk with ``chunk()``. It is recorded in
         the VLR whatever the container, as laszip records it, but POINTWISE
         has no chunks for it to describe.
@@ -1775,8 +1827,7 @@ class Writer:
     def write(self, point):
         """Append one point, as a :class:`Point` or as its record bytes.
 
-        Raises ValueError once the writer is closed -- the check is the point
-        writer's, since this runs once per point and it has to make it anyway.
+        Raises ValueError once the writer is closed.
         """
         self._writer.write(point)
 

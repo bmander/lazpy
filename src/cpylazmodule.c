@@ -1206,27 +1206,51 @@ static int Point_set_extra_bytes(PointObject *self, PyObject *v, void *c)
 static PyGetSetDef Point_getset[] = {
 #define POINT_GETSET(name, doc) \
     {#name, (getter)Point_get_##name, (setter)Point_set_##name, doc, NULL}
-    POINT_GETSET(X, "unscaled x"),
-    POINT_GETSET(Y, "unscaled y"),
-    POINT_GETSET(Z, "unscaled z"),
-    POINT_GETSET(intensity, NULL),
-    POINT_GETSET(return_number, NULL),
-    POINT_GETSET(number_of_returns, NULL),
-    POINT_GETSET(scan_direction_flag, NULL),
-    POINT_GETSET(edge_of_flight_line, NULL),
-    POINT_GETSET(classification, NULL),
-    POINT_GETSET(synthetic_flag, NULL),
-    POINT_GETSET(keypoint_flag, NULL),
-    POINT_GETSET(withheld_flag, NULL),
-    POINT_GETSET(scan_angle_rank, NULL),
-    POINT_GETSET(user_data, NULL),
-    POINT_GETSET(point_source_ID, NULL),
-    POINT_GETSET(extended_scan_angle, NULL),
+    POINT_GETSET(X, "unscaled x: multiply by the header's x scale and add "
+                    "its x offset for metres; Reader.scale does this"),
+    POINT_GETSET(Y, "unscaled y; see X"),
+    POINT_GETSET(Z, "unscaled z; see X"),
+    POINT_GETSET(intensity, "return magnitude, 0 to 65535, normalised by the "
+                            "system; 0 where it records none"),
+    POINT_GETSET(return_number, "which return this pulse is, 1 to 7; formats "
+                                "6-10 count to 15 in extended_return_number"),
+    POINT_GETSET(number_of_returns, "returns this pulse gave, 1 to 7; formats "
+                                    "6-10 count to 15 in "
+                                    "extended_number_of_returns"),
+    POINT_GETSET(scan_direction_flag, "1 while the mirror was moving from the "
+                                      "left side of the scan to the right, "
+                                      "0 the other way"),
+    POINT_GETSET(edge_of_flight_line, "1 on the last point of a scan line"),
+    POINT_GETSET(classification, "ASPRS class, 0 to 31 -- 1 unclassified, 2 "
+                                 "ground, 3-5 vegetation, 6 building, 9 "
+                                 "water; formats 6-10 carry the full 0-255 "
+                                 "range in extended_classification"),
+    POINT_GETSET(synthetic_flag, "1 if the point came from somewhere other "
+                                 "than this survey"),
+    POINT_GETSET(keypoint_flag, "1 if the point is a model keypoint, not to "
+                                "be thinned away"),
+    POINT_GETSET(withheld_flag, "1 if the point is deleted: present in the "
+                                "file, not to be used"),
+    POINT_GETSET(scan_angle_rank, "the angle off nadir in whole degrees, "
+                                  "negative to the left of the aircraft and "
+                                  "positive to the right; -90 to 90 in "
+                                  "practice, and a signed byte's -128 to 127 "
+                                  "at the limit. extended_scan_angle is the "
+                                  "finer form the 1.4 formats carry"),
+    POINT_GETSET(user_data, "0 to 255, meaning whatever the producer says"),
+    POINT_GETSET(point_source_ID, "which flight line the point came from, or "
+                                  "0 for this file itself"),
+    POINT_GETSET(extended_scan_angle, "the angle off nadir in steps of 0.006 "
+                                      "degrees, so -30000 to 30000 spans -180 "
+                                      "to 180; scan_angle_rank holds the same "
+                                      "angle rounded to degrees and clamped "
+                                      "to what one signed byte holds"),
     /* read-only: a writer stamps this from the layout it is writing, so
      * setting it here would decide nothing */
     {"extended_point_type", (getter)Point_get_extended_point_type, NULL,
      "1 on a point of format 6-10", NULL},
-    POINT_GETSET(extended_scanner_channel, NULL),
+    POINT_GETSET(extended_scanner_channel, "which of a multi-scanner "
+                                           "system's channels, 0 to 3"),
     POINT_GETSET(extended_classification_flags,
                  "synthetic|keypoint|withheld|overlap; of these only overlap "
                  "reaches a LAS 1.4 record from here, the other three from "
@@ -1234,19 +1258,38 @@ static PyGetSetDef Point_getset[] = {
     POINT_GETSET(extended_classification,
                  "the LAS 1.4 class; a record takes it only where the legacy "
                  "classification is 0"),
-    POINT_GETSET(extended_return_number, NULL),
-    POINT_GETSET(extended_number_of_returns, NULL),
-    POINT_GETSET(gps_time, NULL),
-    POINT_GETSET(rgb, "(red, green, blue, nir)"),
-    POINT_GETSET(wave_packet, NULL),
-    POINT_GETSET(extra_bytes, NULL),
+    POINT_GETSET(extended_return_number, "which return this pulse is, 1 to "
+                                         "15"),
+    POINT_GETSET(extended_number_of_returns, "returns this pulse gave, 1 to "
+                                             "15"),
+    POINT_GETSET(gps_time, "when the point was collected, in seconds. Which "
+                           "epoch is the header's to say: GPS week seconds, "
+                           "or -- with the global encoding bit set, as most "
+                           "files have it -- standard GPS time less 1e9. 0.0 "
+                           "on a format that carries no time"),
+    POINT_GETSET(rgb, "(red, green, blue, nir), each 0 to 65535. Channels the "
+                      "point format does not carry read as 0, and assigning "
+                      "three channels leaves nir alone"),
+    POINT_GETSET(wave_packet, "the 29 bytes of full-waveform description, as "
+                              "they sit on disk -- little-endian on every "
+                              "host, so unpack them with struct's '<': "
+                              "descriptor index (1 byte), offset to the "
+                              "waveform data (8), its size (4), the return's "
+                              "location within it (4), and the parametric "
+                              "dx, dy, dz (4 each)"),
+    POINT_GETSET(extra_bytes, "the point's extra bytes, as many as "
+                              "PointReader.num_extra_bytes says. Assigning a "
+                              "different number is what a reader's shared "
+                              "point will not take -- that buffer is sized by "
+                              "the file -- so copy() first"),
 #undef POINT_GETSET
     {NULL}
 };
 
 static PyMethodDef Point_methods[] = {
     {"copy", (PyCFunction)Point_copy, METH_NOARGS,
-     "copy() -> Point  (detached from the reader's buffer)"},
+     "copy() -> Point\n\n"
+     "A detached copy, safe to keep across reads."},
     {NULL}
 };
 
@@ -1284,11 +1327,32 @@ static PyObject *Point_repr(PointObject *self)
         (unsigned)laz_point_classification(self->p));
 }
 
+PyDoc_STRVAR(point_doc,
+"Point(**fields)\n"
+"\n"
+"One decoded point, with every LAS attribute as a settable attribute here.\n"
+"\n"
+"A point carries the fields of every format, not only its own: reading a\n"
+"format that has no colour leaves rgb zero, and one that has no time leaves\n"
+"gps_time 0.0. The extended_* attributes are the LAS 1.4 widenings of the\n"
+"fields above them, populated by point formats 6-10 alone;\n"
+"extended_point_type is 1 on those formats and 0 elsewhere. On formats 6-10\n"
+"the legacy fields are populated too, kept in step with the extended ones\n"
+"by saturating rather than wrapping. Reader.arrays() names the fields a\n"
+"given file really carries.\n"
+"\n"
+"The point a reader hands back is the reader's own buffer and is overwritten\n"
+"by the next read; copy() takes a detached one. Building a point for a\n"
+"writer takes keywords, one per attribute:\n"
+"\n"
+"    Point(X=125000, Y=473000, Z=1200, classification=2)\n");
+
 static PyTypeObject Point_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
     .tp_name = "lazpy._cpylaz.Point",
     .tp_basicsize = sizeof(PointObject),
     .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_doc = point_doc,
     .tp_new = Point_tp_new,
     .tp_init = (initproc)Point_tp_init,
     .tp_dealloc = (destructor)Point_dealloc,
@@ -2054,37 +2118,95 @@ static PyObject *Reader_get_warning(ReaderObject *self, void *c)
 
 static PyMethodDef Reader_methods[] = {
     {"read", (PyCFunction)Reader_read, METH_NOARGS,
-     "read() -> Point  (the reader's shared Point; call copy() to keep it)"},
+     "read() -> Point\n\n"
+     "Decode the next point. The result is the reader's shared Point, "
+     "overwritten by the next read(); call copy() to keep it."},
     {"read_into", (PyCFunction)Reader_read_into, METH_VARARGS,
-     "read_into(targets, count) -> None  (targets: (buffer, offset, size))"},
+     "read_into(targets, count) -> None\n\n"
+     "Decode count points straight into buffers, one field per target.\n"
+     "A target is (buffer, offset, size): where in a decoded point the "
+     "field sits and how wide it is. This is what Reader.arrays() is "
+     "built on, and it holds no Python object per point."},
     {"read_within", (PyCFunction)Reader_read_within, METH_VARARGS,
-     "read_within(stop, rect, scales, offsets) -> Point | None  "
-     "(the next point before `stop` inside the rectangle, or None)"},
+     "read_within(stop, region) -> Point | None\n\n"
+     "Decode forward to the next point inside the rectangle, or to index "
+     "stop, whichever comes first; None means stop was reached with "
+     "nothing inside. A region is one flat tuple of eight floats -- "
+     "min_x, min_y, max_x, max_y, then the x and y scales and offsets "
+     "that turn a stored coordinate into the georeferenced one the "
+     "rectangle is in -- so testing a point costs no Python call."},
     {"read_into_within", (PyCFunction)Reader_read_into_within, METH_VARARGS,
-     "read_into_within(targets, stop, rect, scales, offsets) -> int  "
-     "(how many points before `stop` were inside, and so written)"},
-    {"seek", (PyCFunction)Reader_seek, METH_VARARGS, "seek(index) -> None"},
+     "read_into_within(targets, stop, region) -> int\n\n"
+     "read_into and read_within at once: decode to index stop, writing "
+     "only the points inside the region, and return how many that was. "
+     "How many there will be is what the query is for, so the caller "
+     "sizes the targets for the whole span and trims to the result."},
+    {"seek", (PyCFunction)Reader_seek, METH_VARARGS,
+     "seek(index) -> None\n\n"
+     "Make index the next point to be read. Costs a chunk decode where "
+     "there is a chunk table to jump by, and a decode from the last "
+     "known boundary where there is not."},
     {"checksum", (PyCFunction)Reader_checksum, METH_VARARGS,
-     "checksum(count=-1) -> (fnv1a_hash, points_read)"},
+     "checksum(count=-1) -> (fnv1a_hash, points_read)\n\n"
+     "Decode count points, hashing every field of each, and advance past "
+     "them. Runs entirely in C with the GIL released, so verifying a "
+     "forty-million-point file against laszip stays quick."},
     {NULL}
 };
 
 static PyGetSetDef Reader_getset[] = {
-    {"point", (getter)Reader_get_point, NULL, NULL, NULL},
-    {"index", (getter)Reader_get_index, NULL, NULL, NULL},
-    {"chunk_starts", (getter)Reader_get_chunk_starts, NULL, NULL, NULL},
+    {"point", (getter)Reader_get_point, NULL,
+     "the Point read() hands back: one buffer for the life of the reader, "
+     "holding the last point decoded",
+     NULL},
+    {"index", (getter)Reader_get_index, NULL,
+     "which point read() will decode next, counting from 0", NULL},
+    {"chunk_starts", (getter)Reader_get_chunk_starts, NULL,
+     "where each chunk begins, as offsets into the file, or None on a file "
+     "with no chunk table. Read from the table at the first point rather "
+     "than when the reader is built, so it is None until then; where the "
+     "table was missing or corrupt (see warning) it holds only the "
+     "boundaries reading has reached so far and grows as it reaches more",
+     NULL},
     {"num_extra_bytes", (getter)Reader_get_num_extra_bytes, NULL,
      "how many extra bytes a decoded point carries -- the item layout's, less "
      "any the LAS 1.4 compatibility attributes take up", NULL},
-    {"warning", (getter)Reader_get_warning, NULL, NULL, NULL},
+    {"warning", (getter)Reader_get_warning, NULL,
+     "a non-fatal problem met while reading, or None. A missing or corrupt "
+     "chunk table is the usual one: points still decode, but seeking has to "
+     "decode forward to reach them",
+     NULL},
     {NULL}
 };
+
+PyDoc_STRVAR(reader_doc,
+/* One line, however long: this is the signature Sphinx and help() lift off
+ * the front of the docstring, and they only recognise it unwrapped. */
+"PointReader(fp, items, compressor, coder=0, chunk_size=0, start_offset=-1, decompress_selective=Selective.ALL, compatibility=None)\n"
+"\n"
+"The point block of a LAS or LAZ file, decoded.\n"
+"\n"
+"This is the container alone. It is handed an open binary file and the item\n"
+"layout the LASzip VLR declares -- `items` is a sequence of (type, size,\n"
+"version) triples -- and reads nothing of the LAS header itself, which is\n"
+"why it needs telling where the points start and how they are packed.\n"
+"lazpy.Reader is the front end that parses a header and builds one of these;\n"
+"reach for this only to drive a container the header does not describe.\n"
+"\n"
+"`compressor` and `coder` are the LASzip VLR's own fields (see\n"
+"lazpy.Compressor and lazpy.Coder), `chunk_size` its chunk size with\n"
+"0xFFFFFFFF meaning adaptive, and `start_offset` where to seek before\n"
+"reading, or -1 to read from wherever the file is. `decompress_selective` is\n"
+"a lazpy.Selective mask, which the layered LAS 1.4 formats alone honour.\n"
+"`compatibility` describes a LAS 1.4 file disguised as a legacy one, and is\n"
+"None for every ordinary file.\n");
 
 static PyTypeObject Reader_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
     .tp_name = "lazpy._cpylaz.PointReader",
     .tp_basicsize = sizeof(ReaderObject),
     .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_doc = reader_doc,
     .tp_new = PyType_GenericNew,
     .tp_init = (initproc)Reader_tp_init,
     .tp_dealloc = (destructor)Reader_dealloc,
@@ -2385,11 +2507,16 @@ static PyObject *Writer_get_points_by_return(WriterObject *self, void *c)
 
 static PyMethodDef Writer_methods[] = {
     {"write", (PyCFunction)Writer_write, METH_O,
-     "write(point) -> None  (a Point, or the bytes its items occupy on disk)"},
+     "write(point) -> None\n\n"
+     "Append one point: a Point, or the bytes of one on-disk record."},
     {"chunk", (PyCFunction)Writer_chunk, METH_NOARGS,
-     "chunk() -> None  (close the open chunk; variable-size chunking only)"},
+     "chunk() -> None\n\n"
+     "Close the open chunk. Only meaningful with variable-size chunking, "
+     "where the boundaries are the caller's to choose."},
     {"done", (PyCFunction)Writer_done, METH_NOARGS,
-     "done() -> None  (close the last chunk and write the chunk table)"},
+     "done() -> None\n\n"
+     "Close the last chunk and write the chunk table. Not optional: "
+     "without it the file ends mid-chunk and nothing can seek in it."},
     {NULL}
 };
 
@@ -2405,11 +2532,25 @@ static PyGetSetDef Writer_getset[] = {
     {NULL}
 };
 
+PyDoc_STRVAR(writer_doc,
+"PointWriter(fp, items, compressor, coder=0, chunk_size=0, start_offset=-1)\n"
+"\n"
+"The compress side of PointReader: points in, a LAZ point block out.\n"
+"\n"
+"The arguments are PointReader's. As there, this is the container alone --\n"
+"it writes no header and no LASzip VLR, only the points and the chunk\n"
+"table behind them, so what it produces has to be described by a header\n"
+"something else wrote. lazpy.Writer is that something else.\n"
+"\n"
+"write() takes a Point or the bytes of one on-disk record; call done()\n"
+"when the last point is in.\n");
+
 static PyTypeObject Writer_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
     .tp_name = "lazpy._cpylaz.PointWriter",
     .tp_basicsize = sizeof(WriterObject),
     .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_doc = writer_doc,
     .tp_new = PyType_GenericNew,
     .tp_init = (initproc)Writer_tp_init,
     .tp_dealloc = (destructor)Writer_dealloc,
@@ -2551,11 +2692,26 @@ static PyGetSetDef Index_getset[] = {
     {NULL}
 };
 
+PyDoc_STRVAR(index_doc,
+"SpatialIndex(data)\n"
+"\n"
+"A parsed LASzip spatial index, from the bytes of one.\n"
+"\n"
+"The index is a quadtree over the surveyed area whose cells name the runs\n"
+"of point indices that landed in them, so a rectangle query can decode a\n"
+"few chunks instead of the whole file. intervals() asks it a rectangle and\n"
+"gets those runs back.\n"
+"\n"
+"`data` is the payload of a \".lax\" file or of the extended record an\n"
+"appended index lives in -- the two carry the same bytes. Finding one is\n"
+"Reader.spatial_index's job.\n");
+
 static PyTypeObject Index_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
     .tp_name = "lazpy._cpylaz.SpatialIndex",
     .tp_basicsize = sizeof(IndexObject),
     .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_doc = index_doc,
     .tp_new = PyType_GenericNew,
     .tp_init = (initproc)Index_tp_init,
     .tp_dealloc = (destructor)Index_dealloc,

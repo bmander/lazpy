@@ -26,9 +26,12 @@ classifiers = [
 # Reader.xyz()) wants numpy, and it imports it on use rather than on import.
 [project.optional-dependencies]
 numpy = ["numpy"]
+# Read the Docs installs these; so does the docs job in CI.
+docs = ["sphinx>=7", "furo", "myst-parser"]
 
 [project.urls]
 Homepage = "https://github.com/bmander/lazpy"
+Documentation = "https://lazpy.readthedocs.io"
 Issues = "https://github.com/bmander/lazpy/issues"
 
 # The public package is `lazpy` and nothing else. models.py, encoder.py and

@@ -1,0 +1,23 @@
+# Read the Docs build. https://docs.readthedocs.io/en/stable/config-file/v2.html
+version: 2
+
+build:
+  os: ubuntu-24.04
+  tools:
+    python: "3.13"
+
+sphinx:
+  configuration: docs/conf.py
+  # What CI enforces too: a broken cross-reference should fail the build, not
+  # ship as a dead link.
+  fail_on_warning: true
+
+# Installed rather than mocked. autodoc imports lazpy for real, because Point
+# and PointReader are the C extension's own types -- the build image has gcc,
+# so the extension compiles here like anywhere else.
+python:
+  install:
+    - method: pip
+      path: .
+      extra_requirements:
+        - docs
