@@ -121,7 +121,40 @@ typedef struct {
     I64 pos;        /* read cursor within buf */
     I64 length;     /* whole file, found on demand; -2 until then, -1 if it
                      * cannot be found (see laz_stream_remaining) */
+    /* A writable view of buf, for readinto: made once and reused, since
+     * making one per refill would cost more than the copy it saves. NULL
+     * where the file object has no readinto, which read() is the fallback
+     * for -- BytesIO and open() both have one, a socket makefile may not. */
+    PyObject *view;
 } FileImpl;
+
+/*
+ * Gives up the readinto view, with the GIL held.
+ *
+ * Released and not merely dropped: it is writable and points into a buffer
+ * this stream will free, and it has been handed to a file object that may
+ * have kept a reference. release() makes any such reference raise rather
+ * than write into freed memory. It raises itself if a slice of it is still
+ * exported, which is not this code's problem but must not be left pending.
+ */
+static void file_drop_view(FileImpl *f)
+{
+    PyObject *type, *value, *traceback, *res;
+    if (!f->view) return;
+
+    /* This runs from the destructor too, where the exception that is ending
+     * the read is already set -- and calling into Python with one pending is
+     * illegal. Put it aside and hand it back. */
+    PyErr_Fetch(&type, &value, &traceback);
+
+    res = PyObject_CallMethod(f->view, "release", NULL);
+    Py_XDECREF(res);
+    if (!res) PyErr_Clear();
+    Py_DECREF(f->view);
+    f->view = NULL;
+
+    PyErr_Restore(type, value, traceback);
+}
 
 /* Refills the buffer from the current logical position. Returns bytes read. */
 static I64 file_refill(LazStream *s)
@@ -147,6 +180,46 @@ static I64 file_refill(LazStream *s)
      * propagates it rather than reporting a generic end-of-file, so a
      * PermissionError or a file object returning a non-bytes value is
      * distinguishable from a genuinely truncated file. */
+    if (f->view) {
+        /* readinto fills the buffer where it lies. read() would allocate a
+         * 64 KB bytes object, have it copied here, and free it again. */
+        res = PyObject_CallMethod(f->fp, "readinto", "O", f->view);
+        if (res == NULL) {
+            /* Having a readinto is not the same as having one that works:
+             * io.RawIOBase supplies one that raises NotImplementedError, and
+             * an attribute can be anything at all. Take the refusal as it
+             * comes and use read() from here on -- but only for a refusal;
+             * a PermissionError from a real read is the caller's to see. */
+            if (PyErr_ExceptionMatches(PyExc_NotImplementedError) ||
+                PyErr_ExceptionMatches(PyExc_TypeError) ||
+                PyErr_ExceptionMatches(PyExc_AttributeError)) {
+                PyErr_Clear();
+                file_drop_view(f);
+            } else {
+                PyGILState_Release(gil);
+                s->failed = LAZ_TRUE;
+                s->eof = LAZ_TRUE;
+                return 0;
+            }
+        } else {
+            n = PyNumber_AsSsize_t(res, PyExc_OverflowError);
+            Py_DECREF(res);
+            if (n < 0 || n > FILE_BUF_SIZE) {
+                if (n >= 0)
+                    PyErr_SetString(PyExc_ValueError,
+                                    "readinto wrote more than it was given");
+                PyGILState_Release(gil);
+                s->failed = LAZ_TRUE;
+                s->eof = LAZ_TRUE;
+                return 0;
+            }
+            f->fill = (I64)n;
+            PyGILState_Release(gil);
+            if (n == 0) s->eof = LAZ_TRUE;
+            return (I64)n;
+        }
+    }
+
     res = PyObject_CallMethod(f->fp, "read", "n", (Py_ssize_t)FILE_BUF_SIZE);
     if (res == NULL) {
         PyGILState_Release(gil);
@@ -156,6 +229,14 @@ static I64 file_refill(LazStream *s)
     }
     if (PyBytes_AsStringAndSize(res, &data, &n) < 0) {
         Py_DECREF(res);
+        PyGILState_Release(gil);
+        s->failed = LAZ_TRUE;
+        s->eof = LAZ_TRUE;
+        return 0;
+    }
+    if (n > FILE_BUF_SIZE) {
+        Py_DECREF(res);
+        PyErr_SetString(PyExc_ValueError, "read returned more than it was asked for");
         PyGILState_Release(gil);
         s->failed = LAZ_TRUE;
         s->eof = LAZ_TRUE;
@@ -253,6 +334,7 @@ static void file_destroy(LazStream *s)
 {
     FileImpl *f = (FileImpl *)s->impl;
     PyGILState_STATE gil = PyGILState_Ensure();
+    file_drop_view(f);
     Py_XDECREF(f->fp);
     PyGILState_Release(gil);
     free(f->buf);
@@ -314,6 +396,15 @@ LazStream *laz_stream_new_file(void *py_fp)
     f->pos = 0;
     f->fill = 0;
     f->length = -2;                       /* not looked for yet */
+
+    /* One view over the buffer, for readinto to fill in place. Made here
+     * because making it per refill would cost more than the copy it saves,
+     * and only where the file object has a readinto to give it to. */
+    if (PyObject_HasAttrString(f->fp, "readinto")) {
+        f->view = PyMemoryView_FromMemory((char *)f->buf, FILE_BUF_SIZE,
+                                          PyBUF_WRITE);
+        if (!f->view) PyErr_Clear();          /* fall back to read() */
+    }
 
     s->impl = f;
     s->get_byte = file_get_byte;

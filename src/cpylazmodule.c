@@ -144,6 +144,11 @@ static int SymbolModel_tp_init(SymbolModelObject *self, PyObject *args, PyObject
     if (!PyArg_ParseTupleAndKeywords(args, kwds, "I|O", kwlist, &num_symbols, &compress_obj))
         return -1;
 
+    /* __init__ can be called again on a live object, and setup zeroes the
+     * struct over whatever the last one allocated. Only our own storage is
+     * ours to free -- a borrowed model belongs to the reader that owns it. */
+    if (self->m == &self->storage) laz_symbol_model_free(self->m);
+
     self->m = &self->storage;
     self->owner = NULL;
     laz_symbol_model_setup(self->m, num_symbols,
