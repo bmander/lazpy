@@ -1689,6 +1689,105 @@ typedef struct {
  * bookkeeping (the extra-bytes count and pointer), not decoded data. */
 #define POINT_FIXED_EXTENT (LAZ_POINT_OFFSET_WAVEPACKET + 29)
 
+/* ------------------------------------------------------- rectangle queries */
+
+/*
+ * A rectangle, and what turns a stored point into the coordinates it is in.
+ *
+ * The test is done in scaled floats rather than by converting the rectangle
+ * to raw integer bounds once. Converting would skip this multiply-add per
+ * candidate, but it is not bit-equivalent at the boundaries, and which points
+ * a query selects is pinned against laszip's own answer in
+ * testdata/reference_inside.txt.
+ */
+typedef struct {
+    double min_x, min_y, max_x, max_y;
+    double scale_x, scale_y, offset_x, offset_y;
+} Rect;
+
+static BOOL point_inside(const Rect *r, const LazPoint *p)
+{
+    /* half-open, as laszip_read_inside_point is: adjoining rectangles
+     * partition the points rather than sharing the ones on the seam */
+    double x = p->X * r->scale_x + r->offset_x;
+    double y = p->Y * r->scale_y + r->offset_y;
+    return x >= r->min_x && x < r->max_x && y >= r->min_y && y < r->max_y;
+}
+
+/*
+ * Decodes forward to the next point inside the rectangle, or to `stop`.
+ *
+ * Returns 1 with the point decoded, 0 having reached `stop`, and -1 on a
+ * decode failure -- which sets nothing, since it may run with the GIL
+ * released; the caller raises through reader_error.
+ *
+ * This is the whole reason the rectangle is known down here: a query's
+ * candidates outnumber its results -- 49,000 to 400 for a small square of a
+ * million-point file -- and every rejected one used to cross into Python and
+ * box two integers to be tested there.
+ */
+static int reader_next_within(ReaderObject *self, U64 stop, const Rect *rect)
+{
+    while (self->index < stop) {
+        if (!reader_next(self)) return -1;
+        self->index++;
+        if (point_inside(rect, &self->point)) return 1;
+    }
+    return 0;
+}
+
+/* The rectangle and what puts a point in it, as one flat tuple of doubles:
+ * lazpy.Reader._region builds it once for a whole query. */
+static int rect_convert(PyObject *obj, void *out)
+{
+    Rect *r = (Rect *)out;
+    return PyArg_ParseTuple(obj, "dddddddd;a region is eight floats",
+                            &r->min_x, &r->min_y, &r->max_x, &r->max_y,
+                            &r->scale_x, &r->scale_y,
+                            &r->offset_x, &r->offset_y);
+}
+
+static PyObject *Reader_read_within(ReaderObject *self, PyObject *args)
+{
+    unsigned long long stop;
+    Rect rect;
+    int found;
+
+    if (!PyArg_ParseTuple(args, "KO&", &stop, rect_convert, &rect))
+        return NULL;
+    if (!self->ready) {
+        PyErr_SetString(PyExc_ValueError, "reader is not initialised");
+        return NULL;
+    }
+
+    /*
+     * The first candidate is decoded with the GIL held, as read() is and for
+     * read()'s reason: one point costs less than a release and reacquire. If
+     * it is inside, that is the whole call.
+     *
+     * Only once one has been rejected does this settle in for a scan and let
+     * go -- and then it may be decoding thousands, since a query worth making
+     * rejects far more than it returns.
+     */
+    if (self->index < (U64)stop) {
+        if (!reader_next(self)) return reader_error(self);
+        self->index++;
+        if (point_inside(&rect, &self->point)) {
+            Py_INCREF(self->point_view);
+            return self->point_view;
+        }
+    }
+
+    Py_BEGIN_ALLOW_THREADS
+    found = reader_next_within(self, (U64)stop, &rect);
+    Py_END_ALLOW_THREADS
+
+    if (found < 0) return reader_error(self);
+    if (found == 0) Py_RETURN_NONE;
+    Py_INCREF(self->point_view);
+    return self->point_view;
+}
+
 /*
  * Decodes `count` points straight into caller-owned buffers, one per field.
  *
@@ -1703,13 +1802,120 @@ typedef struct {
  * Nothing here knows what a field means -- names, types and the unpacking of
  * the sub-byte fields are Python's business.
  */
+/*
+ * The columns of one read_into call, and the buffers they are writing into.
+ *
+ * Opened from the caller's `targets` and closed whatever happens after, since
+ * every one of them is holding a buffer view.
+ */
+typedef struct {
+    PyObject *seq;
+    Column *cols;
+    Py_buffer *views;
+    Py_ssize_t n;
+    Py_ssize_t held;        /* views actually acquired, which is what to release */
+} Columns;
+
+static void columns_close(Columns *c)
+{
+    Py_ssize_t i;
+    for (i = 0; i < c->held; i++) PyBuffer_Release(&c->views[i]);
+    PyMem_Free(c->views);
+    PyMem_Free(c->cols);
+    Py_XDECREF(c->seq);
+    c->seq = NULL; c->cols = NULL; c->views = NULL; c->n = 0; c->held = 0;
+}
+
+static BOOL columns_open_partial(ReaderObject *self, PyObject *targets,
+                                 Py_ssize_t capacity, Columns *c)
+{
+    Py_ssize_t i;
+
+    c->seq = NULL; c->cols = NULL; c->views = NULL; c->n = 0; c->held = 0;
+
+    /* Every failure below closes what it opened, so a caller that got FALSE
+     * has nothing left to release. */
+    c->seq = PySequence_Fast(targets, "targets must be a sequence");
+    if (!c->seq) return LAZ_FALSE;
+    c->n = PySequence_Fast_GET_SIZE(c->seq);
+
+    c->cols = (Column *)PyMem_Malloc((size_t)c->n * sizeof(Column));
+    c->views = (Py_buffer *)PyMem_Malloc((size_t)c->n * sizeof(Py_buffer));
+    if (!c->cols || !c->views) { PyErr_NoMemory(); return LAZ_FALSE; }
+
+    for (i = 0; i < c->n; i++) {
+        PyObject *t = PySequence_Fast_GET_ITEM(c->seq, i);
+        PyObject *buf;
+        Py_ssize_t offset, size;
+
+        if (!PyArg_ParseTuple(t, "Onn", &buf, &offset, &size)) return LAZ_FALSE;
+        if (size <= 0) {
+            PyErr_SetString(PyExc_ValueError, "field width must be positive");
+            return LAZ_FALSE;
+        }
+        if (capacity > PY_SSIZE_T_MAX / size) {
+            PyErr_SetString(PyExc_OverflowError, "count is too large");
+            return LAZ_FALSE;
+        }
+        /* Both bounds are checked by subtraction rather than by adding
+         * offset and size, which are the caller's and could overflow. */
+        if (offset == -1) {
+            if (size > (Py_ssize_t)self->num_extra_bytes) {
+                PyErr_SetString(PyExc_ValueError,
+                                "field lies outside the extra bytes");
+                return LAZ_FALSE;
+            }
+            c->cols[i].src = self->extra_bytes;
+        } else {
+            if (offset < 0 || offset > POINT_FIXED_EXTENT - size) {
+                PyErr_SetString(PyExc_ValueError,
+                                "field lies outside the decoded point");
+                return LAZ_FALSE;
+            }
+            c->cols[i].src = (const U8 *)&self->point + offset;
+        }
+
+        if (PyObject_GetBuffer(buf, &c->views[i],
+                               PyBUF_WRITABLE | PyBUF_C_CONTIGUOUS) < 0)
+            return LAZ_FALSE;
+        c->held = i + 1;
+        if (c->views[i].len < capacity * size) {
+            PyErr_SetString(PyExc_ValueError, "output buffer is too small");
+            return LAZ_FALSE;
+        }
+        c->cols[i].dst = (U8 *)c->views[i].buf;
+        c->cols[i].size = size;
+    }
+    return LAZ_TRUE;
+}
+
+/* Resolves `targets` against this reader's point, checking that every buffer
+ * has room for `capacity` points. Returns false with an exception set, having
+ * released whatever it had already taken -- so only a successful open needs
+ * closing. */
+static BOOL columns_open(ReaderObject *self, PyObject *targets,
+                         Py_ssize_t capacity, Columns *c)
+{
+    if (columns_open_partial(self, targets, capacity, c)) return LAZ_TRUE;
+    columns_close(c);
+    return LAZ_FALSE;
+}
+
+/* Copies the point just decoded into the columns, advancing each. */
+static void columns_append(Columns *c)
+{
+    Py_ssize_t i;
+    for (i = 0; i < c->n; i++) {
+        memcpy(c->cols[i].dst, c->cols[i].src, (size_t)c->cols[i].size);
+        c->cols[i].dst += c->cols[i].size;    /* on to this column's next */
+    }
+}
+
 static PyObject *Reader_read_into(ReaderObject *self, PyObject *args)
 {
-    PyObject *targets, *seq, *result = NULL;
-    Py_ssize_t count;
-    Py_ssize_t n, i, done = 0, held = 0;
-    Column *cols = NULL;
-    Py_buffer *views = NULL;
+    PyObject *targets, *result = NULL;
+    Py_ssize_t count, done = 0;
+    Columns c;
     BOOL ok = LAZ_TRUE;
 
     if (!PyArg_ParseTuple(args, "On", &targets, &count)) return NULL;
@@ -1721,58 +1927,7 @@ static PyObject *Reader_read_into(ReaderObject *self, PyObject *args)
         PyErr_SetString(PyExc_ValueError, "count must not be negative");
         return NULL;
     }
-
-    seq = PySequence_Fast(targets, "targets must be a sequence");
-    if (!seq) return NULL;
-    n = PySequence_Fast_GET_SIZE(seq);
-
-    cols = (Column *)PyMem_Malloc((size_t)n * sizeof(Column));
-    views = (Py_buffer *)PyMem_Malloc((size_t)n * sizeof(Py_buffer));
-    if (!cols || !views) { PyErr_NoMemory(); goto cleanup; }
-
-    for (i = 0; i < n; i++) {
-        PyObject *t = PySequence_Fast_GET_ITEM(seq, i);
-        PyObject *buf;
-        Py_ssize_t offset, size;
-
-        if (!PyArg_ParseTuple(t, "Onn", &buf, &offset, &size)) goto cleanup;
-        if (size <= 0) {
-            PyErr_SetString(PyExc_ValueError, "field width must be positive");
-            goto cleanup;
-        }
-        if (count > PY_SSIZE_T_MAX / size) {
-            PyErr_SetString(PyExc_OverflowError, "count is too large");
-            goto cleanup;
-        }
-        /* Both bounds are checked by subtraction rather than by adding
-         * offset and size, which are the caller's and could overflow. */
-        if (offset == -1) {
-            if (size > (Py_ssize_t)self->num_extra_bytes) {
-                PyErr_SetString(PyExc_ValueError,
-                                "field lies outside the extra bytes");
-                goto cleanup;
-            }
-            cols[i].src = self->extra_bytes;
-        } else {
-            if (offset < 0 || offset > POINT_FIXED_EXTENT - size) {
-                PyErr_SetString(PyExc_ValueError,
-                                "field lies outside the decoded point");
-                goto cleanup;
-            }
-            cols[i].src = (const U8 *)&self->point + offset;
-        }
-
-        if (PyObject_GetBuffer(buf, &views[i],
-                               PyBUF_WRITABLE | PyBUF_C_CONTIGUOUS) < 0)
-            goto cleanup;
-        held = i + 1;
-        if (views[i].len < count * size) {
-            PyErr_SetString(PyExc_ValueError, "output buffer is too small");
-            goto cleanup;
-        }
-        cols[i].dst = (U8 *)views[i].buf;
-        cols[i].size = size;
-    }
+    if (!columns_open(self, targets, count, &c)) return NULL;
 
     Py_BEGIN_ALLOW_THREADS
     for (done = 0; done < count; done++) {
@@ -1780,10 +1935,7 @@ static PyObject *Reader_read_into(ReaderObject *self, PyObject *args)
             ok = LAZ_FALSE;
             break;
         }
-        for (i = 0; i < n; i++) {
-            memcpy(cols[i].dst, cols[i].src, (size_t)cols[i].size);
-            cols[i].dst += cols[i].size;      /* on to this column's next */
-        }
+        columns_append(&c);
     }
     Py_END_ALLOW_THREADS
 
@@ -1798,11 +1950,53 @@ static PyObject *Reader_read_into(ReaderObject *self, PyObject *args)
         result = reader_error(self);         /* raises; returns NULL */
     }
 
-cleanup:
-    for (i = 0; i < held; i++) PyBuffer_Release(&views[i]);
-    PyMem_Free(views);
-    PyMem_Free(cols);
-    Py_DECREF(seq);
+    columns_close(&c);
+    return result;
+}
+
+/*
+ * read_into for a rectangle: decodes up to `stop` and writes only the points
+ * inside, returning how many that was.
+ *
+ * The result count is not knowable in advance -- that is what the query is
+ * for -- so the caller sizes the buffers for the whole candidate span and
+ * trims to the return value.
+ */
+static PyObject *Reader_read_into_within(ReaderObject *self, PyObject *args)
+{
+    PyObject *targets, *result = NULL;
+    unsigned long long stop;
+    Py_ssize_t written = 0, room;
+    Rect rect;
+    Columns c;
+    int found = 0;
+
+    if (!PyArg_ParseTuple(args, "OKO&", &targets, &stop, rect_convert, &rect))
+        return NULL;
+    if (!self->ready) {
+        PyErr_SetString(PyExc_ValueError, "reader is not initialised");
+        return NULL;
+    }
+
+    /* Every point between here and `stop` could be inside, so that is what
+     * the buffers have to hold. */
+    room = (stop > (unsigned long long)self->index)
+         ? (Py_ssize_t)(stop - self->index) : 0;
+    if (!columns_open(self, targets, room, &c)) return NULL;
+
+    Py_BEGIN_ALLOW_THREADS
+    while (written < room) {
+        found = reader_next_within(self, (U64)stop, &rect);
+        if (found != 1) break;
+        columns_append(&c);
+        written++;
+    }
+    Py_END_ALLOW_THREADS
+
+    if (found < 0) result = reader_error(self);   /* raises; returns NULL */
+    else result = PyLong_FromSsize_t(written);
+
+    columns_close(&c);
     return result;
 }
 
@@ -1858,6 +2052,12 @@ static PyMethodDef Reader_methods[] = {
      "read() -> Point  (the reader's shared Point; call copy() to keep it)"},
     {"read_into", (PyCFunction)Reader_read_into, METH_VARARGS,
      "read_into(targets, count) -> None  (targets: (buffer, offset, size))"},
+    {"read_within", (PyCFunction)Reader_read_within, METH_VARARGS,
+     "read_within(stop, rect, scales, offsets) -> Point | None  "
+     "(the next point before `stop` inside the rectangle, or None)"},
+    {"read_into_within", (PyCFunction)Reader_read_into_within, METH_VARARGS,
+     "read_into_within(targets, stop, rect, scales, offsets) -> int  "
+     "(how many points before `stop` were inside, and so written)"},
     {"seek", (PyCFunction)Reader_seek, METH_VARARGS, "seek(index) -> None"},
     {"checksum", (PyCFunction)Reader_checksum, METH_VARARGS,
      "checksum(count=-1) -> (fnv1a_hash, points_read)"},

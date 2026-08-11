@@ -3543,6 +3543,75 @@ class TestSpatialIndexFormats:
                 "pt1_v2.laz", (1400, 1600, 1500, 1700)) if i <= 10]
 
 
+class TestRectangleQueriesAsArrays:
+    """arrays_within and xyz_within select what points_within selects.
+
+    Which points a rectangle contains is settled against laszip's own answer
+    elsewhere in this file; what these have to show is that the array form
+    and the point form agree, for every reference rectangle and every
+    container shape. Anything else would mean two answers to one question.
+    """
+
+    @pytest.mark.parametrize("name,rect", QUERY_CASES, ids=QUERY_IDS)
+    def test_arrays_within_matches_points_within(self, name, rect):
+        np = pytest.importorskip("numpy")
+        with Reader(fixture(name)) as reader:
+            expected = [(p.X, p.Y, p.Z, p.classification)
+                        for p in map(Point.copy, reader.points_within(*rect))]
+        with Reader(fixture(name)) as reader:
+            a = reader.arrays_within("X", "Y", "Z", "classification",
+                                     rect=rect)
+
+        assert len(a["X"]) == len(expected)
+        for i, name_ in enumerate(("X", "Y", "Z", "classification")):
+            assert np.array_equal(a[name_], [row[i] for row in expected])
+
+    def test_arrays_within_defaults_to_every_field(self):
+        np = pytest.importorskip("numpy")
+        rect = (1498, 1699, 1500, 1701)
+        with Reader(fixture("pt1_v2.laz")) as reader:
+            a = reader.arrays_within(rect=rect)
+            expected = lazpy._fields_for_point_format(
+                reader.point_format, reader.num_extra_bytes)
+        assert sorted(a) == sorted(expected)
+        # the sub-byte fields are unpacked from the byte they share, and
+        # trimmed to the same length as the rest
+        assert len(a["return_number"]) == len(a["X"])
+        assert np.all(a["return_number"] <= 7)
+
+    def test_xyz_within_is_the_scaled_form(self):
+        np = pytest.importorskip("numpy")
+        rect = (1498, 1699, 1500, 1701)
+        with Reader(fixture("pt1_v2.laz")) as reader:
+            xyz = reader.xyz_within(rect)
+        with Reader(fixture("pt1_v2.laz")) as reader:
+            expected = [reader.scale(p) for p in reader.points_within(*rect)]
+
+        assert xyz.shape == (len(expected), 3)
+        assert np.array_equal(xyz, np.array(expected, dtype=np.float64))
+        # and every one of them really is inside
+        assert np.all((xyz[:, 0] >= rect[0]) & (xyz[:, 0] < rect[2]))
+        assert np.all((xyz[:, 1] >= rect[1]) & (xyz[:, 1] < rect[3]))
+
+    def test_a_rectangle_that_finds_nothing_gives_empty_arrays(self):
+        pytest.importorskip("numpy")
+        with Reader(fixture("pt1_v2.laz")) as reader:
+            a = reader.arrays_within("X", "Y", rect=(1e6, 1e6, 2e6, 2e6))
+        assert len(a["X"]) == 0 and len(a["Y"]) == 0
+
+    def test_an_unindexed_file_selects_the_same_points(self, tmp_path):
+        """The filtered full scan has to answer the same question."""
+        np = pytest.importorskip("numpy")
+        rect = (1498, 1699, 1500, 1701)
+        with Reader(fixture("pt1_v2.laz")) as reader:
+            indexed = reader.arrays_within("X", "Y", rect=rect)
+        with Reader(without_sidecar("pt1_v2.laz", tmp_path)) as reader:
+            assert not reader.has_spatial_index
+            scanned = reader.arrays_within("X", "Y", rect=rect)
+        assert np.array_equal(indexed["X"], scanned["X"])
+        assert np.array_equal(indexed["Y"], scanned["Y"])
+
+
 # ---------------------------------------------------------------------------
 # Running out of memory.
 #
