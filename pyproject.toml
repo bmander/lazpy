@@ -39,8 +39,8 @@ packages = ["lazpy"]
 
 # No extra compile flags: every compiler setuptools drives already optimizes by
 # default (-O2/-O3 from Python's own CFLAGS, /O2 from MSVC), and -Wall/-Wextra
-# are not portable to MSVC. Warnings are a development concern; see the
-# Building section of README.md.
+# are not portable to MSVC. Warnings are a development concern: CI builds with
+# -Werror, and "Building with warnings" in README.md reproduces that locally.
 [[tool.setuptools.ext-modules]]
 name = "lazpy._cpylaz"
 sources = [
