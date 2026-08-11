@@ -189,8 +189,21 @@ def _versioned_items(items, version):
 def _min_version_minor(point_format):
     """The oldest LAS 1.x that can describe *point_format*.
 
-    Wavepackets arrived in LAS 1.3 and the extended point types in 1.4. This is
-    both what a writer defaults to and what it checks a caller against.
+    Colour arrived in LAS 1.2, wavepackets in 1.3 and the extended point types
+    in 1.4; formats 0 and 1 are as old as the format itself. This is what a
+    writer checks a caller's version against -- what it defaults to is
+    something else, since nobody wants a LAS 1.0 file by accident.
     """
-    _, _, _, _, wavepacket, point14 = _POINT_FORMATS[point_format]
-    return 4 if point14 else (3 if wavepacket else 2)
+    _, _, rgb, _, wavepacket, point14 = _POINT_FORMATS[point_format]
+    return 4 if point14 else 3 if wavepacket else 2 if rgb else 0
+
+
+def _default_version_minor(point_format):
+    """The LAS version a writer given none picks: 1.2 unless the point format
+    needs newer.
+
+    The oldest version that can hold a format 0 or 1 point is 1.0, but a file
+    written today should not claim to predate the century, and 1.2 is what
+    every tool reads. A caller who wants 1.0 or 1.1 asks for it.
+    """
+    return max(2, _min_version_minor(point_format))

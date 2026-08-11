@@ -69,9 +69,15 @@ def header_formats(version_minor):
     return formats
 
 
-def _header_size(version_minor):
-    """How long a LAS 1.`version_minor` header is, by its own tables."""
-    return sum(format_size(fmt) for fmt in header_formats(version_minor))
+def _header_size(version_minor, user_data_size=0):
+    """How long a LAS 1.`version_minor` header is, by its own tables.
+
+    A file may keep bytes of its own behind those tables and count them in
+    header_size, which is what `user_data_size` is; a reader takes them as
+    whatever is left over.
+    """
+    return (sum(format_size(fmt) for fmt in header_formats(version_minor))
+            + user_data_size)
 
 
 VLR_HEADER_FORMAT = (
