@@ -30,11 +30,11 @@ class Writer:
     that came from a reader -- or the raw bytes of its record, which is what a
     file being converted already has.
 
-    One wrinkle in the LAS 1.4 point formats is worth knowing when building
-    points by hand: three of the four classification flags exist twice over.
+    One detail of the LAS 1.4 point formats matters when building points by
+    hand: three of the four classification flags exist twice over.
     A record keeps synthetic, keypoint and withheld in the same four bits as
-    overlap, but a decoded point splits them. On the way back in, the writer
-    takes those three from ``synthetic_flag``, ``keypoint_flag`` and
+    overlap, but a decoded point splits them. When writing a record, the
+    writer takes those three from ``synthetic_flag``, ``keypoint_flag`` and
     ``withheld_flag``, and only the overlap bit from
     ``extended_classification_flags`` -- LASzip's rule, matched so these are
     byte for byte the files laszip would have written.

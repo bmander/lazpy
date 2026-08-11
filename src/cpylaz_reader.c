@@ -795,7 +795,7 @@ static PyMethodDef Reader_methods[] = {
 
 static PyGetSetDef Reader_getset[] = {
     {"point", (getter)Reader_get_point, NULL,
-     "the Point read() hands back: one buffer for the life of the reader, "
+     "the Point read() returns: one buffer for the life of the reader, "
      "holding the last point decoded",
      NULL},
     {"index", (getter)Reader_get_index, NULL,
@@ -830,7 +830,7 @@ PyDoc_STRVAR(reader_doc,
 "version) triples -- and reads nothing of the LAS header itself, which is\n"
 "why it needs telling where the points start and how they are packed.\n"
 "lazpy.Reader is the front end that parses a header and builds one of these;\n"
-"reach for this only to drive a container the header does not describe.\n"
+"use this only for a container the header does not describe.\n"
 "\n"
 "`compressor` and `coder` are the LASzip VLR's own fields (see\n"
 "lazpy.Compressor and lazpy.Coder), `chunk_size` its chunk size with\n"

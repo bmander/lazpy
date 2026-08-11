@@ -3,8 +3,8 @@ The on-disk format
 
 The tables a LAS header is made of and the functions that read and write
 anything those tables describe. :class:`lazpy.Reader` and
-:class:`lazpy.Writer` use these; a caller picking apart a header by hand
-can too.
+:class:`lazpy.Writer` use these; a caller parsing a header directly can
+too.
 
 .. currentmodule:: lazpy
 

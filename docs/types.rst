@@ -1,7 +1,7 @@
 The types they exchange
 =======================
 
-What :class:`lazpy.Reader` hands back and :class:`lazpy.Writer` takes: the
+What :class:`lazpy.Reader` returns and :class:`lazpy.Writer` accepts: the
 point itself, the enumerations that describe a file, and the errors either
 can raise.
 
