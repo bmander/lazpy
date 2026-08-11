@@ -4,11 +4,13 @@ in for."""
 
 from collections import namedtuple
 
-from ._utils import unsigned_int, cstr
+from ._utils import unsigned_int
 from .formats import (LASCOMPATIBLE_VLR_KEY, EXTRA_BYTES_VLR_KEY,
                       UnsupportedFileError, _POINT_FORMATS)
-from .headers import (HEADER_FORMAT_13, HEADER_FORMAT_14, format_size,
-                      unpack_format, _header_size)
+from .headers import (EXTRA_BYTES_ATTRIBUTE_FORMAT,
+                      EXTRA_BYTES_ATTRIBUTE_SIZE, HEADER_FORMAT_13,
+                      HEADER_FORMAT_14, format_size, unpack_format,
+                      _header_size)
 
 # ---------------------------------------------------------------------------
 # LAS 1.4 compatibility mode.
@@ -67,17 +69,6 @@ CompatibilityLayout = namedtuple(
 # file laszip wrote, only the one that had RGB to begin with can have a NIR
 # band, so the unreachable halves never come up.
 _UPGRADED_FORMAT = {1: (6, 6), 3: (7, 8), 4: (9, 10), 5: (9, 10)}
-
-# One attribute descriptor out of an "extra bytes" record: a fixed 192 bytes,
-# of which only the type, its option byte and the name matter here. The rest is
-# no-data/min/max/scale/offset, which describe values rather than layout.
-EXTRA_BYTES_ATTRIBUTE_FORMAT = (
-    ('reserved', 2, unsigned_int),
-    ('data_type', 1, unsigned_int),
-    ('options', 1, unsigned_int),
-    ('name', 32, cstr),
-)
-EXTRA_BYTES_ATTRIBUTE_SIZE = 192
 
 # The widths of data types 1 to 10. Type 0 means undocumented bytes, as many as
 # the option byte says; 11 to 30 were arrays of two and three, deprecated in

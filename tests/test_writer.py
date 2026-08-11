@@ -5,8 +5,11 @@ import struct
 import pytest
 
 from lazpy import _cpylaz as cpylaz
-from lazpy import (Chunking, Compressor, LASZIP_VLR_KEY, Point, Reader,
-                   LazError, UnsupportedFileError, Writer)
+from lazpy import (Chunking, Compressor, EXTRA_BYTES_VLR_KEY,
+                   ExtraBytesAttribute, LASZIP_VLR_KEY, Point, Reader,
+                   LazError, UnsupportedFileError, Writer, extra_bytes_record)
+from lazpy.compat import _extra_bytes_attributes
+from lazpy.headers import VLR_HEADER_SIZE
 from helpers import (EXTENDED_POINT_COUNT_OFFSET, LAS14_FORMATS,
                      LEGACY_FORMATS, LEGACY_POINT_COUNT_OFFSET, REFERENCE_HASH,
                      field_span, fixture, las_records, load, point_block)
@@ -594,3 +597,193 @@ def test_a_written_file_is_the_file_laszip_wrote(point_format):
         offset, size = field_span(field, header["version_minor"])
         ours[offset:offset + size] = theirs[offset:offset + size]
     assert bytes(ours) == bytes(theirs)
+
+
+# ---------------------------------------------------------------------------
+# Variable length records.
+#
+# Everything a file says about itself beyond the fixed header is a variable
+# length record: where on the earth its coordinates are, what its extra bytes
+# mean, whatever the file it was copied from carried. The writer takes them
+# alongside the LASzip one it builds itself, and they go in front of it, which
+# is where laszip puts its own -- it appends to the records it was given.
+# ---------------------------------------------------------------------------
+
+
+def a_record(user_id, record_id, data, description=b""):
+    return {"user_id": user_id, "record_id": record_id, "data": data,
+            "description": description}
+
+
+WKT = a_record(b"LASF_Projection", 2112, b"COMPD_CS[" + b"x" * 300 + b"]",
+               b"OGC coordinate system WKT")
+CLASSES = a_record(b"LASF_Spec", 0, b"ground\0" * 4, b"classification")
+
+
+def one_point_file(**kwargs):
+    """A file holding a single point, as bytes."""
+    buf = io.BytesIO()
+    with Writer(buf, 1, **kwargs) as writer:
+        writer.write(Point(X=1))
+    return buf.getvalue()
+
+
+def records_of(data):
+    with Reader(io.BytesIO(data)) as reader:
+        return reader.header["variable_length_records"]
+
+
+def test_records_are_written_and_read_back():
+    """What went in comes out, payload and description alike."""
+    records = records_of(one_point_file(vlrs=[WKT, CLASSES]))
+
+    assert list(records) == [(b"LASF_Projection", 2112), (b"LASF_Spec", 0),
+                             LASZIP_VLR_KEY]
+    for given in (WKT, CLASSES):
+        got = records[(given["user_id"], given["record_id"])]
+        assert got["data"] == given["data"]
+        assert got["description"] == given["description"]
+        assert got["record_length_after_header"] == len(given["data"])
+
+
+def test_a_mapping_of_records_is_taken_as_readily_as_a_list():
+    """Copying a file's records is handing over what the reader gave."""
+    mapping = records_of(one_point_file(vlrs=[WKT, CLASSES]))
+
+    assert records_of(one_point_file(vlrs=mapping)) == mapping
+
+
+def test_the_laszip_record_of_a_source_file_is_dropped():
+    """It describes how the file it came from was compressed, which is not a
+    question the new file answers the same way."""
+    source = records_of(one_point_file(vlrs=[WKT]))
+
+    data = one_point_file(vlrs=source, compressed=False)
+
+    assert list(records_of(data)) == [(b"LASF_Projection", 2112)]
+
+
+def test_the_header_counts_the_records_and_the_points_follow_them():
+    """The one thing a record can break: where the points begin."""
+    points, layout = source_points("pt1_v0.las")
+    buf = io.BytesIO()
+    with Writer(buf, 1, vlrs=[WKT, CLASSES], **layout) as writer:
+        for point in points:
+            writer.write(point)
+
+    with Reader(io.BytesIO(buf.getvalue())) as reader:
+        header = reader.header
+        records = header["variable_length_records"]
+        assert header["number_of_variable_length_records"] == 3
+        payloads = sum(r["record_length_after_header"]
+                       for r in records.values())
+        assert (header["offset_to_point_data"] ==
+                header["header_size"] + VLR_HEADER_SIZE * 3 + payloads)
+        assert reader.checksum() == REFERENCE_HASH["pt1_v0.las"]
+
+
+def test_a_files_records_survive_a_copy():
+    """A compatibility fixture is the only one in testdata/ carrying a record
+    that is not the LASzip one: an "extra bytes" descriptor for what is left
+    of its extra bytes once the hidden LAS 1.4 fields are taken out. Copying
+    the file is handing its points and its records to a writer.
+
+    The points are checked by coordinate rather than by laszip's checksum,
+    because a native LAS 1.4 file cannot reproduce one thing this fixture
+    holds: its legacy return numbers are the ones laszip's own down-conversion
+    computed, and a point format 6-10 record has nowhere to keep a legacy
+    field that disagrees with the extended one it is derived from.
+    """
+    name = "pt8_compat_v0.las"
+    with Reader(fixture(name)) as reader:
+        points = [point.copy() for point in reader]
+        source = dict(reader.header["variable_length_records"])
+        point_format = reader.point_format
+        layout = dict(scales=reader.scales, offsets=reader.offsets)
+
+    buf = io.BytesIO()
+    with Writer(buf, point_format, vlrs=source, **layout) as writer:
+        for point in points:
+            writer.write(point)
+
+    with Reader(io.BytesIO(buf.getvalue())) as reader:
+        copied = reader.header["variable_length_records"]
+        assert copied.keys() == source.keys() | {LASZIP_VLR_KEY}
+        for key, record in source.items():
+            assert copied[key]["data"] == record["data"]
+            assert copied[key]["description"] == record["description"]
+        # taken from the descriptor that came along, not restated here
+        assert reader.num_extra_bytes == 6
+        assert [(p.X, p.Y, p.Z, bytes(p.extra_bytes)) for p in reader] == \
+            [(p.X, p.Y, p.Z, bytes(p.extra_bytes)) for p in points]
+
+
+def test_a_record_no_reader_could_find_is_refused():
+    with pytest.raises(ValueError, match="two records claim"):
+        one_point_file(vlrs=[WKT, dict(WKT, data=b"else")])
+
+
+def test_a_payload_too_long_to_declare_is_refused():
+    with pytest.raises(ValueError, match="over the 65535"):
+        one_point_file(vlrs=[a_record(b"lazpy", 1, b"x" * 65536)])
+
+
+# ---------------------------------------------------------------------------
+# The "extra bytes" record, which is the one record the writer can build: it
+# describes the opaque bytes on the end of every point, and a file whose
+# descriptor and record length disagree is one nothing can read.
+# ---------------------------------------------------------------------------
+
+# Six one-byte attributes, which is what the pt0_v0.las points carry
+SIX_BYTES = [ExtraBytesAttribute(f"byte {i}".encode(), 1,
+                                 scale=0.5, offset=2.0)
+             for i in range(6)]
+
+
+def test_the_extra_bytes_record_sizes_the_points():
+    """A descriptor is enough on its own: num_extra_bytes comes from it."""
+    points, layout = source_points("pt0_v0.las")
+    layout.pop("num_extra_bytes")
+    buf = io.BytesIO()
+    with Writer(buf, 0, vlrs=[extra_bytes_record(SIX_BYTES)],
+                **layout) as writer:
+        for point in points:
+            writer.write(point)
+
+    with Reader(io.BytesIO(buf.getvalue())) as reader:
+        assert reader.num_extra_bytes == 6
+        assert reader.header["point_data_record_length"] == 20 + 6
+        assert reader.checksum() == REFERENCE_HASH["pt0_v0.las"]
+
+
+def test_the_attributes_describe_what_they_were_given():
+    data = one_point_file(vlrs=[extra_bytes_record(SIX_BYTES)])
+
+    record = records_of(data)[EXTRA_BYTES_VLR_KEY]
+    attributes = list(_extra_bytes_attributes(record["data"]))
+    assert [a.name for a in attributes] == [a.name for a in SIX_BYTES]
+    assert [a.start for a in attributes] == list(range(6))
+    # scale and offset, where the descriptor keeps them -- behind the name,
+    # four unused bytes and the three no-data/min/max triples -- and the
+    # option bits that say they were set at all
+    first = record["data"]
+    assert first[3] == 0x08 | 0x10
+    assert struct.unpack_from("<3d", first, 4 + 32 + 4 + 3 * 24) == (0.5,) * 3
+    assert struct.unpack_from("<3d", first, 4 + 32 + 4 + 4 * 24) == (2.0,) * 3
+
+
+def test_a_descriptor_that_contradicts_the_record_length_is_refused():
+    with pytest.raises(ValueError, match="describes 6 bytes per point"):
+        one_point_file(vlrs=[extra_bytes_record(SIX_BYTES)],
+                       num_extra_bytes=4)
+
+
+def test_undocumented_bytes_are_not_built_here():
+    """Data type 0 keeps its width where scale and offset would go."""
+    with pytest.raises(ValueError, match="option byte"):
+        extra_bytes_record([ExtraBytesAttribute(b"opaque", 0)])
+
+
+def test_an_unknown_data_type_is_refused():
+    with pytest.raises(Exception, match="data type"):
+        extra_bytes_record([ExtraBytesAttribute(b"what", 99)])

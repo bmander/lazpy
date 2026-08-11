@@ -30,8 +30,21 @@ def double(bytes):
     return struct.unpack('<d', bytes)[0]
 
 
+def double_array(bytes):
+    return [double(bytes[i:i+8]) for i in range(0, len(bytes), 8)]
+
+
 def cstr(bytes):
     return bytes.rstrip(b'\0')
+
+
+def raw(bytes):
+    """A field with no interpretation of its own: the bytes as they lie.
+
+    For a field whose meaning is elsewhere -- the "extra bytes" descriptor
+    holds three of them, whose type is whatever the attribute's own type says.
+    """
+    return bytes
 
 
 def pack_unsigned_int(value, size):
@@ -43,15 +56,19 @@ def pack_signed_int(value, size):
 
 
 def pack_u32_array(values, size):
-    return _pack_array(values, size, 4)
+    return _pack_array(values, size, 4, pack_unsigned_int)
 
 
 def pack_u64_array(values, size):
-    return _pack_array(values, size, 8)
+    return _pack_array(values, size, 8, pack_unsigned_int)
 
 
-def _pack_array(values, size, width):
-    packed = b''.join(pack_unsigned_int(v, width) for v in values)
+def pack_double_array(values, size):
+    return _pack_array(values, size, 8, pack_double)
+
+
+def _pack_array(values, size, width, pack):
+    packed = b''.join(pack(v, width) for v in values)
     if len(packed) != size:
         raise ValueError(f"expected {size // width} values, got {len(values)}")
     return packed
@@ -74,11 +91,20 @@ def pack_cstr(value, size):
     return value + b'\0' * (size - len(value))
 
 
+def pack_raw(value, size):
+    """A field with no interpretation, padded out to its width with zeros."""
+    if len(value) > size:
+        raise ValueError(f"{len(value)} bytes do not fit in {size}")
+    return bytes(value) + b'\0' * (size - len(value))
+
+
 PACKERS = {
     unsigned_int: pack_unsigned_int,
     signed_int: pack_signed_int,
     u32_array: pack_u32_array,
     u64_array: pack_u64_array,
+    double_array: pack_double_array,
     double: pack_double,
     cstr: pack_cstr,
+    raw: pack_raw,
 }
