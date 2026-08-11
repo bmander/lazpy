@@ -1,0 +1,49 @@
+name: verify against laszip
+
+# What the test suite cannot check about itself.
+#
+# pytest compares lazpy against testdata/reference_hashes.txt and
+# reference_inside.txt, which hold what laszip said when the fixtures were
+# generated. Agreeing with a stale reference is agreeing with nothing, so this
+# builds laszip from source and re-derives every reference from it.
+#
+# Weekly rather than per-push: it builds a C++ library from scratch, so it
+# costs minutes where the suite costs a second, and what it is watching for --
+# laszip changing under the fixtures -- does not happen at the rate pull
+# requests do. Scheduled runs only fire on the default branch; use the
+# workflow_dispatch button to run it from a branch.
+
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+jobs:
+  sweep:
+    name: re-derive the laszip references
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      # Tracks laszip's default branch on purpose: the point is to be told
+      # when what it decodes stops matching what it decoded before.
+      - name: Build LASzip
+        run: |
+          git clone --depth 1 https://github.com/LASzip/LASzip.git
+          cmake -S LASzip -B LASzip/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build LASzip/build -j"$(nproc)"
+
+      # The include paths are the ones tools/README.md documents.
+      - name: Build lazdump
+        run: |
+          LZ=LASzip
+          cc -O2 -o lazdump tools/lazdump.c \
+            -I"$LZ/dll" -I"$LZ/include/laszip" -I"$LZ/build/include/laszip" \
+            -L"$LZ/build/lib" -llaszip -Wl,-rpath,"$PWD/$LZ/build/lib"
+
+      - name: Sweep
+        run: python tools/verify_sweep.py ./lazdump

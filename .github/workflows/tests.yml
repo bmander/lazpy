@@ -6,6 +6,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A push that supersedes another has nothing to learn from finishing the run
+# it superseded, and this workflow is nine jobs wide.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Style is host- and version-independent, so it runs once rather than across
   # the matrix below. No build either: flake8 reads the sources, and the only
@@ -54,6 +60,45 @@ jobs:
         shell: bash
         working-directory: ${{ runner.temp }}
 
+  # The compiler as a reviewer. The test matrix above builds with whatever
+  # warnings the platform defaults to and ignores them all, so a warning has
+  # nowhere to show up; this job is where one fails the PR.
+  #
+  # It is its own job rather than an axis of the matrix because it is about the
+  # compiler, not the interpreter, and because -Werror belongs nowhere near the
+  # build a user runs: a warning new to some future compiler should not stop
+  # anyone from installing lazpy. pyproject.toml therefore stays flagless and
+  # the flags arrive through CFLAGS, which setuptools appends to its own.
+  warnings:
+    name: -Werror / ${{ matrix.cc }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, cc: gcc}
+          - {os: macos-latest, cc: clang}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      # -Wno-missing-field-initializers: the only thing that trips it is the
+      # {NULL} sentinel ending each CPython PyMethodDef/PyGetSetDef table,
+      # which is how those tables are written everywhere.
+      #
+      # MSVC has no job here. /W4 /WX would mostly report on CPython's own
+      # headers, and what the issue wanted from Windows -- an error where clang
+      # let some C99 usage pass -- the Windows leg of the test matrix already
+      # gives, since an error fails the build wherever it happens.
+      - name: Build
+        env:
+          CC: ${{ matrix.cc }}
+          CFLAGS: -Wall -Wextra -Werror -Wno-missing-field-initializers
+        run: python -m pip install -v .
+
   # Big-endian coverage. Every runner GitHub offers is little-endian, and the
   # byte-order conversion in the raw item coders is dead code on those, so
   # without this it would never run. s390x under emulation is the usual way to
@@ -71,6 +116,19 @@ jobs:
       - uses: docker/setup-qemu-action@v3
         with:
           platforms: s390x
+
+      # Pulled in a step of its own, and retried, because this is the only job
+      # whose coverage nothing else provides and the registry is the one part
+      # of it that fails for reasons having nothing to do with the code. A
+      # Docker Hub 500 has already turned a green pull request red once.
+      - name: Pull the image
+        run: |
+          for attempt in 1 2 3; do
+            if docker pull --platform linux/s390x debian:trixie; then exit 0; fi
+            echo "pull failed (attempt $attempt); retrying"
+            sleep 15
+          done
+          exit 1
 
       # Debian and apt rather than the python image and pip, because numpy
       # publishes no s390x wheel: pip would build it from source under

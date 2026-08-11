@@ -231,6 +231,19 @@ allocator start returning NULL after `n` allocations, and the tests sweep it
 across every allocation a whole read or write makes. It is a test hook rather
 than API, and it is not thread-safe.
 
+### Building with warnings
+
+An ordinary install compiles with whatever flags Python was built with, so
+that a warning new to some future compiler cannot stop anyone installing
+lazpy. CI holds the extension to a stricter standard, and this is that build:
+
+```bash
+CFLAGS="-Wall -Wextra -Werror -Wno-missing-field-initializers" pip install -e .
+```
+
+`-Wno-missing-field-initializers` because the only thing that trips it is the
+`{NULL}` sentinel ending each CPython method and getset table.
+
 ## License
 
 Apache License 2.0 — see `LICENSE`. Everything in `src/` is a port of

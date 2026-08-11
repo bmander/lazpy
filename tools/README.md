@@ -11,7 +11,8 @@ independent by construction, so the committed hashes are comparable anywhere.
 values it writes little-endian, and on a big-endian host would emit garbage
 rather than fail. Nobody has needed it there, and `testdata/` is committed.
 
-All four need a LASzip checkout built as a shared library:
+The three C and C++ tools below need a LASzip checkout built as a shared
+library; the two Python ones drive what those produce:
 
 ```bash
 git clone --depth 1 https://github.com/LASzip/LASzip.git
@@ -117,6 +118,22 @@ naming the first field that differs.
 python tools/compare_with_laszip.py cloud.laz reference.txt [max_points]
 python tools/compare_with_laszip.py cloud.laz --hash
 ```
+
+## verify_sweep.py
+
+Re-derives every line of `reference_hashes.txt` and `reference_inside.txt`
+with a freshly built `lazdump`, and reports any that no longer reproduces.
+
+```bash
+python tools/verify_sweep.py ./lazdump [testdata_dir]
+```
+
+The test suite checks lazpy against those two files; nothing checks the files
+themselves, which hold what laszip said when the fixtures were generated. A
+suite agreeing with a stale reference is agreeing with nothing, so
+`.github/workflows/verify.yml` runs this weekly against laszip's default
+branch. Unlike the tools above it needs no LASzip headers -- only the
+`lazdump` they built.
 
 ## Regenerating testdata/
 
