@@ -482,3 +482,115 @@ class TestRectangleQueriesAsArrays:
             scanned = reader.arrays_within("X", "Y", rect=rect)
         assert np.array_equal(indexed["X"], scanned["X"])
         assert np.array_equal(indexed["Y"], scanned["Y"])
+
+
+# ---------------------------------------------------------------------------
+# Circle queries.
+#
+# The shape anyone selecting around a point actually wants, and one the
+# quadtree can answer more cheaply than the square around it: the corners of
+# that square are cells a circle never reaches. LASquadtree has it and the
+# port left it out; laszip's own DLL exposes only the rectangle.
+# ---------------------------------------------------------------------------
+
+def middle_of(reader, fraction=6):
+    """A circle over the middle of an indexed file, as (x, y, radius)."""
+    min_x, min_y, max_x, max_y = reader.spatial_index.bounds
+    radius = (max_x - min_x) / fraction
+    center = ((min_x + max_x) / 2, (min_y + max_y) / 2)
+    return center + (radius,)
+
+
+def inside_circle_by_scan(name, circle):
+    """Which points a circle really holds, from the cached full scan the
+    rectangle tests use -- the same oracle, a different shape."""
+    center_x, center_y, radius = circle
+    return [index for index, (x, y) in enumerate(scaled_xy(name))
+            if (x - center_x) ** 2 + (y - center_y) ** 2 < radius ** 2]
+
+
+def circle_indices(reader, circle):
+    """The index of every point a circle query yields, as query_indices does
+    for a rectangle."""
+    return [reader.index - 1 for _ in reader.points_within_circle(*circle)]
+
+
+def points_covered(intervals):
+    """How many points a set of intervals reaches."""
+    return sum(end - start + 1 for start, end in intervals)
+
+
+@pytest.mark.parametrize("name", INDEXED_FIXTURES)
+def test_a_circle_selects_exactly_the_points_inside_it(name):
+    with Reader(fixture(name)) as reader:
+        circle = middle_of(reader)
+
+        indices = circle_indices(reader, circle)
+
+    assert indices == inside_circle_by_scan(name, circle)
+    assert indices          # the fixtures are dense enough for this to bite
+
+
+@pytest.mark.parametrize("name", INDEXED_FIXTURES)
+def test_a_circle_reads_no_more_than_the_square_around_it(name):
+    """The point of asking the index for a circle rather than filtering a
+    rectangle: the corners of the square are cells it can skip."""
+    with Reader(fixture(name)) as reader:
+        center_x, center_y, radius = middle_of(reader)
+        index = reader.spatial_index
+
+        circle = index.intervals_within_circle(center_x, center_y, radius)
+        square = index.intervals(center_x - radius, center_y - radius,
+                                 center_x + radius, center_y + radius)
+
+        assert points_covered(circle) <= points_covered(square)
+
+
+def test_a_circle_of_no_size_holds_nothing():
+    with Reader(fixture(INDEXED_FIXTURES[0])) as reader:
+        center_x, center_y, _ = middle_of(reader)
+        assert reader.spatial_index.intervals_within_circle(
+            center_x, center_y, 0.0) == []
+        assert list(reader.points_within_circle(center_x, center_y, 0.0)) == []
+
+
+def test_a_negative_radius_is_refused():
+    with Reader(fixture(INDEXED_FIXTURES[0])) as reader:
+        with pytest.raises(ValueError, match="radius cannot be negative"):
+            list(reader.points_within_circle(0.0, 0.0, -1.0))
+
+
+def test_an_unindexed_file_selects_the_same_circle(tmp_path):
+    """Without an index it is a filtered full scan, and the answer is the
+    same one."""
+    name = INDEXED_FIXTURES[0]
+    with Reader(fixture(name)) as reader:
+        circle = middle_of(reader)
+        wanted = circle_indices(reader, circle)
+
+    with Reader(without_sidecar(name, tmp_path)) as bare:
+        assert not bare.has_spatial_index
+        assert circle_indices(bare, circle) == wanted
+
+
+def test_the_array_forms_select_what_the_points_do():
+    np = pytest.importorskip("numpy")
+    with Reader(fixture(INDEXED_FIXTURES[0])) as reader:
+        circle = middle_of(reader)
+        wanted = [(p.X, p.Y) for p in reader.points_within_circle(*circle)]
+
+        columns = reader.arrays_within("X", "Y", circle=circle)
+        xyz = reader.xyz_within(circle=circle)
+
+    assert list(zip(columns["X"].tolist(), columns["Y"].tolist())) == wanted
+    assert len(xyz) == len(wanted)
+    assert np.allclose(xyz[:, 0], columns["X"] * reader.scales[0]
+                       + reader.offsets[0])
+
+
+def test_a_query_is_over_one_shape_or_the_other():
+    with Reader(fixture(INDEXED_FIXTURES[0])) as reader:
+        with pytest.raises(TypeError, match="rectangle or a circle"):
+            reader.arrays_within("X", rect=(0, 0, 1, 1), circle=(0, 0, 1))
+        with pytest.raises(TypeError, match="rectangle or a circle"):
+            reader.arrays_within("X")

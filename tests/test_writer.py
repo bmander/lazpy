@@ -907,7 +907,8 @@ def test_a_header_carries_the_user_data_it_was_given():
     user_data = b"something of my own"
     points, layout = source_points("pt1_v0.las")
 
-    data = written_file(1, None, points, layout, header_user_data=user_data)
+    data = written_file(1, None, points, layout,
+                        user_data_in_header=user_data)
 
     with Reader(io.BytesIO(data)) as reader:
         header = reader.header

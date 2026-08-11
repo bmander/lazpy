@@ -78,12 +78,23 @@ reader.spatial_index.bounds        # the indexed area
 reader.spatial_index.intervals(min_x, min_y, max_x, max_y)
 ```
 
+A circle is the other shape a region can be, and the one to reach for when
+selecting around a point: with an index it reaches fewer cells than the
+square around it, since the corners of that square are cells a circle never
+touches.
+
+```python
+for point in reader.points_within_circle(x, y, radius=30.0):
+    ...
+```
+
 The array API has the same form, which is how to read a region and read it
 fast at once:
 
 ```python
 a = reader.arrays_within("X", "Y", "classification", rect=(x0, y0, x1, y1))
 xyz = reader.xyz_within(rect=(x0, y0, x1, y1))     # (N, 3) scaled floats
+xyz = reader.xyz_within(circle=(x, y, 30.0))       # or around a point
 ```
 
 They select exactly what `points_within` selects. Arrays are sized for every
@@ -299,6 +310,10 @@ the rule the rest of the code follows is written out above `laz_le_get16` in
 `src/laz_types.h`. A file decodes to the same values, and compresses to the
 same bytes, on either kind of machine. CI runs the suite on s390x under
 emulation, since nothing else in the matrix is big-endian.
+
+`reader.warnings` holds what was wrong with a file but not wrong enough to
+refuse it — a missing chunk table, or fewer extended records than the header
+claims — and `reader.warning` is the first of them.
 
 Anything that goes wrong reading or writing a file raises `lazpy.LazError`,
 except an error from the underlying file object, which propagates as itself.

@@ -1,5 +1,5 @@
-/* PointReader: the decode side of the container, plus the rectangle and
- * column machinery its bulk-read entry points share. */
+/* PointReader: the decode side of the container, plus the region and column
+ * machinery its bulk-read entry points share. */
 #include "cpylaz.h"
 
 /* =========================================================== PointReader == */
@@ -415,10 +415,15 @@ typedef struct {
  * bookkeeping (the extra-bytes count and pointer), not decoded data. */
 #define POINT_FIXED_EXTENT (LAZ_POINT_OFFSET_WAVEPACKET + 29)
 
-/* ------------------------------------------------------- rectangle queries */
+/* ----------------------------------------------------------- region queries */
 
 /*
- * A rectangle, and what turns a stored point into the coordinates it is in.
+ * The area a query is over, and what turns a stored point into the
+ * coordinates it is in.
+ *
+ * A rectangle, or -- where `radius` is above zero -- the circle inside it,
+ * which is the shape the index can answer more cheaply than the square
+ * around it and the shape anyone selecting around a point wants.
  *
  * The test is done in scaled floats rather than by converting the rectangle
  * to raw integer bounds once. Converting would skip this multiply-add per
@@ -429,57 +434,67 @@ typedef struct {
 typedef struct {
     double min_x, min_y, max_x, max_y;
     double scale_x, scale_y, offset_x, offset_y;
-} Rect;
+    double center_x, center_y, radius;
+} Region;
 
-static BOOL point_inside(const Rect *r, const LazPoint *p)
+static BOOL point_inside(const Region *r, const LazPoint *p)
 {
-    /* half-open, as laszip_read_inside_point is: adjoining rectangles
-     * partition the points rather than sharing the ones on the seam */
     double x = p->X * r->scale_x + r->offset_x;
     double y = p->Y * r->scale_y + r->offset_y;
+
+    if (r->radius > 0) {
+        /* strictly inside, as LASquadtree tests a circle; there are no
+         * adjoining circles for a half-open edge to divide */
+        double dx = x - r->center_x, dy = y - r->center_y;
+        return dx * dx + dy * dy < r->radius * r->radius;
+    }
+    /* half-open, as laszip_read_inside_point is: adjoining rectangles
+     * partition the points rather than sharing the ones on the seam */
     return x >= r->min_x && x < r->max_x && y >= r->min_y && y < r->max_y;
 }
 
 /*
- * Decodes forward to the next point inside the rectangle, or to `stop`.
+ * Decodes forward to the next point inside the region, or to `stop`.
  *
  * Returns 1 with the point decoded, 0 having reached `stop`, and -1 on a
  * decode failure -- which sets nothing, since it may run with the GIL
  * released; the caller raises through reader_error.
  *
- * This is the whole reason the rectangle is known down here: a query's
+ * This is the whole reason the region is known down here: a query's
  * candidates outnumber its results -- 49,000 to 400 for a small square of a
  * million-point file -- and every rejected one used to cross into Python and
  * box two integers to be tested there.
  */
-static int reader_next_within(ReaderObject *self, U64 stop, const Rect *rect)
+static int reader_next_within(ReaderObject *self, U64 stop, const Region *region)
 {
     while (self->index < stop) {
         if (!reader_next(self)) return -1;
         self->index++;
-        if (point_inside(rect, &self->point)) return 1;
+        if (point_inside(region, &self->point)) return 1;
     }
     return 0;
 }
 
-/* The rectangle and what puts a point in it, as one flat tuple of doubles:
- * lazpy.Reader._region builds it once for a whole query. */
-static int rect_convert(PyObject *obj, void *out)
+/* The area and what puts a point in it, as one flat tuple of doubles:
+ * lazpy.Reader._region builds it once for a whole query. The last three are
+ * the circle, whose radius is zero for a rectangle query. */
+static int region_convert(PyObject *obj, void *out)
 {
-    Rect *r = (Rect *)out;
-    return PyArg_ParseTuple(obj, "dddddddd;a region is eight floats",
+    Region *r = (Region *)out;
+    return PyArg_ParseTuple(obj, "ddddddddddd;a region is eleven floats",
                             &r->min_x, &r->min_y, &r->max_x, &r->max_y,
                             &r->scale_x, &r->scale_y,
-                            &r->offset_x, &r->offset_y);
+                            &r->offset_x, &r->offset_y,
+                            &r->center_x, &r->center_y, &r->radius);
 }
 
 static PyObject *Reader_read_within(ReaderObject *self, PyObject *args)
 {
     unsigned long long stop;
-    Rect rect;
+    Region region;
     int found;
 
-    if (!PyArg_ParseTuple(args, "KO&", &stop, rect_convert, &rect))
+    if (!PyArg_ParseTuple(args, "KO&", &stop, region_convert, &region))
         return NULL;
     if (!self->ready) {
         PyErr_SetString(PyExc_ValueError, "reader is not initialised");
@@ -498,14 +513,14 @@ static PyObject *Reader_read_within(ReaderObject *self, PyObject *args)
     if (self->index < (U64)stop) {
         if (!reader_next(self)) return reader_error(self);
         self->index++;
-        if (point_inside(&rect, &self->point)) {
+        if (point_inside(&region, &self->point)) {
             Py_INCREF(self->point_view);
             return self->point_view;
         }
     }
 
     Py_BEGIN_ALLOW_THREADS
-    found = reader_next_within(self, (U64)stop, &rect);
+    found = reader_next_within(self, (U64)stop, &region);
     Py_END_ALLOW_THREADS
 
     if (found < 0) return reader_error(self);
@@ -681,7 +696,7 @@ static PyObject *Reader_read_into(ReaderObject *self, PyObject *args)
 }
 
 /*
- * read_into for a rectangle: decodes up to `stop` and writes only the points
+ * read_into for a region: decodes up to `stop` and writes only the points
  * inside, returning how many that was.
  *
  * The result count is not knowable in advance -- that is what the query is
@@ -693,11 +708,11 @@ static PyObject *Reader_read_into_within(ReaderObject *self, PyObject *args)
     PyObject *targets, *result = NULL;
     unsigned long long stop;
     Py_ssize_t written = 0, room;
-    Rect rect;
+    Region region;
     Columns c;
     int found = 0;
 
-    if (!PyArg_ParseTuple(args, "OKO&", &targets, &stop, rect_convert, &rect))
+    if (!PyArg_ParseTuple(args, "OKO&", &targets, &stop, region_convert, &region))
         return NULL;
     if (!self->ready) {
         PyErr_SetString(PyExc_ValueError, "reader is not initialised");
@@ -712,7 +727,7 @@ static PyObject *Reader_read_into_within(ReaderObject *self, PyObject *args)
 
     Py_BEGIN_ALLOW_THREADS
     while (written < room) {
-        found = reader_next_within(self, (U64)stop, &rect);
+        found = reader_next_within(self, (U64)stop, &region);
         if (found != 1) break;
         columns_append(&c);
         written++;
@@ -786,12 +801,14 @@ static PyMethodDef Reader_methods[] = {
      "built on, and it holds no Python object per point."},
     {"read_within", (PyCFunction)Reader_read_within, METH_VARARGS,
      "read_within(stop, region) -> Point | None\n\n"
-     "Decode forward to the next point inside the rectangle, or to index "
+     "Decode forward to the next point inside the region, or to index "
      "stop, whichever comes first; None means stop was reached with "
-     "nothing inside. A region is one flat tuple of eight floats -- "
+     "nothing inside. A region is one flat tuple of eleven floats -- "
      "min_x, min_y, max_x, max_y, then the x and y scales and offsets "
-     "that turn a stored coordinate into the georeferenced one the "
-     "rectangle is in -- so testing a point costs no Python call."},
+     "that turn a stored coordinate into the georeferenced one the area "
+     "is in, then a centre and a radius -- so testing a point costs no "
+     "Python call. A radius above zero selects the circle inside that "
+     "rectangle rather than the rectangle."},
     {"read_into_within", (PyCFunction)Reader_read_into_within, METH_VARARGS,
      "read_into_within(targets, stop, region) -> int\n\n"
      "read_into and read_within at once: decode to index stop, writing "

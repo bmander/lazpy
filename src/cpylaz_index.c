@@ -55,25 +55,12 @@ static void Index_dealloc(IndexObject *self)
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
-static PyObject *Index_intervals(IndexObject *self, PyObject *args)
+/* What both query methods do once the core has answered: the merged
+ * intervals as a list of pairs, or the exception the failure deserves. */
+static PyObject *index_result(IndexObject *self, BOOL ok)
 {
-    double min_x, min_y, max_x, max_y;
     PyObject *list;
-    BOOL ok;
     U32 i;
-
-    if (!PyArg_ParseTuple(args, "dddd", &min_x, &min_y, &max_x, &max_y))
-        return NULL;
-    if (!self->ready) {
-        PyErr_SetString(PyExc_ValueError, "index is not initialised");
-        return NULL;
-    }
-
-    /* the descent and the merge touch no Python object, as the seek and the
-     * checksum above do not */
-    Py_BEGIN_ALLOW_THREADS
-    ok = laz_index_intersect_rectangle(&self->ix, min_x, min_y, max_x, max_y);
-    Py_END_ALLOW_THREADS
 
     if (!ok) {
         PyErr_SetString(LazErrorType, self->ix.has_error
@@ -91,6 +78,45 @@ static PyObject *Index_intervals(IndexObject *self, PyObject *args)
         PyList_SET_ITEM(list, i, pair);
     }
     return list;
+}
+
+static PyObject *Index_intervals(IndexObject *self, PyObject *args)
+{
+    double min_x, min_y, max_x, max_y;
+    BOOL ok;
+
+    if (!PyArg_ParseTuple(args, "dddd", &min_x, &min_y, &max_x, &max_y))
+        return NULL;
+    if (!self->ready) {
+        PyErr_SetString(PyExc_ValueError, "index is not initialised");
+        return NULL;
+    }
+
+    /* the descent and the merge touch no Python object, as the seek and the
+     * checksum above do not */
+    Py_BEGIN_ALLOW_THREADS
+    ok = laz_index_intersect_rectangle(&self->ix, min_x, min_y, max_x, max_y);
+    Py_END_ALLOW_THREADS
+    return index_result(self, ok);
+}
+
+static PyObject *Index_intervals_within_circle(IndexObject *self,
+                                               PyObject *args)
+{
+    double center_x, center_y, radius;
+    BOOL ok;
+
+    if (!PyArg_ParseTuple(args, "ddd", &center_x, &center_y, &radius))
+        return NULL;
+    if (!self->ready) {
+        PyErr_SetString(PyExc_ValueError, "index is not initialised");
+        return NULL;
+    }
+
+    Py_BEGIN_ALLOW_THREADS
+    ok = laz_index_intersect_circle(&self->ix, center_x, center_y, radius);
+    Py_END_ALLOW_THREADS
+    return index_result(self, ok);
 }
 
 static PyObject *Index_get_bounds(IndexObject *self, void *c)
@@ -118,6 +144,11 @@ static PyMethodDef Index_methods[] = {
     {"intervals", (PyCFunction)Index_intervals, METH_VARARGS,
      "intervals(min_x, min_y, max_x, max_y) -> [(start, end), ...]  "
      "(inclusive point index ranges that may hold a point in the rectangle)"},
+    {"intervals_within_circle", (PyCFunction)Index_intervals_within_circle,
+     METH_VARARGS,
+     "intervals_within_circle(center_x, center_y, radius) -> "
+     "[(start, end), ...]  (the same for a circle, which reaches fewer cells "
+     "than the square around it)"},
     {NULL}
 };
 
@@ -141,7 +172,7 @@ PyDoc_STRVAR(index_doc,
 "The index is a quadtree over the surveyed area whose cells name the runs\n"
 "of point indices that landed in them, so a rectangle query can decode a\n"
 "few chunks instead of the whole file. intervals() asks it a rectangle and\n"
-"gets those runs back.\n"
+"gets those runs back; intervals_within_circle() asks it a circle.\n"
 "\n"
 "`data` is the payload of a \".lax\" file or of the extended record an\n"
 "appended index lives in -- the two carry the same bytes. Finding one is\n"

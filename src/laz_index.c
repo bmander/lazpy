@@ -150,24 +150,64 @@ static BOOL hits_push(LazQuadtree *q, U32 cell_index)
 }
 
 /*
- * Descends the tree, collecting every leaf whose square meets the rectangle.
+ * What a query is asking, in the coordinates the index is in.
  *
- * Ported from LASquadtree::intersect_rectangle_with_cells_adaptive. The
- * midpoints are F32 and deliberately volatile, as they are in the reference:
- * they decide which side of a split a coordinate falls on, and a compiler that
- * kept them in a wider register would put a boundary case in a different cell
- * than laszip does.
+ * The rectangle is what the descent follows either way: a circle's is the
+ * square around it, and `radius` above zero is what tells a leaf it has one
+ * more question to answer. LASquadtree keeps the two apart, in two copies of
+ * the same nine-way descent; they are one here.
+ */
+typedef struct {
+    F64 min_x, min_y, max_x, max_y;
+    F64 center_x, center_y, radius;
+} LazQuery;
+
+/*
+ * Whether a circle reaches into a cell, which is what a leaf of a circle
+ * query still has to be asked.
+ *
+ * Ported from LASquadtree::intersect_circle_with_rectangle: the nearest point
+ * of the cell to the centre, by which side of the centre the cell lies on,
+ * and then whether that point is inside. Strictly inside, as there.
+ */
+static BOOL circle_meets_cell(const LazQuery *query,
+                              F32 cell_min_x, F32 cell_max_x,
+                              F32 cell_min_y, F32 cell_max_y)
+{
+    F64 dx = 0.0, dy = 0.0;
+
+    if (cell_max_x < query->center_x) dx = query->center_x - cell_max_x;
+    else if (cell_min_x > query->center_x) dx = cell_min_x - query->center_x;
+    if (cell_max_y < query->center_y) dy = query->center_y - cell_max_y;
+    else if (cell_min_y > query->center_y) dy = cell_min_y - query->center_y;
+
+    return dx * dx + dy * dy < query->radius * query->radius;
+}
+
+/*
+ * Descends the tree, collecting every leaf whose square meets the query.
+ *
+ * Ported from LASquadtree::intersect_rectangle_with_cells_adaptive, which its
+ * circle counterpart follows branch for branch: a circle descends by the
+ * square around it and differs only in what a leaf has to pass, so the two
+ * are one function here with the leaf test in the query.
+ *
+ * The midpoints are F32 and deliberately volatile, as they are in the
+ * reference: they decide which side of a split a coordinate falls on, and a
+ * compiler that kept them in a wider register would put a boundary case in a
+ * different cell than laszip does.
  *
  * The comparisons are the reference's, asymmetric on purpose: a cell owns its
- * lower edge and not its upper one, so `r_max <= mid` means the rectangle stays
+ * lower edge and not its upper one, so `r_max <= mid` means the query stays
  * below the split and `!(r_min < mid)` means it stays above.
  */
-static BOOL intersect_cells(LazQuadtree *q,
-                            F64 r_min_x, F64 r_min_y, F64 r_max_x, F64 r_max_y,
+static BOOL intersect_cells(LazQuadtree *q, const LazQuery *query,
                             F32 cell_min_x, F32 cell_max_x,
                             F32 cell_min_y, F32 cell_max_y,
                             U32 level, U32 level_index)
 {
+    F64 r_min_x = query->min_x, r_min_y = query->min_y;
+    F64 r_max_x = query->max_x, r_max_y = query->max_y;
     volatile F32 cell_mid_x;
     volatile F32 cell_mid_y;
     U32 cell_index = get_cell_index(q, level_index, level);
@@ -176,8 +216,13 @@ static BOOL intersect_cells(LazQuadtree *q,
     BOOL below_x, above_x, below_y, above_y;
 
     if (!((level < q->levels) && (pos < q->adaptive_words) &&
-          (q->adaptive[pos] & bit)))
+          (q->adaptive[pos] & bit))) {
+        if (query->radius > 0 &&
+            !circle_meets_cell(query, cell_min_x, cell_max_x,
+                               cell_min_y, cell_max_y))
+            return LAZ_TRUE;                    /* a corner the circle misses */
         return hits_push(q, cell_index);
+    }
 
     level++;
     level_index <<= 2;
@@ -194,38 +239,33 @@ static BOOL intersect_cells(LazQuadtree *q,
      * of a child's level index is the upper half in x, bit 1 the upper half
      * in y. */
     if (!above_x && !above_y &&
-        !intersect_cells(q, r_min_x, r_min_y, r_max_x, r_max_y,
-                         cell_min_x, cell_mid_x, cell_min_y, cell_mid_y,
-                         level, level_index))
+        !intersect_cells(q, query, cell_min_x, cell_mid_x,
+                         cell_min_y, cell_mid_y, level, level_index))
         return LAZ_FALSE;
     if (!below_x && !above_y &&
-        !intersect_cells(q, r_min_x, r_min_y, r_max_x, r_max_y,
-                         cell_mid_x, cell_max_x, cell_min_y, cell_mid_y,
-                         level, level_index | 1))
+        !intersect_cells(q, query, cell_mid_x, cell_max_x,
+                         cell_min_y, cell_mid_y, level, level_index | 1))
         return LAZ_FALSE;
     if (!above_x && !below_y &&
-        !intersect_cells(q, r_min_x, r_min_y, r_max_x, r_max_y,
-                         cell_min_x, cell_mid_x, cell_mid_y, cell_max_y,
-                         level, level_index | 2))
+        !intersect_cells(q, query, cell_min_x, cell_mid_x,
+                         cell_mid_y, cell_max_y, level, level_index | 2))
         return LAZ_FALSE;
     if (!below_x && !below_y &&
-        !intersect_cells(q, r_min_x, r_min_y, r_max_x, r_max_y,
-                         cell_mid_x, cell_max_x, cell_mid_y, cell_max_y,
-                         level, level_index | 3))
+        !intersect_cells(q, query, cell_mid_x, cell_max_x,
+                         cell_mid_y, cell_max_y, level, level_index | 3))
         return LAZ_FALSE;
     return LAZ_TRUE;
 }
 
-/* Every cell of the tree that meets the rectangle, left in `q->hits`. */
-static BOOL quadtree_intersect_rectangle(LazQuadtree *q, F64 r_min_x,
-                                         F64 r_min_y, F64 r_max_x, F64 r_max_y)
+/* Every cell of the tree that meets the query, left in `q->hits`. */
+static BOOL quadtree_intersect(LazQuadtree *q, const LazQuery *query)
 {
     q->num_hits = 0;
-    if (r_max_x <= q->min_x || !(r_min_x <= q->max_x) ||
-        r_max_y <= q->min_y || !(r_min_y <= q->max_y))
+    if (query->max_x <= q->min_x || !(query->min_x <= q->max_x) ||
+        query->max_y <= q->min_y || !(query->min_y <= q->max_y))
         return LAZ_TRUE;                         /* misses the indexed area */
-    return intersect_cells(q, r_min_x, r_min_y, r_max_x, r_max_y,
-                           q->min_x, q->max_x, q->min_y, q->max_y, 0, 0);
+    return intersect_cells(q, query, q->min_x, q->max_x, q->min_y, q->max_y,
+                           0, 0);
 }
 
 static BOOL quadtree_read(LazIndex *ix, LazStream *s)
@@ -524,21 +564,53 @@ static BOOL merge_hits(LazIndex *ix)
     return LAZ_TRUE;
 }
 
-BOOL laz_index_intersect_rectangle(LazIndex *ix, F64 min_x, F64 min_y,
-                                   F64 max_x, F64 max_y)
+static BOOL intersect(LazIndex *ix, const LazQuery *query)
 {
     ix->num_merged = 0;
     /* An inverted rectangle holds nothing. Said here because the descent's
      * comparisons assume otherwise -- a rectangle can be below a split and
      * above it at once only if it is empty. */
-    if (min_x > max_x || min_y > max_y) return LAZ_TRUE;
-    if (!quadtree_intersect_rectangle(&ix->quadtree, min_x, min_y,
-                                      max_x, max_y)) {
+    if (query->min_x > query->max_x || query->min_y > query->max_y)
+        return LAZ_TRUE;
+    if (!quadtree_intersect(&ix->quadtree, query)) {
         set_error(ix, "out of memory answering a spatial index query");
         return LAZ_FALSE;
     }
     if (!ix->quadtree.num_hits) return LAZ_TRUE;
     return merge_hits(ix);
+}
+
+BOOL laz_index_intersect_rectangle(LazIndex *ix, F64 min_x, F64 min_y,
+                                   F64 max_x, F64 max_y)
+{
+    LazQuery query;
+    query.min_x = min_x;
+    query.min_y = min_y;
+    query.max_x = max_x;
+    query.max_y = max_y;
+    query.center_x = query.center_y = query.radius = 0.0;
+    return intersect(ix, &query);
+}
+
+BOOL laz_index_intersect_circle(LazIndex *ix, F64 center_x, F64 center_y,
+                                F64 radius)
+{
+    LazQuery query;
+
+    if (!(radius > 0)) {                    /* a circle of no size, or NaN */
+        ix->num_merged = 0;
+        return LAZ_TRUE;
+    }
+    /* the square around the circle is what the descent follows; the circle
+     * itself is what a leaf is then asked about */
+    query.min_x = center_x - radius;
+    query.min_y = center_y - radius;
+    query.max_x = center_x + radius;
+    query.max_y = center_y + radius;
+    query.center_x = center_x;
+    query.center_y = center_y;
+    query.radius = radius;
+    return intersect(ix, &query);
 }
 
 void laz_index_destroy(LazIndex *ix)
