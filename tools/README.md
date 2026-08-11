@@ -1,8 +1,9 @@
 # Verification harness
 
-These tools exist to prove lazpy decodes exactly what LASzip decodes. They are
-only needed to regenerate or extend `testdata/` — running `pytest` does not
-require any of them, because the reference hashes are committed.
+These tools exist to prove lazpy decodes exactly what LASzip decodes, and to
+time it doing so. They are only needed to regenerate or extend `testdata/`, or
+to measure a change — running `pytest` does not require any of them, because
+the reference hashes are committed.
 
 Run them on a little-endian host. `lazpy` itself works on either (see the
 byte-order note in the top-level README), and `lazdump --hash` is byte-order
@@ -13,8 +14,8 @@ rather than fail. Nobody has needed it there, and `testdata/` is committed.
 
 The three C and C++ tools below need a LASzip checkout built as a shared
 library. The Python ones need only lazpy: `compare_with_laszip.py` and
-`verify_sweep.py` read what those produce, and `fuzz.py` needs no reference at
-all, since what it looks for is a crash.
+`verify_sweep.py` read what those produce, while `fuzz.py` and `benchmark.py`
+need no reference at all -- what they look for is a crash and a stopwatch.
 
 ```bash
 git clone --depth 1 https://github.com/LASzip/LASzip.git
@@ -158,6 +159,28 @@ Needs lazpy installed, and nothing else. It is a smoke test rather than a
 coverage-guided fuzzer -- it finds what random mutation finds, which is the
 shallow half. libFuzzer over the C entry points or Atheris over the Python
 API would go deeper, and would each need a build of their own.
+
+## benchmark.py
+
+Times the decoder against a file big enough for the numbers to mean anything.
+
+```bash
+python tools/benchmark.py                          # 2M points, 50k chunks
+python tools/benchmark.py --points 400000 --chunk-size 100
+python tools/benchmark.py --file cloud.laz
+```
+
+The fixtures are 500 points each, so a whole file is one small chunk and every
+adaptive model stays in its most update-heavy early phase; nothing about
+steady-state decoding can be measured with them. This generates a file at a
+chunk size of your choosing instead, and times four paths: `read()` per point,
+`checksum` (the same decode with no Python object per point, which is the
+floor), the columnar `arrays` path, and random `seek`.
+
+Needs only lazpy, and numpy for the array row. It is not in CI — timing on a
+shared runner is noise. To compare two builds, install each into its own
+virtualenv and alternate runs; the machine drifts more than most changes are
+worth, so interleave rather than measuring one after the other.
 
 ## Regenerating testdata/
 

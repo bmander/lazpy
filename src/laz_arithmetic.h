@@ -43,6 +43,12 @@ typedef struct {
     U32 *distribution;      /* NULL until first init */
     U32 *symbol_count;
     U32 *decoder_table;     /* NULL for small alphabets */
+    /* What this model looks like freshly initialised from an empty table,
+     * kept so that later chunks copy it instead of deriving it again. NULL
+     * until a second such initialisation shows it will be used; see
+     * laz_symbol_model_init. */
+    U32 *fresh;
+    BOOL initialised;       /* has been initialised from an empty table */
     U32 total_count;
     U32 update_cycle;
     U32 symbols_until_update;

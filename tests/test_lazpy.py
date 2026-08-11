@@ -1040,6 +1040,18 @@ class RecordingBytesIO(io.BytesIO):
         self.reads.append((start, len(data)))
         return data
 
+    def readinto(self, buffer):
+        """Recorded too, since that is the one the decoder really calls.
+
+        Without this the stream's refill goes through BytesIO's own readinto
+        and reads nothing this class can see, which leaves every assertion
+        below passing whatever the decoder touched.
+        """
+        start = self.tell()
+        n = super().readinto(buffer)
+        self.reads.append((start, n))
+        return n
+
     def touched(self, start, length):
         return any(at < start + length and start < at + n
                    for at, n in self.reads)
@@ -3953,3 +3965,47 @@ class TestMalformedCorpus:
                 list(reader.points_within(1490, 1690, 1510, 1710))
         except SURVIVABLE:
             pass
+
+
+class TestStreamRefill:
+    """The two ways a file object can answer a refill, and one way it must not.
+
+    The decoder fills its 64 KB buffer with readinto where there is one and
+    read where there is not, and neither may be taken at its word about how
+    much it produced -- the buffer is a fixed allocation.
+    """
+
+    def read_all(self, fp):
+        with Reader(fp) as reader:
+            return reader.checksum()
+
+    def test_readinto_and_read_decode_the_same_file(self):
+        name = "pt1_v2.laz"
+        data = load(name).data
+
+        class NoReadinto(io.BytesIO):
+            """A file object of the older kind, with only read()."""
+            readinto = None
+
+        assert self.read_all(io.BytesIO(data)) == REFERENCE_HASH[name]
+        assert self.read_all(NoReadinto(data)) == REFERENCE_HASH[name]
+
+    def test_a_read_returning_more_than_it_was_asked_for_is_refused(self):
+        """It would otherwise be memcpy'd into a fixed 64 KB buffer."""
+        class Overfull(io.BytesIO):
+            readinto = None
+
+            def read(self, size=-1):
+                return b"\x00" * (size + 1024) if size > 0 else b""
+
+        with pytest.raises((LazError, ValueError)):
+            self.read_all(Overfull(load("pt1_v2.laz").data))
+
+    def test_a_readinto_claiming_more_than_the_buffer_is_refused(self):
+        class Liar(io.BytesIO):
+            def readinto(self, buffer):
+                super().readinto(buffer)
+                return len(buffer) + 1024
+
+        with pytest.raises((LazError, ValueError)):
+            self.read_all(Liar(load("pt1_v2.laz").data))
