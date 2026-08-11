@@ -37,6 +37,13 @@ def fixture(name):
     return os.path.join(TESTDATA, name)
 
 
+def a_record(user_id, record_id, data, description=b""):
+    """One variable length record, in the shape a Writer takes -- which is
+    the shape a Reader hands back, minus the fields it derives."""
+    return {"user_id": user_id, "record_id": record_id, "data": data,
+            "description": description}
+
+
 def field_span(name, version_minor):
     """Where a header field sits, from the same tables that define it."""
     offset = 0
