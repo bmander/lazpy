@@ -1,8 +1,10 @@
 """Read and write LAS and LAZ point cloud files.
 
-Header and variable-length-record parsing and construction happen here;
-everything from the first point onward is handled by the ``lazpy._cpylaz`` C
-extension, which is a port of LASzip.
+Most programs need two names: :class:`Reader`, which opens a file and hands
+back its header and points -- one at a time, or as numpy arrays -- and
+:class:`Writer`, which builds a file from points handed to it. Everything
+else on this page is a type they exchange: the :class:`Point` they trade
+in, the enumerations that describe a file, and the errors they raise.
 
     >>> reader = Reader("cloud.laz")
     >>> reader.num_points
@@ -15,6 +17,10 @@ extension, which is a port of LASzip.
 
     >>> with Writer("out.laz", point_format=1) as writer:
     ...     writer.write(Point(X=1, Y=2, Z=3, gps_time=4.0))
+
+Headers and variable length records are parsed and built in this module;
+everything from the first point onward is the ``lazpy._cpylaz`` C
+extension, a port of LASzip.
 
 LAS file specification
     1.2: www.asprs.org/a/society/committees/standards/asprs_las_format_v12.pdf

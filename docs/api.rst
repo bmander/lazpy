@@ -4,10 +4,6 @@ API reference
 The file front end
 ------------------
 
-Everything ``from lazpy import *`` gives you: ``Reader`` and ``Writer``, which
-read and write a LAS or LAZ *file* -- header and points together -- and the
-types and enumerations they hand back or take.
-
 .. automodule:: lazpy
    :members:
    :undoc-members:
@@ -15,6 +11,10 @@ types and enumerations they hand back or take.
 
 The container layer
 -------------------
+
+What ``Reader`` and ``Writer`` drive: the point block alone, with no LAS
+header over it. Reach for these only with a point block some other header
+describes.
 
 .. autoclass:: lazpy.PointReader
    :members:
