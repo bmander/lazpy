@@ -68,17 +68,18 @@ static BOOL p10v2_init(LazReadItem *self, const U8 *item, U32 *context)
         r->last_height[i / 2] = 0;
     }
 
-    laz_symbol_model_init(&r->m_changed_values, NULL);
-    laz_ic_init_decompressor(&r->ic_intensity);
-    laz_symbol_model_init(&r->m_scan_angle_rank[0], NULL);
-    laz_symbol_model_init(&r->m_scan_angle_rank[1], NULL);
-    laz_ic_init_decompressor(&r->ic_point_source_ID);
-    laz_bank_reinit(r->m_bit_byte, r->created_bit_byte, 256);
-    laz_bank_reinit(r->m_classification, r->created_classification, 256);
-    laz_bank_reinit(r->m_user_data, r->created_user_data, 256);
-    laz_ic_init_decompressor(&r->ic_dx);
-    laz_ic_init_decompressor(&r->ic_dy);
-    laz_ic_init_decompressor(&r->ic_z);
+    if (!laz_symbol_model_init(&r->m_changed_values, NULL) ||
+        !laz_ic_init_decompressor(&r->ic_intensity) ||
+        !laz_symbol_model_init(&r->m_scan_angle_rank[0], NULL) ||
+        !laz_symbol_model_init(&r->m_scan_angle_rank[1], NULL) ||
+        !laz_ic_init_decompressor(&r->ic_point_source_ID) ||
+        !laz_bank_reinit(r->m_bit_byte, r->created_bit_byte, 256) ||
+        !laz_bank_reinit(r->m_classification, r->created_classification, 256) ||
+        !laz_bank_reinit(r->m_user_data, r->created_user_data, 256) ||
+        !laz_ic_init_decompressor(&r->ic_dx) ||
+        !laz_ic_init_decompressor(&r->ic_dy) ||
+        !laz_ic_init_decompressor(&r->ic_z))
+        return LAZ_FALSE;
 
     memcpy(r->last_item, item, 20);
     /* the first point of a chunk seeds everything except intensity */
@@ -94,13 +95,16 @@ static void p10v2_read(LazReadItem *self, U8 *item, U32 *context)
     U32 n, m, l, k_bits;
     I32 median, diff;
     I32 changed_values;
+    LazSymbolModel *model;
 
     (void)context;
     changed_values = (I32)laz_decode_symbol(self->dec, &r->m_changed_values);
 
     if (changed_values) {
         if (changed_values & 32) {
-            li[14] = (U8)laz_decode_symbol(self->dec, laz_bank_get(r->m_bit_byte, r->created_bit_byte, li[14]));
+            model = laz_bank_get(r->m_bit_byte, r->created_bit_byte, li[14]);
+            if (!model) { self->alloc_failed = LAZ_TRUE; return; }
+            li[14] = (U8)laz_decode_symbol(self->dec, model);
         }
 
         n = P10_NUMBER_OF_RETURNS(li);
@@ -117,7 +121,9 @@ static void p10v2_read(LazReadItem *self, U8 *item, U32 *context)
         }
 
         if (changed_values & 8) {
-            li[15] = (U8)laz_decode_symbol(self->dec, laz_bank_get(r->m_classification, r->created_classification, li[15]));
+            model = laz_bank_get(r->m_classification, r->created_classification, li[15]);
+            if (!model) { self->alloc_failed = LAZ_TRUE; return; }
+            li[15] = (U8)laz_decode_symbol(self->dec, model);
         }
 
         if (changed_values & 4) {
@@ -127,7 +133,9 @@ static void p10v2_read(LazReadItem *self, U8 *item, U32 *context)
         }
 
         if (changed_values & 2) {
-            li[17] = (U8)laz_decode_symbol(self->dec, laz_bank_get(r->m_user_data, r->created_user_data, li[17]));
+            model = laz_bank_get(r->m_user_data, r->created_user_data, li[17]);
+            if (!model) { self->alloc_failed = LAZ_TRUE; return; }
+            li[17] = (U8)laz_decode_symbol(self->dec, model);
         }
 
         if (changed_values & 1) {
@@ -231,9 +239,10 @@ static BOOL gps11v2_init(LazReadItem *self, const U8 *item, U32 *context)
     memset(r->last_gpstime_diff, 0, sizeof(r->last_gpstime_diff));
     memset(r->multi_extreme_counter, 0, sizeof(r->multi_extreme_counter));
 
-    laz_symbol_model_init(&r->m_gpstime_multi, NULL);
-    laz_symbol_model_init(&r->m_gpstime_0diff, NULL);
-    laz_ic_init_decompressor(&r->ic_gpstime);
+    if (!laz_symbol_model_init(&r->m_gpstime_multi, NULL) ||
+        !laz_symbol_model_init(&r->m_gpstime_0diff, NULL) ||
+        !laz_ic_init_decompressor(&r->ic_gpstime))
+        return LAZ_FALSE;
 
     memcpy(&r->last_gpstime[0], item, 8);
     r->last_gpstime[1] = 0;
@@ -364,8 +373,10 @@ static BOOL rgb12v2_init(LazReadItem *self, const U8 *item, U32 *context)
     Rgb12v2 *r = (Rgb12v2 *)self;
     U32 i;
     (void)context;
-    laz_symbol_model_init(&r->m_byte_used, NULL);
-    for (i = 0; i < 6; i++) laz_symbol_model_init(&r->m_rgb_diff[i], NULL);
+    if (!laz_symbol_model_init(&r->m_byte_used, NULL)) return LAZ_FALSE;
+    for (i = 0; i < 6; i++) {
+        if (!laz_symbol_model_init(&r->m_rgb_diff[i], NULL)) return LAZ_FALSE;
+    }
     memcpy(r->last_item, item, 6);
     return LAZ_TRUE;
 }
@@ -470,7 +481,9 @@ static BOOL bytev2_init(LazReadItem *self, const U8 *item, U32 *context)
     Bytev2 *r = (Bytev2 *)self;
     U32 i;
     (void)context;
-    for (i = 0; i < r->number; i++) laz_symbol_model_init(&r->m_byte[i], NULL);
+    for (i = 0; i < r->number; i++) {
+        if (!laz_symbol_model_init(&r->m_byte[i], NULL)) return LAZ_FALSE;
+    }
     memcpy(r->last_item, item, r->number);
     return LAZ_TRUE;
 }

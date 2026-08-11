@@ -62,11 +62,16 @@ static BOOL ic_init_models(LazIntCompressor *ic, BOOL compress)
     U32 i;
 
     if (!ic->models_created) {
-        ic->m_bits = laz_symbol_models_new(ic->contexts, ic->corr_bits + 1, compress);
-        if (!ic->m_bits) return LAZ_FALSE;
+        /* m_bits may have survived a call that failed on m_corrector, so it is
+         * allocated only once however often this is retried */
+        if (!ic->m_bits) {
+            ic->m_bits = laz_symbol_models_new(ic->contexts, ic->corr_bits + 1, compress);
+            if (!ic->m_bits) return LAZ_FALSE;
+        }
 
         /* entry 0 is the bit model held separately; 1..corr_bits are symbol models */
-        ic->m_corrector = (LazSymbolModel *)calloc(ic->corr_bits + 1, sizeof(LazSymbolModel));
+        ic->m_corrector = (LazSymbolModel *)laz_model_calloc(ic->corr_bits + 1,
+                                                            sizeof(LazSymbolModel));
         if (!ic->m_corrector) return LAZ_FALSE;
         for (i = 1; i <= ic->corr_bits; i++) {
             U32 num_symbols = (i <= ic->bits_high) ? (1u << i) : (1u << ic->bits_high);

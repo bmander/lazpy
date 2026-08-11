@@ -2342,7 +2342,20 @@ static PyTypeObject Index_Type = {
 
 /* ================================================================ module == */
 
+/* Test hook; see laz_alloc_fail_after in laz_arithmetic.h for what it is for. */
+static PyObject *cpylaz_alloc_fail_after(PyObject *self, PyObject *arg)
+{
+    long long n = PyLong_AsLongLong(arg);
+    (void)self;
+    if (n == -1 && PyErr_Occurred()) return NULL;
+    laz_alloc_fail_after((I64)n);
+    Py_RETURN_NONE;
+}
+
 static PyMethodDef cpylaz_methods[] = {
+    {"_alloc_fail_after", cpylaz_alloc_fail_after, METH_O,
+     "Test hook: let the next n model allocations succeed and fail every one\n"
+     "after that. -1 restores the default of never failing."},
     {NULL, NULL}
 };
 

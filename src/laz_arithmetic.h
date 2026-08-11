@@ -81,6 +81,25 @@ typedef struct {
     U8 *endbyte;
 } LazEncoder;
 
+/*
+ * Model memory is allocated through these two rather than malloc/calloc
+ * directly, so that a test can make it run out on demand.
+ *
+ * Every model allocation is lazy -- laz_symbol_model_setup only records the
+ * shape, and the buffer appears on the first laz_symbol_model_init, which for
+ * the on-demand banks in laz_item.h happens partway through decoding a chunk.
+ * The failure paths that hang off those allocations are therefore reachable
+ * only under genuine memory exhaustion, and nothing else in the test suite can
+ * reach them.
+ *
+ * laz_alloc_fail_after(n) lets the next n allocations through and fails every
+ * one after that; -1, the default, never fails. It is a debugging hook, not
+ * part of the reading or writing interface, and it is not thread-safe.
+ */
+void *laz_model_alloc(size_t size);
+void *laz_model_calloc(size_t n, size_t size);
+void laz_alloc_fail_after(I64 n);
+
 void laz_bit_model_init(LazBitModel *m);
 void laz_bit_model_update(LazBitModel *m);
 

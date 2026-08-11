@@ -365,7 +365,14 @@ BOOL laz_readpoint_read(LazReadPoint *rp, LazPoint *point, U8 *extra_bytes)
 
         if (rp->readers) {
             for (i = 0; i < rp->num_readers; i++) {
-                rp->readers[i]->read(rp->readers[i], dst[i], &context);
+                LazReadItem *rd = rp->readers[i];
+                rd->read(rd, dst[i], &context);
+                /* a model this reader had to create partway through the chunk
+                 * could not be allocated, so the point is only half decoded */
+                if (rd->alloc_failed) {
+                    set_error(rp, "out of memory");
+                    return LAZ_FALSE;
+                }
             }
         } else {
             /* first point of a chunk is stored raw and seeds the predictors */

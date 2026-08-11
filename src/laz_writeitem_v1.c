@@ -42,16 +42,17 @@ static BOOL p10v1_init(LazWriteItem *self, const U8 *item, U32 *context)
     w->last_y_diff[0] = w->last_y_diff[1] = w->last_y_diff[2] = 0;
     w->last_incr = 0;
 
-    laz_ic_init_compressor(&w->ic_dx);
-    laz_ic_init_compressor(&w->ic_dy);
-    laz_ic_init_compressor(&w->ic_z);
-    laz_ic_init_compressor(&w->ic_intensity);
-    laz_ic_init_compressor(&w->ic_scan_angle_rank);
-    laz_ic_init_compressor(&w->ic_point_source_ID);
-    laz_symbol_model_init(&w->m_changed_values, NULL);
-    laz_bank_reinit(w->m_bit_byte, w->created_bit_byte, 256);
-    laz_bank_reinit(w->m_classification, w->created_classification, 256);
-    laz_bank_reinit(w->m_user_data, w->created_user_data, 256);
+    if (!laz_ic_init_compressor(&w->ic_dx) ||
+        !laz_ic_init_compressor(&w->ic_dy) ||
+        !laz_ic_init_compressor(&w->ic_z) ||
+        !laz_ic_init_compressor(&w->ic_intensity) ||
+        !laz_ic_init_compressor(&w->ic_scan_angle_rank) ||
+        !laz_ic_init_compressor(&w->ic_point_source_ID) ||
+        !laz_symbol_model_init(&w->m_changed_values, NULL) ||
+        !laz_bank_reinit(w->m_bit_byte, w->created_bit_byte, 256) ||
+        !laz_bank_reinit(w->m_classification, w->created_classification, 256) ||
+        !laz_bank_reinit(w->m_user_data, w->created_user_data, 256))
+        return LAZ_FALSE;
 
     memcpy(w->last_item, item, 20);
     return LAZ_TRUE;
@@ -63,6 +64,7 @@ static BOOL p10v1_write(LazWriteItem *self, const U8 *item, U32 *context)
     U8 *li = w->last_item;
     I32 median_x, median_y, x_diff, y_diff, changed_values;
     U32 k_bits;
+    LazSymbolModel *m;
 
     (void)context;
     median_x = laz_median3(w->last_x_diff);
@@ -92,22 +94,22 @@ static BOOL p10v1_write(LazWriteItem *self, const U8 *item, U32 *context)
             laz_ic_compress(&w->ic_intensity, P10_INTENSITY(li), P10_INTENSITY_IN(item), 0);
         }
         if (changed_values & 16) {
-            laz_encode_symbol(self->enc,
-                              laz_bank_get(w->m_bit_byte, w->created_bit_byte, li[14]),
-                              item[14]);
+            m = laz_bank_get(w->m_bit_byte, w->created_bit_byte, li[14]);
+            if (!m) return LAZ_FALSE;
+            laz_encode_symbol(self->enc, m, item[14]);
         }
         if (changed_values & 8) {
-            laz_encode_symbol(self->enc,
-                              laz_bank_get(w->m_classification, w->created_classification, li[15]),
-                              item[15]);
+            m = laz_bank_get(w->m_classification, w->created_classification, li[15]);
+            if (!m) return LAZ_FALSE;
+            laz_encode_symbol(self->enc, m, item[15]);
         }
         if (changed_values & 4) {
             laz_ic_compress(&w->ic_scan_angle_rank, li[16], item[16], k_bits < 3);
         }
         if (changed_values & 2) {
-            laz_encode_symbol(self->enc,
-                              laz_bank_get(w->m_user_data, w->created_user_data, li[17]),
-                              item[17]);
+            m = laz_bank_get(w->m_user_data, w->created_user_data, li[17]);
+            if (!m) return LAZ_FALSE;
+            laz_encode_symbol(self->enc, m, item[17]);
         }
         if (changed_values & 1) {
             laz_ic_compress(&w->ic_point_source_ID,
@@ -181,9 +183,10 @@ static BOOL gps11v1_init(LazWriteItem *self, const U8 *item, U32 *context)
     (void)context;
     w->last_gpstime_diff = 0;
     w->multi_extreme_counter = 0;
-    laz_symbol_model_init(&w->m_gpstime_multi, NULL);
-    laz_symbol_model_init(&w->m_gpstime_0diff, NULL);
-    laz_ic_init_compressor(&w->ic_gpstime);
+    if (!laz_symbol_model_init(&w->m_gpstime_multi, NULL) ||
+        !laz_symbol_model_init(&w->m_gpstime_0diff, NULL) ||
+        !laz_ic_init_compressor(&w->ic_gpstime))
+        return LAZ_FALSE;
     memcpy(&w->last_gpstime, item, 8);
     return LAZ_TRUE;
 }
@@ -304,8 +307,9 @@ static BOOL rgb12v1_init(LazWriteItem *self, const U8 *item, U32 *context)
 {
     Rgb12v1 *w = (Rgb12v1 *)self;
     (void)context;
-    laz_symbol_model_init(&w->m_byte_used, NULL);
-    laz_ic_init_compressor(&w->ic_rgb);
+    if (!laz_symbol_model_init(&w->m_byte_used, NULL) ||
+        !laz_ic_init_compressor(&w->ic_rgb))
+        return LAZ_FALSE;
     memcpy(w->last_item, item, 6);
     return LAZ_TRUE;
 }
@@ -372,7 +376,7 @@ static BOOL bytev1_init(LazWriteItem *self, const U8 *item, U32 *context)
 {
     Bytev1 *w = (Bytev1 *)self;
     (void)context;
-    laz_ic_init_compressor(&w->ic_byte);
+    if (!laz_ic_init_compressor(&w->ic_byte)) return LAZ_FALSE;
     memcpy(w->last_item, item, w->number);
     return LAZ_TRUE;
 }
@@ -437,12 +441,15 @@ static BOOL wp13v1_init(LazWriteItem *self, const U8 *item, U32 *context)
     w->last_diff_32 = 0;
     w->sym_last_offset_diff = 0;
 
-    laz_symbol_model_init(&w->m_packet_index, NULL);
-    for (i = 0; i < 4; i++) laz_symbol_model_init(&w->m_offset_diff[i], NULL);
-    laz_ic_init_compressor(&w->ic_offset_diff);
-    laz_ic_init_compressor(&w->ic_packet_size);
-    laz_ic_init_compressor(&w->ic_return_point);
-    laz_ic_init_compressor(&w->ic_xyz);
+    if (!laz_symbol_model_init(&w->m_packet_index, NULL)) return LAZ_FALSE;
+    for (i = 0; i < 4; i++) {
+        if (!laz_symbol_model_init(&w->m_offset_diff[i], NULL)) return LAZ_FALSE;
+    }
+    if (!laz_ic_init_compressor(&w->ic_offset_diff) ||
+        !laz_ic_init_compressor(&w->ic_packet_size) ||
+        !laz_ic_init_compressor(&w->ic_return_point) ||
+        !laz_ic_init_compressor(&w->ic_xyz))
+        return LAZ_FALSE;
 
     memcpy(w->last_item, item + 1, 28);   /* skip the packet index byte */
     return LAZ_TRUE;

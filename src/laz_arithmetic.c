@@ -9,6 +9,37 @@
 
 #include "laz_arithmetic.h"
 
+/* ------------------------------------------------------- model allocation */
+
+/* Number of allocations still allowed, or -1 for "no limit". See the comment
+ * on laz_alloc_fail_after in the header. */
+static I64 alloc_countdown = -1;
+
+void laz_alloc_fail_after(I64 n)
+{
+    alloc_countdown = n;
+}
+
+static BOOL alloc_should_fail(void)
+{
+    if (alloc_countdown < 0) return LAZ_FALSE;
+    if (alloc_countdown == 0) return LAZ_TRUE;
+    alloc_countdown--;
+    return LAZ_FALSE;
+}
+
+void *laz_model_alloc(size_t size)
+{
+    if (alloc_should_fail()) return NULL;
+    return malloc(size);
+}
+
+void *laz_model_calloc(size_t n, size_t size)
+{
+    if (alloc_should_fail()) return NULL;
+    return calloc(n, size);
+}
+
 /* -------------------------------------------------------------- bit model */
 
 void laz_bit_model_init(LazBitModel *m)
@@ -106,14 +137,14 @@ BOOL laz_symbol_model_init(LazSymbolModel *m, const U32 *table)
             m->table_size = 1u << table_bits;
             m->table_shift = DM_LENGTH_SHIFT - table_bits;
             /* one block: [distribution | symbol_count | decoder_table] */
-            m->distribution = (U32 *)malloc(
+            m->distribution = (U32 *)laz_model_alloc(
                 (2 * (size_t)m->num_symbols + m->table_size + 2) * sizeof(U32));
             if (m->distribution == NULL) return LAZ_FALSE;
             m->decoder_table = m->distribution + 2 * m->num_symbols;
         } else {
             m->decoder_table = NULL;
             m->table_size = m->table_shift = 0;
-            m->distribution = (U32 *)malloc(2 * (size_t)m->num_symbols * sizeof(U32));
+            m->distribution = (U32 *)laz_model_alloc(2 * (size_t)m->num_symbols * sizeof(U32));
             if (m->distribution == NULL) return LAZ_FALSE;
         }
         m->symbol_count = m->distribution + m->num_symbols;
@@ -143,7 +174,7 @@ void laz_symbol_model_free(LazSymbolModel *m)
 LazSymbolModel *laz_symbol_models_new(U32 n, U32 num_symbols, BOOL compress)
 {
     U32 i;
-    LazSymbolModel *models = (LazSymbolModel *)calloc(n, sizeof(LazSymbolModel));
+    LazSymbolModel *models = (LazSymbolModel *)laz_model_calloc(n, sizeof(LazSymbolModel));
     if (!models) return NULL;
     for (i = 0; i < n; i++) laz_symbol_model_setup(&models[i], num_symbols, compress);
     return models;

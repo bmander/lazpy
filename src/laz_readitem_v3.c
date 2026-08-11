@@ -209,7 +209,10 @@ typedef struct {
 
 static void p14_read_gps_time(Point14v3 *r);
 
-static void p14_create_and_init(Point14v3 *r, U32 context, const U8 *item)
+/* Returns LAZ_FALSE if any of the models this context needs could not be
+ * allocated. Callers on the read path record that on the item; see
+ * LazReadItem.alloc_failed. */
+static BOOL p14_create_and_init(Point14v3 *r, U32 context, const U8 *item)
 {
     Point14Context *c = &r->contexts[context];
     U32 i;
@@ -242,38 +245,44 @@ static void p14_create_and_init(Point14v3 *r, U32 context, const U8 *item)
     }
 
     /* channel_returns_XY layer */
-    for (i = 0; i < 8; i++) laz_symbol_model_init(&c->m_changed_values[i], NULL);
-    laz_symbol_model_init(&c->m_scanner_channel, NULL);
-    laz_bank_reinit(c->m_number_of_returns, c->created_nor, 16);
-    laz_bank_reinit(c->m_return_number, c->created_rn, 16);
-    laz_symbol_model_init(&c->m_return_number_gps_same, NULL);
-    laz_ic_init_decompressor(&c->ic_dX);
-    laz_ic_init_decompressor(&c->ic_dY);
+    for (i = 0; i < 8; i++) {
+        if (!laz_symbol_model_init(&c->m_changed_values[i], NULL)) return LAZ_FALSE;
+    }
+    if (!laz_symbol_model_init(&c->m_scanner_channel, NULL) ||
+        !laz_bank_reinit(c->m_number_of_returns, c->created_nor, 16) ||
+        !laz_bank_reinit(c->m_return_number, c->created_rn, 16) ||
+        !laz_symbol_model_init(&c->m_return_number_gps_same, NULL) ||
+        !laz_ic_init_decompressor(&c->ic_dX) ||
+        !laz_ic_init_decompressor(&c->ic_dY))
+        return LAZ_FALSE;
     for (i = 0; i < 12; i++) {
         laz_median5_init(&c->last_X_diff_median5[i]);
         laz_median5_init(&c->last_Y_diff_median5[i]);
     }
 
     /* Z layer */
-    laz_ic_init_decompressor(&c->ic_Z);
+    if (!laz_ic_init_decompressor(&c->ic_Z)) return LAZ_FALSE;
     for (i = 0; i < 8; i++) c->last_Z[i] = P14_Z(item);
 
     /* classification / flags / user_data layers */
-    laz_bank_reinit(c->m_classification, c->created_cls, 64);
-    laz_bank_reinit(c->m_flags, c->created_flg, 64);
-    laz_bank_reinit(c->m_user_data, c->created_usr, 64);
+    if (!laz_bank_reinit(c->m_classification, c->created_cls, 64) ||
+        !laz_bank_reinit(c->m_flags, c->created_flg, 64) ||
+        !laz_bank_reinit(c->m_user_data, c->created_usr, 64))
+        return LAZ_FALSE;
 
     /* intensity layer */
-    laz_ic_init_decompressor(&c->ic_intensity);
+    if (!laz_ic_init_decompressor(&c->ic_intensity)) return LAZ_FALSE;
     for (i = 0; i < 8; i++) c->last_intensity[i] = P14_INTENSITY(item);
 
-    laz_ic_init_decompressor(&c->ic_scan_angle);
-    laz_ic_init_decompressor(&c->ic_point_source_ID);
+    if (!laz_ic_init_decompressor(&c->ic_scan_angle) ||
+        !laz_ic_init_decompressor(&c->ic_point_source_ID))
+        return LAZ_FALSE;
 
     /* gps_time layer */
-    laz_symbol_model_init(&c->m_gpstime_multi, NULL);
-    laz_symbol_model_init(&c->m_gpstime_0diff, NULL);
-    laz_ic_init_decompressor(&c->ic_gpstime);
+    if (!laz_symbol_model_init(&c->m_gpstime_multi, NULL) ||
+        !laz_symbol_model_init(&c->m_gpstime_0diff, NULL) ||
+        !laz_ic_init_decompressor(&c->ic_gpstime))
+        return LAZ_FALSE;
     c->last = 0;
     c->next = 0;
     memset(c->last_gpstime_diff, 0, sizeof(c->last_gpstime_diff));
@@ -285,6 +294,7 @@ static void p14_create_and_init(Point14v3 *r, U32 context, const U8 *item)
     P14_GPS_TIME_CHANGE(c->last_item) = LAZ_FALSE;
 
     c->unused = LAZ_FALSE;
+    return LAZ_TRUE;
 }
 
 static BOOL p14_chunk_sizes(LazReadItem *self)
@@ -346,8 +356,7 @@ static BOOL p14_init(LazReadItem *self, const U8 *item, U32 *context)
     r->current_context = P14_SCANNER_CHANNEL(item);
     *context = r->current_context;   /* POINT14 sets the context for all items */
 
-    p14_create_and_init(r, r->current_context, item);
-    return LAZ_TRUE;
+    return p14_create_and_init(r, r->current_context, item);
 }
 
 static void p14_read(LazReadItem *self, U8 *item, U32 *context)
@@ -359,6 +368,7 @@ static void p14_read(LazReadItem *self, U8 *item, U32 *context)
     BOOL point_source_change, gps_time_change, scan_angle_change;
     U32 last_n, last_r, n, rn, m, l, k_bits;
     I32 median, diff;
+    LazSymbolModel *model;
 
     /* single (3) / first (1) / last (2) / intermediate (0) from the last return,
      * plus whether the GPS time changed on that return */
@@ -373,7 +383,10 @@ static void p14_read(LazReadItem *self, U8 *item, U32 *context)
         U32 diff_sym = laz_decode_symbol(&r->channel_returns_XY.dec, &cx->m_scanner_channel);
         U32 scanner_channel = (r->current_context + diff_sym + 1) % 4;
         if (r->contexts[scanner_channel].unused) {
-            p14_create_and_init(r, scanner_channel, cx->last_item);
+            if (!p14_create_and_init(r, scanner_channel, cx->last_item)) {
+                self->alloc_failed = LAZ_TRUE;
+                return;
+            }
         }
         r->current_context = scanner_channel;
         if (!r->v4) *context = r->current_context;
@@ -392,8 +405,9 @@ static void p14_read(LazReadItem *self, U8 *item, U32 *context)
     last_r = P14_RETURN_NUMBER(last_item);
 
     if (changed_values & (1 << 2)) {
-        n = laz_decode_symbol(&r->channel_returns_XY.dec,
-                              laz_bank_get(cx->m_number_of_returns, cx->created_nor, last_n));
+        model = laz_bank_get(cx->m_number_of_returns, cx->created_nor, last_n);
+        if (!model) { self->alloc_failed = LAZ_TRUE; return; }
+        n = laz_decode_symbol(&r->channel_returns_XY.dec, model);
         P14_SET_NUMBER_OF_RETURNS(last_item, n);
     } else {
         n = last_n;
@@ -410,8 +424,9 @@ static void p14_read(LazReadItem *self, U8 *item, U32 *context)
     } else {
         /* difference bigger than +/-1, so decode how it differs */
         if (gps_time_change) {
-            rn = laz_decode_symbol(&r->channel_returns_XY.dec,
-                                   laz_bank_get(cx->m_return_number, cx->created_rn, last_r));
+            model = laz_bank_get(cx->m_return_number, cx->created_rn, last_r);
+            if (!model) { self->alloc_failed = LAZ_TRUE; return; }
+            rn = laz_decode_symbol(&r->channel_returns_XY.dec, model);
         } else {
             I32 sym = (I32)laz_decode_symbol(&r->channel_returns_XY.dec,
                                              &cx->m_return_number_gps_same);
@@ -463,8 +478,10 @@ static void p14_read(LazReadItem *self, U8 *item, U32 *context)
     if (r->classification.changed) {
         U32 last_classification = P14_CLASSIFICATION(last_item);
         I32 ccc = (I32)(((last_classification & 0x1F) << 1) + (cpr == 3 ? 1 : 0));
-        U32 cls = laz_decode_symbol(&r->classification.dec,
-                                    laz_bank_get(cx->m_classification, cx->created_cls, (U32)ccc));
+        U32 cls;
+        model = laz_bank_get(cx->m_classification, cx->created_cls, (U32)ccc);
+        if (!model) { self->alloc_failed = LAZ_TRUE; return; }
+        cls = laz_decode_symbol(&r->classification.dec, model);
         P14_CLASSIFICATION(last_item) = (U8)cls;
         P14_SET_LEGACY_CLASSIFICATION(last_item, (cls < 32) ? cls : 0);
     }
@@ -473,8 +490,10 @@ static void p14_read(LazReadItem *self, U8 *item, U32 *context)
         U32 last_flags = (U32)((P14_EDGE_OF_FLIGHT_LINE(last_item) << 5) |
                                (P14_SCAN_DIRECTION_FLAG(last_item) << 4) |
                                P14_CLASSIFICATION_FLAGS(last_item));
-        U32 fl = laz_decode_symbol(&r->flags.dec,
-                                   laz_bank_get(cx->m_flags, cx->created_flg, last_flags));
+        U32 fl;
+        model = laz_bank_get(cx->m_flags, cx->created_flg, last_flags);
+        if (!model) { self->alloc_failed = LAZ_TRUE; return; }
+        fl = laz_decode_symbol(&r->flags.dec, model);
         P14_SET_EDGE_OF_FLIGHT_LINE(last_item, !!(fl & (1 << 5)));
         P14_SET_SCAN_DIRECTION_FLAG(last_item, !!(fl & (1 << 4)));
         P14_SET_CLASSIFICATION_FLAGS(last_item, fl & 0x0F);
@@ -497,8 +516,9 @@ static void p14_read(LazReadItem *self, U8 *item, U32 *context)
 
     if (r->user_data.changed) {
         U32 idx = P14_USER_DATA(last_item) / 4;
-        P14_USER_DATA(last_item) = (U8)laz_decode_symbol(&r->user_data.dec,
-            laz_bank_get(cx->m_user_data, cx->created_usr, idx));
+        model = laz_bank_get(cx->m_user_data, cx->created_usr, idx);
+        if (!model) { self->alloc_failed = LAZ_TRUE; return; }
+        P14_USER_DATA(last_item) = (U8)laz_decode_symbol(&r->user_data.dec, model);
     }
 
     if (r->point_source.changed && point_source_change) {
@@ -695,7 +715,7 @@ typedef struct {
     Rgb14Context contexts[4];
 } Rgb14v3;
 
-static void rgb14_create_and_init(Rgb14v3 *r, U32 context, const U8 *item)
+static BOOL rgb14_create_and_init(Rgb14v3 *r, U32 context, const U8 *item)
 {
     Rgb14Context *c = &r->contexts[context];
     U32 i;
@@ -704,10 +724,13 @@ static void rgb14_create_and_init(Rgb14v3 *r, U32 context, const U8 *item)
         for (i = 0; i < 6; i++) laz_symbol_model_setup(&c->m_rgb_diff[i], 256, LAZ_FALSE);
         c->created = LAZ_TRUE;
     }
-    laz_symbol_model_init(&c->m_byte_used, NULL);
-    for (i = 0; i < 6; i++) laz_symbol_model_init(&c->m_rgb_diff[i], NULL);
+    if (!laz_symbol_model_init(&c->m_byte_used, NULL)) return LAZ_FALSE;
+    for (i = 0; i < 6; i++) {
+        if (!laz_symbol_model_init(&c->m_rgb_diff[i], NULL)) return LAZ_FALSE;
+    }
     memcpy(c->last_item, item, 6);
     c->unused = LAZ_FALSE;
+    return LAZ_TRUE;
 }
 
 static BOOL rgb14_chunk_sizes(LazReadItem *self)
@@ -731,8 +754,7 @@ static BOOL rgb14_init(LazReadItem *self, const U8 *item, U32 *context)
 
     for (c = 0; c < 4; c++) r->contexts[c].unused = LAZ_TRUE;
     r->current_context = *context;      /* set by the POINT14 reader */
-    rgb14_create_and_init(r, r->current_context, item);
-    return LAZ_TRUE;
+    return rgb14_create_and_init(r, r->current_context, item);
 }
 
 /*
@@ -803,7 +825,10 @@ static void rgb14_read(LazReadItem *self, U8 *item, U32 *context)
     if (r->current_context != *context) {
         r->current_context = *context;
         if (r->contexts[r->current_context].unused) {
-            rgb14_create_and_init(r, r->current_context, (const U8 *)last_item);
+            if (!rgb14_create_and_init(r, r->current_context, (const U8 *)last_item)) {
+                self->alloc_failed = LAZ_TRUE;
+                return;
+            }
             if (!r->v4) last_item = r->contexts[r->current_context].last_item;
         }
         /* v4 refreshes last_item for any switch, v3 only for an unused context */
@@ -878,7 +903,7 @@ typedef struct {
     RgbNir14Context contexts[4];
 } RgbNir14v3;
 
-static void rgbnir14_create_and_init(RgbNir14v3 *r, U32 context, const U8 *item)
+static BOOL rgbnir14_create_and_init(RgbNir14v3 *r, U32 context, const U8 *item)
 {
     RgbNir14Context *c = &r->contexts[context];
     U32 i;
@@ -889,8 +914,10 @@ static void rgbnir14_create_and_init(RgbNir14v3 *r, U32 context, const U8 *item)
             for (i = 0; i < 6; i++) laz_symbol_model_setup(&c->m_rgb_diff[i], 256, LAZ_FALSE);
             c->created_rgb = LAZ_TRUE;
         }
-        laz_symbol_model_init(&c->m_rgb_bytes_used, NULL);
-        for (i = 0; i < 6; i++) laz_symbol_model_init(&c->m_rgb_diff[i], NULL);
+        if (!laz_symbol_model_init(&c->m_rgb_bytes_used, NULL)) return LAZ_FALSE;
+        for (i = 0; i < 6; i++) {
+            if (!laz_symbol_model_init(&c->m_rgb_diff[i], NULL)) return LAZ_FALSE;
+        }
     }
     if (r->nir.requested) {
         if (!c->created_nir) {
@@ -898,12 +925,15 @@ static void rgbnir14_create_and_init(RgbNir14v3 *r, U32 context, const U8 *item)
             for (i = 0; i < 2; i++) laz_symbol_model_setup(&c->m_nir_diff[i], 256, LAZ_FALSE);
             c->created_nir = LAZ_TRUE;
         }
-        laz_symbol_model_init(&c->m_nir_bytes_used, NULL);
-        for (i = 0; i < 2; i++) laz_symbol_model_init(&c->m_nir_diff[i], NULL);
+        if (!laz_symbol_model_init(&c->m_nir_bytes_used, NULL)) return LAZ_FALSE;
+        for (i = 0; i < 2; i++) {
+            if (!laz_symbol_model_init(&c->m_nir_diff[i], NULL)) return LAZ_FALSE;
+        }
     }
 
     memcpy(c->last_item, item, 8);
     c->unused = LAZ_FALSE;
+    return LAZ_TRUE;
 }
 
 static BOOL rgbnir14_chunk_sizes(LazReadItem *self)
@@ -930,8 +960,7 @@ static BOOL rgbnir14_init(LazReadItem *self, const U8 *item, U32 *context)
 
     for (c = 0; c < 4; c++) r->contexts[c].unused = LAZ_TRUE;
     r->current_context = *context;
-    rgbnir14_create_and_init(r, r->current_context, item);
-    return LAZ_TRUE;
+    return rgbnir14_create_and_init(r, r->current_context, item);
 }
 
 static void rgbnir14_read(LazReadItem *self, U8 *item, U32 *context)
@@ -943,7 +972,10 @@ static void rgbnir14_read(LazReadItem *self, U8 *item, U32 *context)
     if (r->current_context != *context) {
         r->current_context = *context;
         if (r->contexts[r->current_context].unused) {
-            rgbnir14_create_and_init(r, r->current_context, (const U8 *)last_item);
+            if (!rgbnir14_create_and_init(r, r->current_context, (const U8 *)last_item)) {
+                self->alloc_failed = LAZ_TRUE;
+                return;
+            }
             if (!r->v4) last_item = r->contexts[r->current_context].last_item;
         }
         if (r->v4) last_item = r->contexts[r->current_context].last_item;
@@ -1049,7 +1081,7 @@ typedef struct {
     Wave14Context contexts[4];
 } Wave14v3;
 
-static void wave14_create_and_init(Wave14v3 *r, U32 context, const U8 *item)
+static BOOL wave14_create_and_init(Wave14v3 *r, U32 context, const U8 *item)
 {
     Wave14Context *c = &r->contexts[context];
     U32 i;
@@ -1064,18 +1096,22 @@ static void wave14_create_and_init(Wave14v3 *r, U32 context, const U8 *item)
             laz_ic_setup_dec(&c->ic_xyz, &r->wavepacket.dec, 32, 3, 8, 0);
             c->created = LAZ_TRUE;
         }
-        laz_symbol_model_init(&c->m_packet_index, NULL);
-        for (i = 0; i < 4; i++) laz_symbol_model_init(&c->m_offset_diff[i], NULL);
-        laz_ic_init_decompressor(&c->ic_offset_diff);
-        laz_ic_init_decompressor(&c->ic_packet_size);
-        laz_ic_init_decompressor(&c->ic_return_point);
-        laz_ic_init_decompressor(&c->ic_xyz);
+        if (!laz_symbol_model_init(&c->m_packet_index, NULL)) return LAZ_FALSE;
+        for (i = 0; i < 4; i++) {
+            if (!laz_symbol_model_init(&c->m_offset_diff[i], NULL)) return LAZ_FALSE;
+        }
+        if (!laz_ic_init_decompressor(&c->ic_offset_diff) ||
+            !laz_ic_init_decompressor(&c->ic_packet_size) ||
+            !laz_ic_init_decompressor(&c->ic_return_point) ||
+            !laz_ic_init_decompressor(&c->ic_xyz))
+            return LAZ_FALSE;
     }
 
     c->last_diff_32 = 0;
     c->sym_last_offset_diff = 0;
     memcpy(c->last_item, item, 29);
     c->unused = LAZ_FALSE;
+    return LAZ_TRUE;
 }
 
 static BOOL wave14_chunk_sizes(LazReadItem *self)
@@ -1099,8 +1135,7 @@ static BOOL wave14_init(LazReadItem *self, const U8 *item, U32 *context)
 
     for (c = 0; c < 4; c++) r->contexts[c].unused = LAZ_TRUE;
     r->current_context = *context;
-    wave14_create_and_init(r, r->current_context, item);
-    return LAZ_TRUE;
+    return wave14_create_and_init(r, r->current_context, item);
 }
 
 static void wave14_read(LazReadItem *self, U8 *item, U32 *context)
@@ -1115,7 +1150,10 @@ static void wave14_read(LazReadItem *self, U8 *item, U32 *context)
     if (r->current_context != *context) {
         r->current_context = *context;
         if (r->contexts[r->current_context].unused) {
-            wave14_create_and_init(r, r->current_context, last_item);
+            if (!wave14_create_and_init(r, r->current_context, last_item)) {
+                self->alloc_failed = LAZ_TRUE;
+                return;
+            }
             if (!r->v4) last_item = r->contexts[r->current_context].last_item;
         }
         if (r->v4) last_item = r->contexts[r->current_context].last_item;
@@ -1235,13 +1273,20 @@ static BOOL byte14_create_and_init(Byte14v3 *r, U32 context, const U8 *item)
     U32 i;
 
     if (!c->created) {
-        c->m_bytes = laz_symbol_models_new(r->number, 256, LAZ_FALSE);
+        /* m_bytes may have survived a call that failed after it, so it is
+         * allocated only once however often this is retried */
+        if (!c->m_bytes) {
+            c->m_bytes = laz_symbol_models_new(r->number, 256, LAZ_FALSE);
+            if (!c->m_bytes) return LAZ_FALSE;
+        }
         c->last_item = (U8 *)calloc(r->number ? r->number : 1, 1);
-        if (!c->m_bytes || !c->last_item) return LAZ_FALSE;
+        if (!c->last_item) return LAZ_FALSE;
         c->created = LAZ_TRUE;
     }
 
-    for (i = 0; i < r->number; i++) laz_symbol_model_init(&c->m_bytes[i], NULL);
+    for (i = 0; i < r->number; i++) {
+        if (!laz_symbol_model_init(&c->m_bytes[i], NULL)) return LAZ_FALSE;
+    }
     memcpy(c->last_item, item, r->number);
     c->unused = LAZ_FALSE;
     return LAZ_TRUE;
@@ -1286,7 +1331,10 @@ static void byte14_read(LazReadItem *self, U8 *item, U32 *context)
     if (r->current_context != *context) {
         r->current_context = *context;
         if (r->contexts[r->current_context].unused) {
-            byte14_create_and_init(r, r->current_context, last_item);
+            if (!byte14_create_and_init(r, r->current_context, last_item)) {
+                self->alloc_failed = LAZ_TRUE;
+                return;
+            }
             if (!r->v4) last_item = r->contexts[r->current_context].last_item;
         }
         if (r->v4) last_item = r->contexts[r->current_context].last_item;
@@ -1317,9 +1365,10 @@ static void byte14_destroy(LazReadItem *self)
 {
     Byte14v3 *r = (Byte14v3 *)self;
     U32 ci, i;
+    /* not gated on c->created: a context whose first allocation succeeded and
+     * whose second did not is not created, but still owns memory */
     for (ci = 0; ci < 4; ci++) {
         Byte14Context *c = &r->contexts[ci];
-        if (!c->created) continue;
         laz_symbol_models_free(c->m_bytes, r->number);
         free(c->last_item);
     }

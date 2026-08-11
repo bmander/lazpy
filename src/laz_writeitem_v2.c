@@ -47,17 +47,18 @@ static BOOL p10v2_init(LazWriteItem *self, const U8 *item, U32 *context)
         w->last_height[i / 2] = 0;
     }
 
-    laz_symbol_model_init(&w->m_changed_values, NULL);
-    laz_ic_init_compressor(&w->ic_intensity);
-    laz_symbol_model_init(&w->m_scan_angle_rank[0], NULL);
-    laz_symbol_model_init(&w->m_scan_angle_rank[1], NULL);
-    laz_ic_init_compressor(&w->ic_point_source_ID);
-    laz_bank_reinit(w->m_bit_byte, w->created_bit_byte, 256);
-    laz_bank_reinit(w->m_classification, w->created_classification, 256);
-    laz_bank_reinit(w->m_user_data, w->created_user_data, 256);
-    laz_ic_init_compressor(&w->ic_dx);
-    laz_ic_init_compressor(&w->ic_dy);
-    laz_ic_init_compressor(&w->ic_z);
+    if (!laz_symbol_model_init(&w->m_changed_values, NULL) ||
+        !laz_ic_init_compressor(&w->ic_intensity) ||
+        !laz_symbol_model_init(&w->m_scan_angle_rank[0], NULL) ||
+        !laz_symbol_model_init(&w->m_scan_angle_rank[1], NULL) ||
+        !laz_ic_init_compressor(&w->ic_point_source_ID) ||
+        !laz_bank_reinit(w->m_bit_byte, w->created_bit_byte, 256) ||
+        !laz_bank_reinit(w->m_classification, w->created_classification, 256) ||
+        !laz_bank_reinit(w->m_user_data, w->created_user_data, 256) ||
+        !laz_ic_init_compressor(&w->ic_dx) ||
+        !laz_ic_init_compressor(&w->ic_dy) ||
+        !laz_ic_init_compressor(&w->ic_z))
+        return LAZ_FALSE;
 
     memcpy(w->last_item, item, 20);
     return LAZ_TRUE;
@@ -69,6 +70,7 @@ static BOOL p10v2_write(LazWriteItem *self, const U8 *item, U32 *context)
     U8 *li = w->last_item;
     U32 n, m, l, k_bits;
     I32 median, diff, changed_values;
+    LazSymbolModel *model;
 
     (void)context;
     /* the return-number context comes from the point being written, which is
@@ -87,9 +89,9 @@ static BOOL p10v2_write(LazWriteItem *self, const U8 *item, U32 *context)
     laz_encode_symbol(self->enc, &w->m_changed_values, (U32)changed_values);
 
     if (changed_values & 32) {
-        laz_encode_symbol(self->enc,
-                          laz_bank_get(w->m_bit_byte, w->created_bit_byte, li[14]),
-                          item[14]);
+        model = laz_bank_get(w->m_bit_byte, w->created_bit_byte, li[14]);
+        if (!model) return LAZ_FALSE;
+        laz_encode_symbol(self->enc, model, item[14]);
     }
 
     if (changed_values & 16) {
@@ -99,9 +101,9 @@ static BOOL p10v2_write(LazWriteItem *self, const U8 *item, U32 *context)
     }
 
     if (changed_values & 8) {
-        laz_encode_symbol(self->enc,
-                          laz_bank_get(w->m_classification, w->created_classification, li[15]),
-                          item[15]);
+        model = laz_bank_get(w->m_classification, w->created_classification, li[15]);
+        if (!model) return LAZ_FALSE;
+        laz_encode_symbol(self->enc, model, item[15]);
     }
 
     if (changed_values & 4) {
@@ -110,9 +112,9 @@ static BOOL p10v2_write(LazWriteItem *self, const U8 *item, U32 *context)
     }
 
     if (changed_values & 2) {
-        laz_encode_symbol(self->enc,
-                          laz_bank_get(w->m_user_data, w->created_user_data, li[17]),
-                          item[17]);
+        model = laz_bank_get(w->m_user_data, w->created_user_data, li[17]);
+        if (!model) return LAZ_FALSE;
+        laz_encode_symbol(self->enc, model, item[17]);
     }
 
     if (changed_values & 1) {
@@ -212,9 +214,10 @@ static BOOL gps11v2_init(LazWriteItem *self, const U8 *item, U32 *context)
     memset(w->last_gpstime_diff, 0, sizeof(w->last_gpstime_diff));
     memset(w->multi_extreme_counter, 0, sizeof(w->multi_extreme_counter));
 
-    laz_symbol_model_init(&w->m_gpstime_multi, NULL);
-    laz_symbol_model_init(&w->m_gpstime_0diff, NULL);
-    laz_ic_init_compressor(&w->ic_gpstime);
+    if (!laz_symbol_model_init(&w->m_gpstime_multi, NULL) ||
+        !laz_symbol_model_init(&w->m_gpstime_0diff, NULL) ||
+        !laz_ic_init_compressor(&w->ic_gpstime))
+        return LAZ_FALSE;
 
     memcpy(&w->last_gpstime[0], item, 8);
     w->last_gpstime[1] = 0;
@@ -382,8 +385,10 @@ static BOOL rgb12v2_init(LazWriteItem *self, const U8 *item, U32 *context)
     Rgb12v2 *w = (Rgb12v2 *)self;
     U32 i;
     (void)context;
-    laz_symbol_model_init(&w->m_byte_used, NULL);
-    for (i = 0; i < 6; i++) laz_symbol_model_init(&w->m_rgb_diff[i], NULL);
+    if (!laz_symbol_model_init(&w->m_byte_used, NULL)) return LAZ_FALSE;
+    for (i = 0; i < 6; i++) {
+        if (!laz_symbol_model_init(&w->m_rgb_diff[i], NULL)) return LAZ_FALSE;
+    }
     memcpy(w->last_item, item, 6);
     return LAZ_TRUE;
 }
@@ -479,7 +484,9 @@ static BOOL bytev2_init(LazWriteItem *self, const U8 *item, U32 *context)
     Bytev2 *w = (Bytev2 *)self;
     U32 i;
     (void)context;
-    for (i = 0; i < w->number; i++) laz_symbol_model_init(&w->m_byte[i], NULL);
+    for (i = 0; i < w->number; i++) {
+        if (!laz_symbol_model_init(&w->m_byte[i], NULL)) return LAZ_FALSE;
+    }
     memcpy(w->last_item, item, w->number);
     return LAZ_TRUE;
 }

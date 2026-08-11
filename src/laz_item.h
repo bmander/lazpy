@@ -294,6 +294,12 @@ static inline void laz_wp_pack(const LazWavepacket13 *w, U8 *item)
  *
  * `created` parallels `m` and records which entries have been through
  * laz_symbol_model_init at least once.
+ *
+ * Because creation is deferred to first use, laz_bank_get is the one place a
+ * model allocation can fail partway through a chunk rather than at chunk
+ * setup. It reports that as NULL, which every caller has to handle: the
+ * readers set LazReadItem.alloc_failed and abandon the point, the writers
+ * return LAZ_FALSE out of write().
  */
 static inline void laz_bank_setup(LazSymbolModel *m, U8 *created, U32 n,
                                   U32 num_symbols, BOOL compress)
@@ -305,16 +311,20 @@ static inline void laz_bank_setup(LazSymbolModel *m, U8 *created, U32 n,
     }
 }
 
-static inline void laz_bank_reinit(LazSymbolModel *m, const U8 *created, U32 n)
+static inline BOOL laz_bank_reinit(LazSymbolModel *m, const U8 *created, U32 n)
 {
     U32 i;
-    for (i = 0; i < n; i++) if (created[i]) laz_symbol_model_init(&m[i], NULL);
+    for (i = 0; i < n; i++) {
+        if (created[i] && !laz_symbol_model_init(&m[i], NULL)) return LAZ_FALSE;
+    }
+    return LAZ_TRUE;
 }
 
+/* Returns NULL if the model had to be created and could not be allocated. */
 static inline LazSymbolModel *laz_bank_get(LazSymbolModel *m, U8 *created, U32 idx)
 {
     if (!created[idx]) {
-        laz_symbol_model_init(&m[idx], NULL);
+        if (!laz_symbol_model_init(&m[idx], NULL)) return NULL;
         created[idx] = 1;
     }
     return &m[idx];

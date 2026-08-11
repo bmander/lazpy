@@ -13,6 +13,13 @@
  * head of each concrete writer, so a concrete writer can always be cast to
  * LazWriteItem*.
  *
+ * One asymmetry: write() reports a failed point through its return value,
+ * where read() returns void and the reader raises a flag the container picks
+ * up afterwards. That is the read side's established convention -- see
+ * overran() and alloc_failed in laz_readitem.h -- and it exists because a
+ * writer is driven a point at a time by a caller who can stop, while a reader
+ * is on the decode path LASzip threw exceptions from.
+ *
  * `item` points at this item's bytes inside the caller's point -- for the
  * compressed writers that is the same host-order layout the matching reader
  * produces, so writer(reader(x)) is the identity on the byte stream.
