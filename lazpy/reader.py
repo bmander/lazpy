@@ -112,6 +112,13 @@ def _fields_for_point_format(point_format, num_extra_bytes):
     return names
 
 
+# How far apart two points of a cell may be before the second starts a run of
+# its own. LASinterval's own default, and the same number laz_index.c merges a
+# query's runs by: a gap that small costs a reader the points inside it and
+# saves it a seek. lasindex gives no flag for it, so neither does this.
+_RUN_GAP = 1000
+
+
 def _numpy():
     """numpy, imported on use.
 
@@ -390,6 +397,9 @@ class Reader:
         consumed = header['header_size']
         for _ in range(header['number_of_variable_length_records']):
             vlr = cls._read_variable_length_record(fp)
+            # where its payload begins, for anything that has to go back to
+            # it: the LASzip record is patched in place by an appended index
+            vlr['offset_to_data'] = consumed + VLR_HEADER_SIZE
             header['variable_length_records'][
                 (vlr['user_id'], vlr['record_id'])] = vlr
             consumed += VLR_HEADER_SIZE + len(vlr['data'])
@@ -708,20 +718,87 @@ class Reader:
             return None
         return record['data']
 
-    def _sidecar_index_data(self):
-        """The index in the ".lax" beside this file, or None.
+    def _sidecar_path(self):
+        """Where an index of this file belongs, or None for a file object.
 
-        Only a file opened by name has one to look for -- an index is found by
-        the name of the file it indexes, and a file object has none.
+        An index is found by the name of the file it indexes, so a reader
+        opened on a stream neither finds one nor has anywhere to put one.
         """
         if self._path is None:
             return None
-        root, _ = os.path.splitext(self._path)
+        return os.path.splitext(self._path)[0] + '.lax'
+
+    def _sidecar_index_data(self):
+        """The index in the ".lax" beside this file, or None."""
+        path = self._sidecar_path()
+        if path is None:
+            return None
         try:
-            with open(root + '.lax', 'rb') as fp:
+            with open(path, 'rb') as fp:
                 return fp.read()
         except OSError:
             return None
+
+    def build_spatial_index(self, cell_size=1.0, minimum_points=100000,
+                            maximum_intervals=-20):
+        """Build a spatial index over this file's points, as bytes.
+
+        What ``lasindex`` does, and the other half of the index this reader
+        already knows how to use: the bytes are a ``.lax`` file's whole
+        contents, so writing them beside the cloud is all it takes --
+        :meth:`write_spatial_index` does that.
+
+        ``cell_size`` is how wide the quadtree's leaves are, in the units the
+        coordinates are in; the tree is deep enough to reach it over the area
+        the points cover. ``minimum_points`` and ``maximum_intervals`` are
+        the coarsening: cells holding fewer than that between them merge into
+        their parent, and the runs of point indices merge until at most that
+        many are left -- negative meaning that many per cell, which is how
+        lasindex is usually asked.
+
+        Two passes over the points, both in C: where each one falls cannot be
+        settled until the extent of them all is known. The reader is left at
+        the end of the file.
+        """
+        if not self.num_points:
+            raise LazError("a file with no points has nothing to index")
+        self.seek(0)
+        bounds = self._point_bounds()
+        self.seek(0)
+        return self._reader.build_index(
+            self.num_points, bounds, self.scales[:2], self.offsets[:2],
+            float(cell_size), int(minimum_points), int(maximum_intervals),
+            _RUN_GAP)
+
+    def _point_bounds(self):
+        """The area the points really cover, georeferenced.
+
+        The header's bounding box would do and would cost nothing, but a file
+        whose header is wrong -- or is a placeholder, as every fixture's is --
+        would get a tree with everything in one cell. laszip's own index
+        creation goes by the points too.
+        """
+        stored = self._reader.bounds(self.num_points)
+        scales, offsets = self.scales, self.offsets
+        return tuple(value * scales[i % 2] + offsets[i % 2]
+                     for i, value in enumerate(stored))
+
+    def write_spatial_index(self, path=None, **kwargs):
+        """Build an index and write it beside the file, as ``lasindex`` does.
+
+        The path defaults to this file's own with a ``.lax`` extension, which
+        is where :attr:`spatial_index` looks for one. Everything else is
+        :meth:`build_spatial_index`'s. Returns the path written.
+        """
+        if path is None:
+            path = self._sidecar_path()
+            if path is None:
+                raise ValueError("a reader opened on a file object has no "
+                                 "name to put an index beside")
+        data = self.build_spatial_index(**kwargs)
+        with open(path, 'wb') as fp:
+            fp.write(data)
+        return path
 
     @property
     def spatial_index(self):

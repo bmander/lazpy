@@ -50,7 +50,7 @@ static void set_warning(LazIndex *ix, const char *fmt, ...)
  * damage by the size of the file. Returns NULL and leaves `base` valid on
  * failure, as realloc does.
  */
-static void *grow(void *base, U32 *alloc, U32 needed, size_t item)
+void *laz_index_grow(void *base, U32 *alloc, U32 needed, size_t item)
 {
     U32 n = *alloc ? *alloc : 16;
     void *p;
@@ -71,11 +71,21 @@ static void *grow(void *base, U32 *alloc, U32 needed, size_t item)
 
 /* Which level a cell index belongs to. The reference stops at 15 whatever the
  * tree's own depth, and so does this. */
-static U32 get_level(const LazQuadtree *q, U32 cell_index)
+U32 laz_index_level_of(const U32 *level_offset, U32 cell_index)
 {
     U32 level = 0;
-    while ((level < 15) && (cell_index >= q->level_offset[level + 1])) level++;
+    while ((level < 15) && (cell_index >= level_offset[level + 1])) level++;
     return level;
+}
+
+/* Where each level's cell indices begin, which is the tree's shape and not
+ * any one file's: level l has 4^l cells, all of them below level l+1's. */
+void laz_index_level_offsets(U32 *level_offset)
+{
+    U32 l;
+    level_offset[0] = 0;
+    for (l = 0; l < 16; l++)
+        level_offset[l + 1] = level_offset[l] + ((1u << l) * (1u << l));
 }
 
 static U32 get_cell_index(const LazQuadtree *q, U32 level_index, U32 level)
@@ -90,7 +100,7 @@ static BOOL adaptive_reserve(LazQuadtree *q, U32 words)
     U32 *grown;
 
     if (words <= was) return LAZ_TRUE;
-    grown = (U32 *)grow(q->adaptive, &q->adaptive_words, words, sizeof(U32));
+    grown = (U32 *)laz_index_grow(q->adaptive, &q->adaptive_words, words, sizeof(U32));
     if (!grown) return LAZ_FALSE;
     q->adaptive = grown;
     memset(q->adaptive + was, 0,
@@ -123,7 +133,7 @@ static BOOL quadtree_manage_cell(LazIndex *ix, U32 cell_index)
 
     q->adaptive[cell_index / 32] &= ~(((U32)1) << (cell_index % 32));
 
-    level = get_level(q, cell_index);
+    level = laz_index_level_of(q->level_offset, cell_index);
     level_index = cell_index - q->level_offset[level];
     while (level) {
         U32 index;
@@ -141,7 +151,7 @@ static BOOL quadtree_manage_cell(LazIndex *ix, U32 cell_index)
 
 static BOOL hits_push(LazQuadtree *q, U32 cell_index)
 {
-    I32 *grown = (I32 *)grow(q->hits, &q->hits_alloc, q->num_hits + 1,
+    I32 *grown = (I32 *)laz_index_grow(q->hits, &q->hits_alloc, q->num_hits + 1,
                              sizeof(I32));
     if (!grown) return LAZ_FALSE;
     q->hits = grown;
@@ -273,11 +283,9 @@ static BOOL quadtree_read(LazIndex *ix, LazStream *s)
     LazQuadtree *q = &ix->quadtree;
     U8 sig[4];
     U8 box[16];
-    U32 type, l;
+    U32 type;
 
-    q->level_offset[0] = 0;
-    for (l = 0; l < 16; l++)
-        q->level_offset[l + 1] = q->level_offset[l] + ((1u << l) * (1u << l));
+    laz_index_level_offsets(q->level_offset);
 
     laz_stream_get_bytes(s, sig, 4);
     if (memcmp(sig, "LASS", 4) != 0) {
@@ -389,7 +397,7 @@ static BOOL interval_read(LazIndex *ix, LazStream *s)
             return LAZ_FALSE;
         }
 
-        grown_cells = (LazIndexCell *)grow(ix->cells, &cells_alloc,
+        grown_cells = (LazIndexCell *)laz_index_grow(ix->cells, &cells_alloc,
                                            ix->num_cells + 1,
                                            sizeof(LazIndexCell));
         if (!grown_cells) {
@@ -409,7 +417,7 @@ static BOOL interval_read(LazIndex *ix, LazStream *s)
 
         for (i = 0; i < number_intervals; i++) {
             LazInterval *iv;
-            LazInterval *grown = (LazInterval *)grow(ix->intervals,
+            LazInterval *grown = (LazInterval *)laz_index_grow(ix->intervals,
                                                      &intervals_alloc,
                                                      ix->num_intervals + 1,
                                                      sizeof(LazInterval));
@@ -508,7 +516,7 @@ static BOOL merged_reserve(LazIndex *ix, U32 needed)
     /* Asking for nothing is not a failure, though grow() cannot say so: it
      * hands back the base pointer, which is NULL until the first allocation. */
     if (needed == 0) return LAZ_TRUE;
-    grown = (LazInterval *)grow(ix->merged, &ix->merged_alloc,
+    grown = (LazInterval *)laz_index_grow(ix->merged, &ix->merged_alloc,
                                 needed, sizeof(LazInterval));
     if (!grown) {
         set_error(ix, "out of memory answering a spatial index query");
@@ -530,7 +538,7 @@ static BOOL merged_reserve(LazIndex *ix, U32 needed)
 static BOOL merge_hits(LazIndex *ix)
 {
     const LazQuadtree *q = &ix->quadtree;
-    U32 used = 0, kept = 0, i;
+    U32 used = 0, i;
 
     ix->num_merged = 0;
 
@@ -550,18 +558,33 @@ static BOOL merge_hits(LazIndex *ix)
      * join intervals it kept separate. */
     if (used < 2 || ix->num_merged < 2) return LAZ_TRUE;
 
-    qsort(ix->merged, ix->num_merged, sizeof(LazInterval), interval_cmp);
-
-    for (i = 1; i < ix->num_merged; i++) {
-        LazInterval *last = &ix->merged[kept];
-        LazInterval next = ix->merged[i];
-        if ((I64)next.start - (I64)last->end > MERGE_THRESHOLD)
-            ix->merged[++kept] = next;
-        else if (next.end > last->end)
-            last->end = next.end;
-    }
-    ix->num_merged = kept + 1;
+    ix->num_merged = laz_index_coalesce(ix->merged, ix->num_merged,
+                                        MERGE_THRESHOLD);
     return LAZ_TRUE;
+}
+
+/*
+ * Puts `n` runs in order and joins the ones no more than `threshold` apart,
+ * leaving how many are left.
+ *
+ * The rule LASinterval applies in both directions: a gap that small costs a
+ * reader the few points inside it and saves it a seek, so the two runs are
+ * one. Shared with the builder, which has to agree with this exactly.
+ */
+U32 laz_index_coalesce(LazInterval *intervals, U32 n, U64 threshold)
+{
+    U32 i, kept = 0;
+
+    if (n < 2) return n;
+    qsort(intervals, n, sizeof(LazInterval), interval_cmp);
+    for (i = 1; i < n; i++) {
+        LazInterval next = intervals[i];
+        if ((I64)next.start - (I64)intervals[kept].end > (I64)threshold)
+            intervals[++kept] = next;
+        else if (next.end > intervals[kept].end)
+            intervals[kept].end = next.end;
+    }
+    return kept + 1;
 }
 
 static BOOL intersect(LazIndex *ix, const LazQuery *query)

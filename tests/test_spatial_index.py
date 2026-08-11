@@ -6,8 +6,9 @@ import struct
 import pytest
 
 from lazpy import _cpylaz as cpylaz
-from lazpy import Point, Reader, LazError
-from helpers import TESTDATA, fixture
+from lazpy import (Point, Reader, LazError, Writer,
+                   append_spatial_index)
+from helpers import REFERENCE_HASH, TESTDATA, fixture
 from lazpy.reader import _fields_for_point_format
 
 
@@ -594,3 +595,132 @@ def test_a_query_is_over_one_shape_or_the_other():
             reader.arrays_within("X", rect=(0, 0, 1, 1), circle=(0, 0, 1))
         with pytest.raises(TypeError, match="rectangle or a circle"):
             reader.arrays_within("X")
+
+
+# ---------------------------------------------------------------------------
+# Building one.
+#
+# The other half of the index: lasindex's job, and what testdata/'s .lax files
+# were made with -- tools/README.md records the parameters as
+# `mklax <file> 1.0 30 -20`, so the same parameters over the same points
+# should give the same index.
+#
+# "The same" up to the order the cells appear in the file, which is the one
+# thing a reader cannot see: LASzip writes them in the order its hash of them
+# happens to iterate, and this writes them in order of cell index. Everything
+# either one answers is compared instead.
+# ---------------------------------------------------------------------------
+
+FIXTURE_INDEX = dict(cell_size=1.0, minimum_points=30, maximum_intervals=-20)
+
+# LASX, the quadtree record and its bounding box: everything in front of the
+# cells, which is where an order can differ
+QUADTREE_BYTES = 56
+
+
+def built_index(name):
+    with Reader(fixture(name)) as reader:
+        return reader.build_spatial_index(**FIXTURE_INDEX)
+
+
+# every indexed fixture but the one whose index is inside it
+SIDECAR_FIXTURES = [name for name in INDEXED_FIXTURES
+                    if name != "pt1_v2_appended.laz"]
+
+
+@pytest.mark.parametrize("name", SIDECAR_FIXTURES)
+def test_the_tree_is_the_one_laszip_built(name):
+    """Byte for byte, as far as the cells: the same levels over the same
+    square, which is what the cell size and the extent of the points decide.
+    """
+    committed = open(fixture(name.rsplit(".", 1)[0] + ".lax"), "rb").read()
+
+    assert built_index(name)[:QUADTREE_BYTES] == committed[:QUADTREE_BYTES]
+
+
+@pytest.mark.parametrize("name", SIDECAR_FIXTURES)
+def test_a_built_index_answers_what_laszips_own_answers(name):
+    """Every cell and every run of points, by what the two select."""
+    committed = cpylaz.SpatialIndex(
+        open(fixture(name.rsplit(".", 1)[0] + ".lax"), "rb").read())
+
+    ours = cpylaz.SpatialIndex(built_index(name))
+
+    assert (ours.bounds, ours.levels, ours.num_cells) == \
+        (committed.bounds, committed.levels, committed.num_cells)
+    for rect in RECTANGLES:
+        assert ours.intervals(*rect) == committed.intervals(*rect)
+    min_x, min_y, max_x, max_y = ours.bounds
+    for radius in (0.5, 2.0, 20.0):
+        centre = ((min_x + max_x) / 2, (min_y + max_y) / 2)
+        assert ours.intervals_within_circle(*centre, radius) == \
+            committed.intervals_within_circle(*centre, radius)
+
+
+@pytest.mark.parametrize("name", INDEXED_FIXTURES)
+def test_an_index_built_here_selects_what_a_scan_selects(name, tmp_path):
+    """The index is only worth having if the answer is the same one."""
+    copy = without_sidecar(name, tmp_path)
+
+    with Reader(copy) as reader:
+        written = reader.write_spatial_index(**FIXTURE_INDEX)
+    assert written.endswith(".lax")
+
+    with Reader(copy) as reader:
+        assert reader.has_spatial_index
+        for rect in RECTANGLES:
+            reader.seek(0)
+            assert query_indices(reader, rect) == inside_by_scan(name, rect)
+
+
+def test_an_index_can_go_inside_the_file_it_indexes(tmp_path):
+    """Where `lasindex -append` puts one, found through the LASzip record."""
+    name = "pt1_v2.laz"
+    copy = without_sidecar(name, tmp_path)
+
+    append_spatial_index(copy, built_index(name))
+
+    with Reader(copy) as reader:
+        assert reader.has_spatial_index
+        assert reader.spatial_index.num_cells == 22
+        # the points are where they were: the record went behind them
+        assert reader.checksum() == REFERENCE_HASH[name]
+    with Reader(copy) as reader:
+        rect = RECTANGLES[0]
+        assert query_indices(reader, rect) == inside_by_scan(name, rect)
+
+
+def test_a_plain_las_has_nowhere_to_keep_one_inside(tmp_path):
+    copy = without_sidecar("pt0_v0.las", tmp_path)
+
+    with pytest.raises(LazError, match="only a compressed file"):
+        append_spatial_index(copy, built_index("pt0_v0.las"))
+
+
+def test_a_coarser_tree_holds_fewer_cells():
+    """The cell size is what decides how much the index knows."""
+    fine = cpylaz.SpatialIndex(built_index("pt1_v2.laz"))
+
+    with Reader(fixture("pt1_v2.laz")) as reader:
+        coarse = cpylaz.SpatialIndex(reader.build_spatial_index(
+            cell_size=4.0, minimum_points=30, maximum_intervals=-20))
+
+    assert coarse.levels < fine.levels
+    assert coarse.num_cells < fine.num_cells
+
+
+def test_a_reader_with_no_name_has_nowhere_to_put_a_sidecar():
+    with open(fixture("pt1_v2.laz"), "rb") as fp:
+        with Reader(io.BytesIO(fp.read())) as reader:
+            with pytest.raises(ValueError, match="no name"):
+                reader.write_spatial_index()
+
+
+def test_an_index_of_no_points_is_refused():
+    buf = io.BytesIO()
+    with Writer(buf, 1):
+        pass
+
+    with Reader(io.BytesIO(buf.getvalue())) as reader:
+        with pytest.raises(LazError, match="nothing to index"):
+            reader.build_spatial_index()

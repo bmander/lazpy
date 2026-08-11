@@ -172,6 +172,13 @@ static inline F32 laz_le_get_f32(const U8 *p)
     return v;
 }
 
+static inline void laz_le_put_f32(U8 *p, F32 v)
+{
+    U32 bits;
+    memcpy(&bits, &v, 4);
+    laz_le_put32(p, bits);
+}
+
 /* A double travels as its IEEE 754 bit pattern, which is what the LAS gps_time
  * and the LAZ coders both treat it as. */
 static inline F64 laz_le_get_f64(const U8 *p)

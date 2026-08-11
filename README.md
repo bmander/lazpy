@@ -102,8 +102,38 @@ point the index turns up as a candidate and cut down to the ones really
 inside, since how many that is is what the query is for.
 
 `intervals()` is the index itself: the runs of point indices a rectangle
-reaches, which is what `points_within` seeks between. Writing a `.lax` is not
-supported; `lasindex` from LAStools writes them.
+reaches, which is what `points_within` seeks between.
+
+## Building an index
+
+A file that has none can be given one, which is what `lasindex` is for:
+
+```python
+with Reader("cloud.laz") as reader:
+    reader.write_spatial_index(cell_size=10.0)      # writes cloud.lax
+```
+
+`cell_size` is how wide the quadtree's leaves are, in the units the
+coordinates are in. `minimum_points` and `maximum_intervals` are the
+coarsening — cells holding fewer than that between them merge into their
+parent, and the runs of point indices merge until at most that many are left,
+negative meaning that many per cell. They are `lasindex`'s own three
+parameters.
+
+`build_spatial_index()` returns the same bytes without writing them, and
+`append_spatial_index(path, data)` puts them inside the file itself, where
+`lasindex -append` puts one:
+
+```python
+from lazpy import Reader, append_spatial_index
+
+with Reader("cloud.laz") as reader:
+    index = reader.build_spatial_index(cell_size=10.0)
+append_spatial_index("cloud.laz", index)
+```
+
+Building reads every point twice — where each one falls cannot be settled
+until the extent of them all is known — both passes in C.
 
 ## Writing
 
@@ -300,8 +330,6 @@ file whose points are as nearly right as a legacy file can make them.
 
 The LASzip spatial index is read, both as a sidecar `.lax` and as the extended
 record an appended one lives in; see "Reading a region" above.
-
-Not yet: *writing* spatial indexes.
 
 Both host byte orders work. LAS and LAZ are little-endian on disk and a
 decoded point is in host order, so a big-endian host converts between the two

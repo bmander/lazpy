@@ -1,5 +1,6 @@
 """The writing front end: :class:`Writer` and what only it needs."""
 
+import io
 import math
 
 from ._cpylaz import PointWriter, LazError
@@ -7,14 +8,15 @@ from ._utils import cstr, pack_cstr
 from .compat import _compatibility_payload, _disguise, _DISGUISED_FORMAT
 from .extra_bytes import _described_width
 from .formats import (EXTRA_BYTES_VLR_KEY, LASCOMPATIBLE_VLR_KEY,
-                      LASZIP_VLR_KEY, Compressor,
+                      LASINDEX_EVLR_KEY, LASZIP_VLR_KEY, Compressor,
                       Coder, UnsupportedFileError, _POINT_FORMATS,
                       items_for_point_format, _versioned_items,
                       _default_version_minor, _min_version_minor)
-from .headers import (EVLR_HEADER_FORMAT, MAX_VLR_PAYLOAD, VLR_HEADER_FORMAT,
-                      VLR_HEADER_SIZE, LASZIP_RECORD_FORMAT,
-                      LASZIP_ITEM_FORMAT, header_formats, pack_format,
-                      _header_size, _can_seek)
+from .headers import (EVLR_HEADER_FORMAT, LASZIP_SPECIAL_EVLRS_AT,
+                      LASZIP_SPECIAL_EVLR_FORMAT, MAX_VLR_PAYLOAD,
+                      VLR_HEADER_FORMAT, VLR_HEADER_SIZE,
+                      LASZIP_RECORD_FORMAT, LASZIP_ITEM_FORMAT,
+                      header_formats, pack_format, _header_size, _can_seek)
 
 
 # What a point's X, Y and Z can hold: they are signed 32-bit, and a coordinate
@@ -75,6 +77,42 @@ def auto_offsets(mins, maxs, scales=DEFAULT_SCALES):
         offsets.append(math.floor(middle / scale / _OFFSET_STEP)
                        * _OFFSET_STEP * scale)
     return tuple(offsets)
+
+
+def append_spatial_index(path, data):
+    """Put a spatial index inside the file it indexes, and say where it went.
+
+    ``lasindex -append``'s doing, and what :func:`Reader.build_spatial_index`
+    makes the bytes for: the index goes on the end of the file as an extended
+    record, and the LASzip record is made to point at it. Nothing in the LAS
+    header mentions it, so those two fields are the only way back to it --
+    which is why the file has to be a compressed one, a plain LAS file having
+    no LASzip record to carry them.
+
+    :class:`Reader` prefers an index found this way over one in a ``.lax``
+    beside the file, since this one cannot be stale.
+    """
+    from .reader import Reader        # its header parsing, not its reading
+
+    with open(path, 'r+b') as fp:
+        header = Reader._read_las_header(fp)
+        laszip = header['variable_length_records'].get(LASZIP_VLR_KEY)
+        if laszip is None:
+            raise LazError("only a compressed file can carry an index inside "
+                           "it: the LASzip record is what points at one")
+
+        fp.seek(0, io.SEEK_END)
+        at = fp.tell()
+        record = _record(LASINDEX_EVLR_KEY, bytes(data),
+                         b'LAX spatial indexing (LASindex)')
+        fp.write(pack_format(EVLR_HEADER_FORMAT, record))
+        fp.write(record['data'])
+
+        fp.seek(laszip['offset_to_data'] + LASZIP_SPECIAL_EVLRS_AT)
+        fp.write(pack_format(LASZIP_SPECIAL_EVLR_FORMAT,
+                             {'number_of_special_evlrs': 1,
+                              'offset_to_special_evlrs': at}))
+    return at
 
 
 def _user_id(value):
