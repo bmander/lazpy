@@ -94,7 +94,7 @@ class Coder(IntEnum):
 
 
 class Chunking(Enum):
-    """How a file's points are grouped, which is what random access costs.
+    """How a file's points are grouped, which sets what random access costs.
 
     Not a field of any record: POINTWISE and POINTWISE_CHUNKED carry the same
     chunk size in the LASzip VLR, and the adaptive case declares it as -1, so
@@ -130,7 +130,7 @@ class Selective(IntEnum):
 
 
 class ItemType(IntEnum):
-    """What a LASzip item holds, which is how a point format is described.
+    """The kinds of item a point record is made of.
 
     A point is a list of items, each with a type from here, a size in bytes
     and a coder version; the LASzip VLR carries that list, and
@@ -713,18 +713,17 @@ def _can_seek(fp):
 
 
 class ExtendedVariableLengthRecord(Mapping):
-    """One EVLR, whose payload is fetched the first time it is asked for.
+    """One EVLR, whose payload is read the first time it is asked for.
 
     Reads like the dict a regular VLR is: every field of the record header is a
     key, plus ``offset_to_data`` -- where the payload begins in the file -- and
     ``data``, the payload itself.
 
-    ``data`` is what is not a dict. An EVLR payload is allowed to be enormous,
-    which is what its eight-byte length field is for -- a waveform data packet
-    record can run to gigabytes -- so opening a file reads the 60-byte headers
-    and no more, and the bytes are read only if something asks for them. That
-    means ``data`` needs the reader still open, since the reader is what holds
-    the file. Once read, the payload is kept, so it outlives the reader.
+    ``data`` is the one lazy key. An EVLR payload can be enormous -- a
+    waveform data packet record can run to gigabytes, which is why its length
+    field is eight bytes -- so opening a file reads only the 60-byte headers,
+    and the payload is read when first accessed. That means ``data`` needs
+    the reader still open; once read, it is kept, and outlives the reader.
     """
 
     def __init__(self, fields, fp):
@@ -775,14 +774,18 @@ class ExtendedVariableLengthRecord(Mapping):
 
 
 class Reader:
-    """Sequential and random access to the points of a LAS or LAZ file.
+    """Read the points of a LAS or LAZ file: in order, by index, or as arrays.
 
-    ``header`` is what the file says about itself, field by field, plus its
-    variable length records keyed by ``(user_id, record_id)``. It is the file's
-    own account rather than the bytes on disk in one case: a LAS 1.4
-    compatibility-mode file is reported as the LAS 1.4 file it stands in for,
-    so ``header_size`` and ``offset_to_point_data`` describe that file and not
-    where anything sits in this one.
+    Open one by path or from an open binary file, then iterate it point by
+    point, or reach for :meth:`seek`, :meth:`arrays` and
+    :meth:`points_within`.
+
+    ``reader.header`` is a dict of every LAS header field, plus the variable
+    length records under ``header["variable_length_records"]``, keyed by
+    ``(user_id, record_id)``. For a LAS 1.4 compatibility-mode file the
+    header describes the LAS 1.4 file it stands in for, not the file on
+    disk: ``header_size`` and ``offset_to_point_data`` in particular locate
+    nothing in the physical file.
     """
 
     def __init__(self, filename=None, decompress_selective=None):
@@ -1105,7 +1108,7 @@ class Reader:
 
     @property
     def chunk_size(self):
-        """How many points share a chunk, or None if that is not a number.
+        """How many points share a chunk, or None where no one number applies.
 
         None for an unchunked file -- plain LAS, or the POINTWISE container,
         which is a single stream however large a chunk size the LASzip VLR
@@ -1147,7 +1150,7 @@ class Reader:
 
     @property
     def offsets(self):
-        """``(x, y, z)`` offsets, added after :attr:`scales` multiplies."""
+        """``(x, y, z)`` offsets, added to the scaled coordinates."""
         return (self.header['x_offset'], self.header['y_offset'],
                 self.header['z_offset'])
 
@@ -1184,10 +1187,10 @@ class Reader:
     def checksum(self, count=None):
         """Decode *count* points and return ``(fnv1a_hash, points_read)``.
 
-        Defaults to every point remaining in the file. Hashes each decoded
-        field entirely in C, which is what makes whole-file verification
-        against a laszip reference practical at tens of millions of points.
-        Advances the reader.
+        Defaults to every point remaining in the file. Hashes every decoded
+        field entirely in C, so a whole file verifies against a laszip
+        reference quickly even at tens of millions of points. Advances the
+        reader.
         """
         if count is None:
             count = self.num_points - self.index
@@ -1309,7 +1312,8 @@ class Reader:
 
     @property
     def has_spatial_index(self):
-        """Whether a rectangle query can skip past most of the file."""
+        """Whether an index was found, in the file or beside it -- and so
+        whether a rectangle query can skip most of the file."""
         return self.spatial_index is not None
 
     def _region(self, min_x, min_y, max_x, max_y):
@@ -1485,9 +1489,8 @@ class Reader:
         asks for, of the points ``rect`` -- ``(min_x, min_y, max_x, max_y)``
         -- contains, selected the same way and with the same half-open edges.
 
-        This is the combination worth having, since the index decides which
-        points to decode and the array path decides how cheaply to hand them
-        over::
+        The index decides which points to decode, and the array path decides
+        how cheaply to hand them over::
 
             a = reader.arrays_within("X", "Y", "Z", rect=(x0, y0, x1, y1))
 
@@ -1557,13 +1560,13 @@ class Writer:
     file being converted already has.
 
     One wrinkle in the LAS 1.4 point formats is worth knowing when building
-    points by hand: three of the four classification flags exist twice over. A
-    record keeps synthetic, keypoint and withheld in the same four bits as
-    overlap, but a decoded point splits them, and what goes back into a record
-    is ``synthetic_flag``, ``keypoint_flag`` and ``withheld_flag`` -- only the
-    overlap bit is taken from ``extended_classification_flags``. That is
-    LASzip's rule, kept because matching it byte for byte is what makes these
-    files the files laszip would have written.
+    points by hand: three of the four classification flags exist twice over.
+    A record keeps synthetic, keypoint and withheld in the same four bits as
+    overlap, but a decoded point splits them. On the way back in, the writer
+    takes those three from ``synthetic_flag``, ``keypoint_flag`` and
+    ``withheld_flag``, and only the overlap bit from
+    ``extended_classification_flags`` -- LASzip's rule, matched so these are
+    byte for byte the files laszip would have written.
 
     Three header fields are not knowable until the last point has been written:
     the point count, the counts by return number, and the bounding box. They

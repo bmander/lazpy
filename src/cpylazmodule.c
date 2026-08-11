@@ -1288,7 +1288,8 @@ static PyGetSetDef Point_getset[] = {
 
 static PyMethodDef Point_methods[] = {
     {"copy", (PyCFunction)Point_copy, METH_NOARGS,
-     "copy() -> Point  (detached from the reader's buffer)"},
+     "copy() -> Point\n\n"
+     "A detached copy, safe to keep across reads."},
     {NULL}
 };
 
@@ -1334,12 +1335,11 @@ PyDoc_STRVAR(point_doc,
 "A point carries the fields of every format, not only its own: reading a\n"
 "format that has no colour leaves rgb zero, and one that has no time leaves\n"
 "gps_time 0.0. The extended_* attributes are the LAS 1.4 widenings of the\n"
-"fields above them and are populated by point formats 6-10 alone --\n"
-"extended_point_type is 1 exactly there, and 0 on formats 0-5, where the\n"
-"whole extended family reads zero. Where they are populated both sets are:\n"
-"the reader keeps the narrower legacy field in step, saturating it rather\n"
-"than letting it wrap. Reader.arrays() names the fields a given file really\n"
-"carries.\n"
+"fields above them, populated by point formats 6-10 alone;\n"
+"extended_point_type is 1 on those formats and 0 elsewhere. On formats 6-10\n"
+"the legacy fields are populated too, kept in step with the extended ones\n"
+"by saturating rather than wrapping. Reader.arrays() names the fields a\n"
+"given file really carries.\n"
 "\n"
 "The point a reader hands back is the reader's own buffer and is overwritten\n"
 "by the next read; copy() takes a detached one. Building a point for a\n"
@@ -2131,11 +2131,10 @@ static PyMethodDef Reader_methods[] = {
      "read_within(stop, region) -> Point | None\n\n"
      "Decode forward to the next point inside the rectangle, or to index "
      "stop, whichever comes first; None means stop was reached with "
-     "nothing inside. A region is the eight floats "
-     "Reader._region() packs a query into -- the rectangle, then the "
-     "scales and offsets that turn a stored coordinate into the "
-     "georeferenced one the rectangle is in -- so that testing a point "
-     "costs no Python call."},
+     "nothing inside. A region is one flat tuple of eight floats -- "
+     "min_x, min_y, max_x, max_y, then the x and y scales and offsets "
+     "that turn a stored coordinate into the georeferenced one the "
+     "rectangle is in -- so testing a point costs no Python call."},
     {"read_into_within", (PyCFunction)Reader_read_into_within, METH_VARARGS,
      "read_into_within(targets, stop, region) -> int\n\n"
      "read_into and read_within at once: decode to index stop, writing "
@@ -2150,8 +2149,8 @@ static PyMethodDef Reader_methods[] = {
     {"checksum", (PyCFunction)Reader_checksum, METH_VARARGS,
      "checksum(count=-1) -> (fnv1a_hash, points_read)\n\n"
      "Decode count points, hashing every field of each, and advance past "
-     "them. Entirely in C with the GIL released, which is what makes "
-     "verifying a forty-million-point file against laszip practical."},
+     "them. Runs entirely in C with the GIL released, so verifying a "
+     "forty-million-point file against laszip stays quick."},
     {NULL}
 };
 
@@ -2508,11 +2507,16 @@ static PyObject *Writer_get_points_by_return(WriterObject *self, void *c)
 
 static PyMethodDef Writer_methods[] = {
     {"write", (PyCFunction)Writer_write, METH_O,
-     "write(point) -> None  (a Point, or the bytes its items occupy on disk)"},
+     "write(point) -> None\n\n"
+     "Append one point: a Point, or the bytes of one on-disk record."},
     {"chunk", (PyCFunction)Writer_chunk, METH_NOARGS,
-     "chunk() -> None  (close the open chunk; variable-size chunking only)"},
+     "chunk() -> None\n\n"
+     "Close the open chunk. Only meaningful with variable-size chunking, "
+     "where the boundaries are the caller's to choose."},
     {"done", (PyCFunction)Writer_done, METH_NOARGS,
-     "done() -> None  (close the last chunk and write the chunk table)"},
+     "done() -> None\n\n"
+     "Close the last chunk and write the chunk table. Not optional: "
+     "without it the file ends mid-chunk and nothing can seek in it."},
     {NULL}
 };
 
@@ -2695,9 +2699,9 @@ PyDoc_STRVAR(index_doc,
 "\n"
 "A parsed LASzip spatial index, from the bytes of one.\n"
 "\n"
-"The index is a quadtree over the surveyed area whose cells name the runs of\n"
-"point indices that landed in them, which is what lets a rectangle query\n"
-"decode a few chunks instead of a file. intervals() asks it a rectangle and\n"
+"The index is a quadtree over the surveyed area whose cells name the runs\n"
+"of point indices that landed in them, so a rectangle query can decode a\n"
+"few chunks instead of the whole file. intervals() asks it a rectangle and\n"
 "gets those runs back.\n"
 "\n"
 "`data` is the payload of a \".lax\" file or of the extended record an\n"
