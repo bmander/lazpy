@@ -8,6 +8,11 @@ Writing
    :undoc-members:
    :show-inheritance:
 
+Coordinates
+-----------
+
+.. autofunction:: auto_offsets
+
 Extra bytes
 -----------
 

@@ -7,9 +7,10 @@ import pytest
 from lazpy import _cpylaz as cpylaz
 from lazpy import (Chunking, Compressor, EXTRA_BYTES_VLR_KEY,
                    ExtraBytesAttribute, LASZIP_VLR_KEY, Point, Reader,
-                   LazError, UnsupportedFileError, Writer, extra_bytes_record)
+                   LazError, UnsupportedFileError, Writer, auto_offsets,
+                   extra_bytes_record)
 from lazpy.compat import _extra_bytes_attributes
-from lazpy.headers import VLR_HEADER_SIZE
+from lazpy.headers import VLR_HEADER_SIZE, _header_size
 from helpers import (EXTENDED_POINT_COUNT_OFFSET, LAS14_FORMATS,
                      LEGACY_FORMATS, LEGACY_POINT_COUNT_OFFSET, REFERENCE_HASH,
                      a_record, assert_is_the_file_laszip_wrote, fixture,
@@ -776,3 +777,149 @@ def test_undocumented_bytes_are_not_built_here():
 def test_an_unknown_data_type_is_refused():
     with pytest.raises(Exception, match="data type"):
         extra_bytes_record([ExtraBytesAttribute(b"what", 99)])
+
+
+# ---------------------------------------------------------------------------
+# Coordinates, versions and the space a header keeps for its producer.
+#
+# The small things laszip's writing API has that this one did not: a way in
+# from georeferenced coordinates, offsets that make room for them, the two
+# LAS versions below 1.2, and the bytes a header may carry of its own.
+# ---------------------------------------------------------------------------
+
+def a_writer(point_format=1, **kwargs):
+    return Writer(io.BytesIO(), point_format, **kwargs)
+
+
+def at(writer, x, y, z):
+    """A point standing at a georeferenced coordinate."""
+    X, Y, Z = writer.unscale(x, y, z)
+    return Point(X=X, Y=Y, Z=Z)
+
+
+# A survey where the default offsets do not reach: a UTM northing stored to
+# the millimetre is six times what a point's integer holds from zero.
+MILLIMETRES = (0.001, 0.001, 0.001)
+SURVEY_MIN = (515000.0, 6748000.0, 0.0)
+SURVEY_MAX = (516000.0, 6749000.0, 400.0)
+# scales and offsets that do reach it, for the tests about rounding rather
+# than about range
+NEAR_SURVEY = (500000.0, 6700000.0, 0.0)
+CENTIMETRES = (0.01, 0.01, 0.001)
+
+
+def round_trip(coordinates, scales, offsets):
+    """What comes back out when these coordinates go in at these scales."""
+    buf = io.BytesIO()
+    with Writer(buf, 1, scales=scales, offsets=offsets) as writer:
+        for xyz in coordinates:
+            writer.write(at(writer, *xyz))
+    with Reader(io.BytesIO(buf.getvalue())) as reader:
+        return [reader.scale(point) for point in reader]
+
+
+class TestUnscale:
+    """The inverse of Reader.scale, which is laszip_set_coordinates."""
+
+    def test_it_is_the_inverse_of_scale(self):
+        wanted = [(515000.0, 6748000.0, 33.5), (515000.005, 6747999.995, 0.0),
+                  (499999.99, 6699999.99, -12.125)]
+
+        got = round_trip(wanted, CENTIMETRES, NEAR_SURVEY)
+
+        # back within a scale unit, which is as near as a coordinate stored as
+        # a multiple of one can be
+        for point, want in zip(got, wanted):
+            assert point == pytest.approx(want, abs=max(CENTIMETRES))
+
+    def test_a_half_rounds_away_from_zero_as_laszip_rounds_it(self):
+        """Python's own round() would send it to the nearer even number, and
+        a grid of points lands on halves constantly."""
+        with a_writer(scales=(1.0, 1.0, 1.0)) as writer:
+            assert writer.unscale(0.5, 1.5, 2.5) == (1, 2, 3)
+            assert writer.unscale(-0.5, -1.5, -2.5) == (-1, -2, -3)
+
+    def test_a_coordinate_that_does_not_fit_is_refused(self):
+        """Not wrapped into a point somewhere else entirely, which is what
+        laszip_check_for_integer_overflow exists to catch."""
+        with a_writer(scales=CENTIMETRES, offsets=NEAR_SURVEY) as writer:
+            with pytest.raises(ValueError, match="no point can hold"):
+                writer.unscale(1e9, 0.0, 0.0)
+
+
+class TestAutoOffsets:
+
+    def test_offsets_bring_a_survey_within_reach(self):
+        offsets = auto_offsets(SURVEY_MIN, SURVEY_MAX, MILLIMETRES)
+
+        got = round_trip([SURVEY_MIN, SURVEY_MAX], MILLIMETRES, offsets)
+
+        assert got == [SURVEY_MIN, SURVEY_MAX]
+
+    def test_the_default_offsets_would_not_have(self):
+        """Which is the reason to have this: from an offset of zero, a point
+        stored to the millimetre reaches about two million metres, and a
+        northing is three times that."""
+        with a_writer(scales=MILLIMETRES) as writer:
+            with pytest.raises(ValueError, match="no point can hold"):
+                writer.unscale(*SURVEY_MIN)
+
+    def test_they_are_round_numbers(self):
+        """laszip rounds each down to a multiple of ten million scale units,
+        so that neighbouring files are likely to share them."""
+        assert auto_offsets(SURVEY_MIN, SURVEY_MAX) == (500000.0, 6700000.0,
+                                                        0.0)
+
+    def test_a_scale_that_could_not_work_is_refused(self):
+        with pytest.raises(ValueError, match="must be positive"):
+            auto_offsets((0.0,) * 3, (1.0,) * 3, scales=(0.0, 1.0, 1.0))
+
+
+@pytest.mark.parametrize("version_minor", [0, 1])
+def test_the_las_versions_below_1_2(version_minor):
+    """Which lazpy has always read and would not write, so there were files
+    it could copy no further than."""
+    points, layout = source_points("pt1_v0.las")
+
+    data = written_file(1, None, points, layout, version_minor=version_minor)
+
+    with Reader(io.BytesIO(data)) as reader:
+        assert reader.header["version_minor"] == version_minor
+        assert reader.header["header_size"] == _header_size(version_minor)
+        assert reader.checksum() == REFERENCE_HASH["pt1_v0.las"]
+
+
+def test_colour_needs_las_12():
+    with pytest.raises(UnsupportedFileError, match="needs LAS 1.2"):
+        a_writer(point_format=2, version_minor=1)
+
+
+def test_the_default_version_is_not_the_oldest_one_that_would_do():
+    """Format 1 could be a LAS 1.0 file; a file written today should not
+    claim to predate the century."""
+    with a_writer() as writer:
+        assert writer.header["version_minor"] == 2
+
+
+def test_a_header_carries_the_user_data_it_was_given():
+    """The bytes between the fields LAS defines and the records behind them,
+    which the reader has always handed back and nothing could write."""
+    user_data = b"something of my own"
+    points, layout = source_points("pt1_v0.las")
+
+    data = written_file(1, None, points, layout, header_user_data=user_data)
+
+    with Reader(io.BytesIO(data)) as reader:
+        header = reader.header
+        assert header["user_data"] == user_data
+        assert header["header_size"] == _header_size(2, len(user_data))
+        assert header["offset_to_point_data"] == header["header_size"]
+        assert reader.checksum() == REFERENCE_HASH["pt1_v0.las"]
+
+
+def test_a_header_whose_length_stops_making_sense_is_refused():
+    """The one thing a caller may not do to writer.header before close."""
+    writer = a_writer()
+    writer.header["header_size"] = 300
+    with pytest.raises(LazError, match="but this file declares 300"):
+        writer.close()

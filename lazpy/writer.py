@@ -1,5 +1,7 @@
 """The writing front end: :class:`Writer` and what only it needs."""
 
+import math
+
 from ._cpylaz import PointWriter, LazError
 from ._utils import cstr, pack_cstr
 from .compat import _compatibility_payload, _disguise, _DISGUISED_FORMAT
@@ -8,17 +10,71 @@ from .formats import (EXTRA_BYTES_VLR_KEY, LASCOMPATIBLE_VLR_KEY,
                       LASZIP_VLR_KEY, Compressor,
                       Coder, UnsupportedFileError, _POINT_FORMATS,
                       items_for_point_format, _versioned_items,
-                      _min_version_minor)
+                      _default_version_minor, _min_version_minor)
 from .headers import (EVLR_HEADER_FORMAT, MAX_VLR_PAYLOAD, VLR_HEADER_FORMAT,
                       VLR_HEADER_SIZE, LASZIP_RECORD_FORMAT,
                       LASZIP_ITEM_FORMAT, header_formats, pack_format,
                       _header_size, _can_seek)
 
 
+# What a point's X, Y and Z can hold: they are signed 32-bit, and a coordinate
+# that does not fit is the one thing scaling and offsetting have to prevent.
+_I32_MIN, _I32_MAX = -0x80000000, 0x7FFFFFFF
+
+#: The scales a file is written to unless the caller says otherwise, in the
+#: units its coordinates are in -- centimetres, for a survey in metres.
+DEFAULT_SCALES = (0.01, 0.01, 0.01)
+
+
 def _as_i32(value):
     """A chunk size as the LASzip VLR declares it: signed, so the U32_MAX that
     selects variable-size chunks is written as -1."""
-    return value - 0x100000000 if value > 0x7FFFFFFF else value
+    return value - 0x100000000 if value > _I32_MAX else value
+
+
+def _quantize(value):
+    """A float as the integer a point holds, rounded laszip's way.
+
+    I32_QUANTIZE in LASzip's mydefs.hpp: a half goes away from zero, where
+    Python's own round() would send it to the nearer even number. The two
+    disagree on exactly the coordinates that land on a half scale unit, which
+    a grid of points does constantly.
+    """
+    return int(value + 0.5) if value >= 0 else int(value - 0.5)
+
+
+# laszip's own step for an automatic offset, out of laszip_auto_offset(): the
+# offset is rounded down to a multiple of ten million scale units, so that a
+# file's offsets are round numbers rather than wherever its middle happened to
+# fall, and two files of the same survey are likely to share them.
+_OFFSET_STEP = 10_000_000
+
+
+def auto_offsets(mins, maxs, scales=DEFAULT_SCALES):
+    """Offsets that bring a survey within reach of the integers a point holds.
+
+    ``mins`` and ``maxs`` are the ``(x, y, z)`` extremes of the points to be
+    written and ``scales`` what they will be stored to. The offsets returned
+    put the middle of that box near zero, which is what makes projected
+    coordinates fit in the signed 32-bit integer a point holds: a UTM
+    northing of six and a half million metres, stored to the millimetre, is
+    six times what that integer reaches from an offset of zero.
+
+    This is ``laszip_auto_offset()``, including its rounding of each offset
+    down to a multiple of ten million scale units.
+
+        >>> auto_offsets((515000.0, 6748000.0, 0.0),
+        ...              (516000.0, 6749000.0, 400.0))
+        (500000.0, 6700000.0, 0.0)
+    """
+    offsets = []
+    for low, high, scale in zip(mins, maxs, scales):
+        if not scale > 0:
+            raise ValueError(f"a scale factor must be positive, not {scale}")
+        middle = (low + high) / 2
+        offsets.append(math.floor(middle / scale / _OFFSET_STEP)
+                       * _OFFSET_STEP * scale)
+    return tuple(offsets)
 
 
 def _user_id(value):
@@ -167,13 +223,13 @@ class Writer:
     #: itself in the header's ``generating_software`` instead.
     LASZIP_VERSION = (3, 5, 1)
 
-    def __init__(self, filename, point_format, *, scales=(0.01, 0.01, 0.01),
+    def __init__(self, filename, point_format, *, scales=DEFAULT_SCALES,
                  offsets=(0.0, 0.0, 0.0), compressed=None, compressor=None,
                  laz_version=None, chunk_size=50000, num_extra_bytes=None,
                  version_minor=None, system_identifier=b'',
                  generating_software=None, vlrs=(), evlrs=(),
                  vlr_description=b'lazpy', file_creation=(0, 0),
-                 compatibility=False):
+                 compatibility=False, header_user_data=b''):
         """Open *filename* for writing points of *point_format*.
 
         ``compressed`` defaults to LAZ unless the name ends in ``.las``.
@@ -214,6 +270,11 @@ class Writer:
         point. It defaults to what the "extra bytes" record among ``vlrs``
         describes, and to none when there is no such record.
 
+        ``header_user_data`` is anything the caller keeps between the header
+        fields LAS defines and the records behind them, which is where a
+        producer may put whatever the format has no field for. It lengthens
+        the header by exactly its own length, which the header then states.
+
         ``compatibility`` writes a LAS 1.4 point format as the legacy file it
         can be disguised as, for readers that predate LAS 1.4; see
         :meth:`_disguise_as_legacy` for what that costs.
@@ -252,7 +313,7 @@ class Writer:
         if compressed is None:
             compressed = not str(filename).lower().endswith('.las')
         if version_minor is None:
-            version_minor = _min_version_minor(self.written_format)
+            version_minor = _default_version_minor(self.written_format)
         self._check_version(self.written_format, version_minor)
 
         #: The extended records to write behind the point data, which may be
@@ -287,18 +348,18 @@ class Writer:
         # packed before the header, because the header records how far past
         # itself the points begin
         block = b''.join(_pack_vlr(record) for record in records)
-        # the record the counts go back into leads the block, which is where
-        # _disguise_as_legacy put it
-        if self.compatibility:
-            self._compatibility_at = _header_size(version_minor) \
-                + VLR_HEADER_SIZE
 
         self._open(filename)
         try:
             self.header = self._build_header(
                 record_length, version_minor, len(records), len(block),
                 scales, offsets, system_identifier, generating_software,
-                file_creation)
+                file_creation, bytes(header_user_data))
+            # the record the counts go back into leads the block, which is
+            # where _disguise_as_legacy put it
+            if self.compatibility:
+                self._compatibility_at = (self.header['header_size']
+                                          + VLR_HEADER_SIZE)
             self.fp.write(self._pack_header(self.header))
             self.fp.write(block)
             self._writer = PointWriter(self.fp, self.items,
@@ -368,9 +429,9 @@ class Writer:
 
     @staticmethod
     def _check_version(point_format, version_minor):
-        if version_minor not in (2, 3, 4):
+        if version_minor not in (0, 1, 2, 3, 4):
             raise UnsupportedFileError(
-                f"lazpy writes LAS 1.2 to 1.4, not 1.{version_minor}")
+                f"lazpy writes LAS 1.0 to 1.4, not 1.{version_minor}")
         minimum = _min_version_minor(point_format)
         if version_minor < minimum:
             raise UnsupportedFileError(
@@ -437,8 +498,8 @@ class Writer:
 
     def _build_header(self, record_length, version_minor, num_records,
                       vlr_size, scales, offsets, system_identifier,
-                      generating_software, file_creation):
-        header_size = _header_size(version_minor)
+                      generating_software, file_creation, user_data):
+        header_size = _header_size(version_minor, len(user_data))
         day, year = file_creation
 
         header = {
@@ -456,6 +517,9 @@ class Writer:
             'file_creation_year': year,
             'header_size': header_size,
             'offset_to_point_data': header_size + vlr_size,
+            # written behind the fields above, which is what makes the header
+            # longer than its version's tables
+            'user_data': user_data,
             'number_of_variable_length_records': num_records,
             # the high bit is what tells a reader the points are compressed
             'point_data_format_id': (self.written_format
@@ -488,13 +552,15 @@ class Writer:
         file, in header_size and again in offset_to_point_data.
         """
         version_minor = header['version_minor']
-        if _header_size(version_minor) != header['header_size']:
+        user_data = header['user_data']
+        declared = _header_size(version_minor, len(user_data))
+        if declared != header['header_size']:
             raise LazError(
-                f"a LAS 1.{version_minor} header is "
-                f"{_header_size(version_minor)} bytes, but this file "
-                f"declares {header['header_size']}")
+                f"a LAS 1.{version_minor} header and {len(user_data)} bytes "
+                f"of user data are {declared} bytes, but this file declares "
+                f"{header['header_size']}")
         return b''.join(pack_format(fmt, header)
-                        for fmt in header_formats(version_minor))
+                        for fmt in header_formats(version_minor)) + user_data
 
     def _laszip_record(self, description):
         """The LASzip record, the inverse of Reader._parse_laszip_record."""
@@ -531,6 +597,39 @@ class Writer:
         Raises ValueError once the writer is closed.
         """
         self._writer.write(point)
+
+    def unscale(self, x, y, z):
+        """The integer coordinates a point standing at ``(x, y, z)`` holds.
+
+        The inverse of :meth:`Reader.scale`, and ``laszip_set_coordinates()``:
+        it takes the georeferenced coordinate a survey is in and returns what
+        a point stores, through this file's own scales and offsets.
+
+            >>> X, Y, Z = writer.unscale(x, y, z)       # doctest: +SKIP
+            >>> writer.write(Point(X=X, Y=Y, Z=Z, classification=2))
+
+        A half scale unit rounds away from zero, which is what laszip does and
+        not what Python's round() does. A coordinate these scales and offsets
+        cannot reach raises rather than wrapping into a point somewhere else
+        entirely -- laszip checks the same thing once, over the bounding box,
+        in laszip_check_for_integer_overflow(); :func:`auto_offsets` is how to
+        pick offsets a survey does fit inside.
+        """
+        # read out of the header rather than cached as Reader caches them:
+        # a caller may set an offset through writer.header until close
+        header = self.header
+        stored = []
+        for value, axis in zip((x, y, z), 'xyz'):
+            scale = header[f'{axis}_scale_factor']
+            offset = header[f'{axis}_offset']
+            quantized = _quantize((value - offset) / scale)
+            if not _I32_MIN <= quantized <= _I32_MAX:
+                raise ValueError(
+                    f"{axis} = {value} is {quantized} at this file's scale "
+                    f"of {scale} and offset of {offset}, which no point can "
+                    f"hold; a coarser scale or a nearer offset would")
+            stored.append(quantized)
+        return tuple(stored)
 
     def chunk(self):
         """Close the open chunk, for variable-size chunking.

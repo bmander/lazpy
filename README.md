@@ -173,10 +173,29 @@ with Writer("out.laz", point_format=1,
     ...
 ```
 
+Points are written as they are given, so georeferenced coordinates have to be
+turned into the integers a point stores. `unscale()` is that — the inverse of
+`Reader.scale`, rounding as laszip rounds — and `auto_offsets()` picks offsets
+a survey fits inside, which for projected coordinates it will not by default:
+
+```python
+from lazpy import auto_offsets
+
+offsets = auto_offsets(mins, maxs, scales)        # mins, maxs of the survey
+with Writer("out.laz", point_format=1, offsets=offsets,
+            scales=(0.001, 0.001, 0.001)) as writer:
+    X, Y, Z = writer.unscale(515000.0, 6748000.0, 33.5)
+    writer.write(Point(X=X, Y=Y, Z=Z, classification=2))
+```
+
+A coordinate these scales and offsets cannot reach raises rather than wrapping
+into a point somewhere else entirely.
+
 The compressor follows the file name — `.las` writes plain LAS — and the item
 version follows the point format, as laszip's own default does: v2 for formats
 0–5, v3 for 6–10. `laz_version=` overrides it. `chunk_size=` sets how many
-points share a chunk.
+points share a chunk. `version_minor=` picks the LAS version: 1.0 to 1.4, or
+1.2 by default unless the point format needs newer.
 
 ## Example: LAZ to GeoTIFF
 

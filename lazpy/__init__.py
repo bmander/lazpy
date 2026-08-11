@@ -45,9 +45,9 @@ from .headers import (header_formats, format_size,  # noqa: F401
 from .extra_bytes import (ExtraBytesAttribute,  # noqa: F401
                           extra_bytes_record)
 from .reader import Reader, ExtendedVariableLengthRecord  # noqa: F401
-from .writer import Writer  # noqa: F401
+from .writer import Writer, auto_offsets  # noqa: F401
 
 __all__ = ["Reader", "Writer", "Point", "Chunking", "Compressor", "Coder",
            "ItemType", "Selective", "LazError", "UnsupportedFileError",
            "ExtendedVariableLengthRecord", "ExtraBytesAttribute",
-           "extra_bytes_record"]
+           "extra_bytes_record", "auto_offsets"]
