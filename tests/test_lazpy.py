@@ -12,6 +12,10 @@ import encoder
 import lazpy
 import models
 from lazpy import _cpylaz as cpylaz
+from lazpy.compat import _compatibility_layout, _extra_bytes_attributes
+from lazpy.formats import _POINT_FORMATS
+from lazpy.headers import _header_size
+from lazpy.reader import _fields_for_point_format
 from lazpy import (Chunking, Compressor, LASZIP_VLR_KEY,
                    LASZIP_VLR_RECORD_ID, LASZIP_VLR_USER_ID, Point, Reader,
                    Selective, ItemType, LazError, UnsupportedFileError,
@@ -1277,12 +1281,12 @@ def test_a_compatibility_file_reads_as_the_las_14_file_it_stands_in(name):
         assert reader.num_extra_bytes == f.extra
         # the hidden bytes are gone and the wider LAS 1.4 fields are there
         assert header_field(data, "point_data_record_length") == (
-            lazpy._POINT_FORMATS[f.legacy][0] + f.extra + f.hidden)
+            _POINT_FORMATS[f.legacy][0] + f.extra + f.hidden)
         assert header["point_data_record_length"] == (
-            lazpy._POINT_FORMATS[f.upgraded][0] + f.extra)
+            _POINT_FORMATS[f.upgraded][0] + f.extra)
         # the header grows by exactly the tables LAS 1.4 has and 1.2/1.3 do not
-        grew = lazpy._header_size(4) - lazpy._header_size(f.minor)
-        assert header["header_size"] == lazpy._header_size(4)
+        grew = _header_size(4) - _header_size(f.minor)
+        assert header["header_size"] == _header_size(4)
         assert header["header_size"] == (
             header_field(data, "header_size") + grew)
         assert header["offset_to_point_data"] == (
@@ -1329,7 +1333,7 @@ def test_the_records_describing_the_disguise_are_gone(name):
         return
     attributes = vlrs[lazpy.EXTRA_BYTES_VLR_KEY]
     attribute_names = [a.name for a
-                       in lazpy._extra_bytes_attributes(attributes["data"])]
+                       in _extra_bytes_attributes(attributes["data"])]
     assert not any(n.startswith(b"LAS 1.4 ") for n in attribute_names)
     assert len(attribute_names) == extra
     assert attributes["record_length_after_header"] == len(attributes["data"])
@@ -1394,7 +1398,7 @@ def test_an_ordinary_file_is_left_alone(name):
     with Reader(fixture(name)) as reader:
         vlrs = reader.header["variable_length_records"]
         assert lazpy.LASCOMPATIBLE_VLR_KEY not in vlrs
-        assert lazpy._compatibility_layout(reader.header) is None
+        assert _compatibility_layout(reader.header) is None
 
 
 class TestCompatibilityLayoutIsChecked:
@@ -1443,26 +1447,26 @@ class TestExtraBytesAttributes:
         data = (self.descriptor(b"a", 3)        # I16, two bytes
                 + self.descriptor(b"b", 1)      # U8, one byte
                 + self.descriptor(b"c", 10))    # F64, eight bytes
-        assert list(lazpy._extra_bytes_attributes(data)) == [
+        assert list(_extra_bytes_attributes(data)) == [
             (b"a", 0, 0, 2), (b"b", 192, 2, 1), (b"c", 384, 3, 8)]
 
     def test_an_undocumented_attribute_is_as_wide_as_it_says(self):
         """Data type 0 means bytes nobody described, however many of them."""
         data = self.descriptor(b"raw", 0, options=13)
-        assert list(lazpy._extra_bytes_attributes(data)) == [
+        assert list(_extra_bytes_attributes(data)) == [
             (b"raw", 0, 0, 13)]
 
     def test_a_trailing_partial_descriptor_is_ignored(self):
         data = self.descriptor(b"a", 1) + b"\0" * 40
         assert [name for name, _, _, _
-                in lazpy._extra_bytes_attributes(data)] == [b"a"]
+                in _extra_bytes_attributes(data)] == [b"a"]
 
     def test_an_unknown_data_type_is_refused(self):
         """Sizing it wrong would put every attribute after it in the wrong
         place, which is worse than saying so."""
         data = self.descriptor(b"a", 99)
         with pytest.raises(UnsupportedFileError, match="data type 99"):
-            list(lazpy._extra_bytes_attributes(data))
+            list(_extra_bytes_attributes(data))
 
 
 # ---------------------------------------------------------------------------
@@ -3583,7 +3587,7 @@ class TestRectangleQueriesAsArrays:
         rect = (1498, 1699, 1500, 1701)
         with Reader(fixture("pt1_v2.laz")) as reader:
             a = reader.arrays_within(rect=rect)
-            expected = lazpy._fields_for_point_format(
+            expected = _fields_for_point_format(
                 reader.point_format, reader.num_extra_bytes)
         assert sorted(a) == sorted(expected)
         # the sub-byte fields are unpacked from the byte they share, and
