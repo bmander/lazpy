@@ -1,10 +1,12 @@
 
+import io
+
 import pytest
 
 import lazpy
-from lazpy import (Chunking, Compressor, Reader, Selective, ItemType, LazError,
-                   UnsupportedFileError)
-from helpers import FIXTURES, REFERENCE_HASHES, fixture
+from lazpy import (Chunking, Compressor, Point, Reader, Selective, ItemType,
+                   LazError, UnsupportedFileError, Writer)
+from helpers import FIXTURES, REFERENCE_HASHES, fixture, load
 
 
 # ---------------------------------------------------------------------------
@@ -342,3 +344,32 @@ class TestErrors:
         with pytest.raises(PermissionError):
             for _ in range(reader.num_points):
                 reader.read()
+
+
+# ---------------------------------------------------------------------------
+# What a file keeps of its own: the bytes inside the header, and the ones
+# between the last record and the first point. laszip carries both as
+# user_data_in_header and user_data_after_header; a copy that dropped them
+# would not be a copy.
+# ---------------------------------------------------------------------------
+
+def test_the_padding_before_the_points_is_kept():
+    buf = io.BytesIO()
+    with Writer(buf, 1, user_data_after_header=b"mine") as writer:
+        writer.write(Point(X=1))
+
+    with Reader(io.BytesIO(buf.getvalue())) as reader:
+        assert reader.header["user_data_after_header"] == b"mine"
+        assert reader.read().X == 1
+
+
+@pytest.mark.parametrize("name", FIXTURES)
+def test_a_file_with_no_padding_says_so(name):
+    """An always-present key, so nothing has to ask whether a file has any."""
+    assert load(name).header["user_data_after_header"] == b""
+
+
+def test_a_clean_file_has_no_warnings():
+    with Reader(fixture("pt1_v2.laz")) as reader:
+        assert reader.warnings == ()
+        assert reader.warning is None

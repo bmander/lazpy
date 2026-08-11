@@ -387,10 +387,19 @@ class Reader:
         # keyed by (user_id, record_id), as the extended records are; see
         # LASZIP_VLR_KEY for why the id alone is not a key
         header['variable_length_records'] = {}
+        consumed = header['header_size']
         for _ in range(header['number_of_variable_length_records']):
             vlr = cls._read_variable_length_record(fp)
             header['variable_length_records'][
                 (vlr['user_id'], vlr['record_id'])] = vlr
+            consumed += VLR_HEADER_SIZE + len(vlr['data'])
+
+        # Whatever lies between the last record and the point data is the
+        # file's own too, as the bytes inside the header are. Counted rather
+        # than measured with tell(), which a stream need not answer, and read
+        # here because the points begin where it ends.
+        padding = header['offset_to_point_data'] - consumed
+        header['user_data_after_header'] = fp.read(max(0, padding))
 
         return header
 
@@ -574,19 +583,31 @@ class Reader:
         return self._reader.index
 
     @property
-    def warning(self):
-        """A non-fatal problem found while reading, or None.
+    def warnings(self):
+        """The non-fatal problems found while reading this file, as a tuple.
 
-        Set when the chunk table is missing or corrupt, which is recoverable
-        but costs random access -- seeking then has to decode forward instead
-        of jumping to a chunk -- and when the extended variable length records
-        behind the point data are fewer than the header claims.
+        Each is something recoverable: a chunk table that is missing or
+        corrupt, which costs random access -- seeking then has to decode
+        forward instead of jumping to a chunk -- or extended records behind
+        the point data that are fewer than the header claims. The chunk table
+        comes first, being the one that affects reading points.
 
-        The chunk table comes first when both are true: it is the one that
-        affects reading points.
+        A spatial index has warnings of its own, under
+        ``spatial_index.warning``; they are not here because asking would
+        make every reader go looking for an index it may never want.
         """
         table = self._reader.warning if self._reader is not None else None
-        return table or self._evlr_warning
+        return tuple(w for w in (table, self._evlr_warning) if w)
+
+    @property
+    def warning(self):
+        """The first of :attr:`warnings`, or None.
+
+        What to look at when one warning is as good as another, which for
+        reporting a file is usually the case.
+        """
+        found = self.warnings
+        return found[0] if found else None
 
     # -- reading ---------------------------------------------------------
 
@@ -730,37 +751,60 @@ class Reader:
         whether a rectangle query can skip most of the file."""
         return self.spatial_index is not None
 
-    def _region(self, min_x, min_y, max_x, max_y):
-        """What the C side needs to answer a rectangle query.
+    def _region(self, rect=None, circle=None):
+        """What the C side needs to answer a query over an area.
 
-        A pair: the region -- the rectangle, then the scale and offset that
-        put a point in it, as eight floats the C side takes as one argument
-        -- and the half-open ``(start, stop)`` spans of point indices to look
-        through. The spans are the index's intervals clamped against the
-        point count, or the whole file where there is no index; clamping here
-        is what keeps the core from needing to know how many points the file
-        claims.
+        The area is a rectangle ``(min_x, min_y, max_x, max_y)`` or a circle
+        ``(center_x, center_y, radius)``, one or the other.
+
+        A pair: the region -- the rectangle, the scale and offset that put a
+        point in it, and the circle, as eleven floats the C side takes as one
+        argument -- and the half-open ``(start, stop)`` spans of point indices
+        to look through. The spans are the index's intervals clamped against
+        the point count, or the whole file where there is no index; clamping
+        here is what keeps the core from needing to know how many points the
+        file claims.
         """
-        if min_x > max_x or min_y > max_y:
-            raise ValueError("rectangle is inside out: "
-                             "min must not exceed max")
+        if (rect is None) == (circle is None):
+            raise TypeError("a query is over a rectangle or a circle")
+
+        if circle is None:
+            min_x, min_y, max_x, max_y = rect
+            center_x = center_y = radius = 0.0
+            if min_x > max_x or min_y > max_y:
+                raise ValueError("rectangle is inside out: "
+                                 "min must not exceed max")
+        else:
+            center_x, center_y, radius = circle
+            if radius < 0:
+                raise ValueError("a circle's radius cannot be negative")
+            # the rectangle goes unread for a circle: the index is asked for
+            # the circle itself, and so is every candidate point
+            min_x = min_y = max_x = max_y = 0.0
 
         index = self.spatial_index
         num_points = self.num_points
-        if index is None:
+        if circle is not None and not radius:
+            spans = []                      # a circle of no size holds nothing
+        elif index is None:
             spans = [(0, num_points)]
         else:
+            if circle is None:
+                intervals = index.intervals(min_x, min_y, max_x, max_y)
+            else:
+                intervals = index.intervals_within_circle(center_x, center_y,
+                                                          radius)
             # an index is data out of a file like any other, and one that
             # names points this file does not have is not worth decoding
             # towards
             spans = [(start, min(end + 1, num_points))
-                     for start, end in index.intervals(min_x, min_y,
-                                                       max_x, max_y)
+                     for start, end in intervals
                      if start < num_points]
 
         scales, offsets = self.scales, self.offsets
         region = (min_x, min_y, max_x, max_y,
-                  scales[0], scales[1], offsets[0], offsets[1])
+                  scales[0], scales[1], offsets[0], offsets[1],
+                  center_x, center_y, radius)
         return region, spans
 
     def points_within(self, min_x, min_y, max_x, max_y):
@@ -781,7 +825,26 @@ class Reader:
         wherever the last interval ended, so :meth:`seek` before reading
         sequentially again.
         """
-        region, spans = self._region(min_x, min_y, max_x, max_y)
+        return self._points_in(*self._region(rect=(min_x, min_y,
+                                                   max_x, max_y)))
+
+    def points_within_circle(self, center_x, center_y, radius):
+        """Yield the points inside a circle, in file order.
+
+        :meth:`points_within` over a circle rather than a rectangle, which is
+        what selecting around a point wants. A point counts when it is
+        strictly nearer the centre than `radius`, in the georeferenced
+        coordinates :meth:`scale` returns.
+
+        With a spatial index this reaches fewer cells than the square around
+        the circle would -- the corners of that square are cells a circle
+        never touches -- so it decodes less as well as returning less.
+        """
+        return self._points_in(*self._region(circle=(center_x, center_y,
+                                                     radius)))
+
+    def _points_in(self, region, spans):
+        """Yield the points a query selects, interval by interval."""
         read_within = self._reader.read_within
         for start, stop in spans:
             self.seek(start)
@@ -893,23 +956,26 @@ class Reader:
                              else column[:count])
         return out
 
-    def arrays_within(self, *names, rect):
-        """The points inside a rectangle, as numpy arrays.
+    def arrays_within(self, *names, rect=None, circle=None):
+        """The points inside a rectangle or a circle, as numpy arrays.
 
         :meth:`arrays` and :meth:`points_within` in one: the fields *names*
-        asks for, of the points ``rect`` -- ``(min_x, min_y, max_x, max_y)``
-        -- contains, selected the same way and with the same half-open edges.
+        asks for, of the points the area contains, selected the same way and
+        with the same edges. The area is ``rect``, which is
+        ``(min_x, min_y, max_x, max_y)``, or ``circle``, which is
+        ``(center_x, center_y, radius)``.
 
         The index decides which points to decode, and the array path decides
         how cheaply to hand them over::
 
             a = reader.arrays_within("X", "Y", "Z", rect=(x0, y0, x1, y1))
+            a = reader.arrays_within("X", "Y", circle=(x, y, 30.0))
 
         Arrays are sized for every candidate the index turns up and trimmed
         to what was really inside, so a query briefly holds more than it
         returns. The reader is left wherever the last interval ended.
         """
-        region, spans = self._region(*rect)
+        region, spans = self._region(rect=rect, circle=circle)
         candidates = sum(stop - start for start, stop in spans)
         out, targets, packed = self._array_columns(names, candidates)
 
@@ -924,13 +990,14 @@ class Reader:
 
         return self._finish_columns(out, packed, found)
 
-    def xyz_within(self, rect):
-        """The georeferenced points inside a rectangle, as ``(N, 3)`` floats.
+    def xyz_within(self, rect=None, circle=None):
+        """The georeferenced points inside an area, as ``(N, 3)`` floats.
 
-        :meth:`xyz` restricted to ``rect``, which is
-        ``(min_x, min_y, max_x, max_y)`` as :meth:`arrays_within` takes it.
+        :meth:`xyz` restricted to ``rect`` or ``circle``, which are what
+        :meth:`arrays_within` takes them to be.
         """
-        return self._scaled_xyz(self.arrays_within('X', 'Y', 'Z', rect=rect))
+        return self._scaled_xyz(self.arrays_within('X', 'Y', 'Z', rect=rect,
+                                                   circle=circle))
 
     def xyz(self, start=None, count=None):
         """The georeferenced points, as an ``(N, 3)`` array of floats.

@@ -24,7 +24,8 @@
  *     repeatedly gets one interval per crossing, up to the gap threshold the
  *     builder allowed.
  *
- * A query intersects the rectangle with the tree, takes the intervals of every
+ * A query intersects its rectangle -- or, for a circle, the square around it
+ * -- with the tree, takes the intervals of every
  * cell it hits, and merges them into one ascending list. The points in those
  * intervals are a superset of the points inside the rectangle -- a cell is
  * coarser than the query, and an interval may span points from other cells --
@@ -51,8 +52,9 @@ typedef struct {
  * per cell saying whether that cell was subdivided.
  *
  * The reference class also carries a sub-level for tiling, which only its
- * tiling_setup() sets and which reading a file never does; it is left out here
- * along with the tiling and circle queries that use it.
+ * tiling_setup() sets and which reading a file never does; it is left out
+ * here, along with the tile queries that use it. The circle query, which does
+ * not, is laz_index_intersect_circle.
  *
  * Coordinates are F32 rather than F64 on purpose. The file stores the bounding
  * box as four floats, and the cell midpoints the descent computes are floats
@@ -120,6 +122,14 @@ BOOL laz_index_read(LazIndex *ix, LazStream *stream);
  */
 BOOL laz_index_intersect_rectangle(LazIndex *ix, F64 min_x, F64 min_y,
                                    F64 max_x, F64 max_y);
+
+/*
+ * The same for the points inside a circle, which is what selecting around a
+ * point wants: the cells a rectangle query would reach, less the corners the
+ * circle does not touch. A radius of nothing leaves no intervals behind.
+ */
+BOOL laz_index_intersect_circle(LazIndex *ix, F64 center_x, F64 center_y,
+                                F64 radius);
 
 void laz_index_destroy(LazIndex *ix);
 

@@ -229,7 +229,8 @@ class Writer:
                  version_minor=None, system_identifier=b'',
                  generating_software=None, vlrs=(), evlrs=(),
                  vlr_description=b'lazpy', file_creation=(0, 0),
-                 compatibility=False, header_user_data=b''):
+                 compatibility=False, user_data_in_header=b'',
+                 user_data_after_header=b''):
         """Open *filename* for writing points of *point_format*.
 
         ``compressed`` defaults to LAZ unless the name ends in ``.las``.
@@ -270,10 +271,14 @@ class Writer:
         point. It defaults to what the "extra bytes" record among ``vlrs``
         describes, and to none when there is no such record.
 
-        ``header_user_data`` is anything the caller keeps between the header
-        fields LAS defines and the records behind them, which is where a
-        producer may put whatever the format has no field for. It lengthens
-        the header by exactly its own length, which the header then states.
+        ``user_data_in_header`` is anything the caller keeps between the
+        header fields LAS defines and the records behind them, which is where
+        a producer may put whatever the format has no field for; it lengthens
+        the header by exactly its own length, and comes back as
+        ``header["user_data"]``. ``user_data_after_header`` is the same for
+        the space between the last record and the first point, which the
+        header states by aiming ``offset_to_point_data`` past it. laszip
+        carries both under those names.
 
         ``compatibility`` writes a LAS 1.4 point format as the legacy file it
         can be disguised as, for readers that predate LAS 1.4; see
@@ -348,13 +353,15 @@ class Writer:
         # packed before the header, because the header records how far past
         # itself the points begin
         block = b''.join(_pack_vlr(record) for record in records)
+        block += bytes(user_data_after_header)
 
         self._open(filename)
         try:
             self.header = self._build_header(
                 record_length, version_minor, len(records), len(block),
                 scales, offsets, system_identifier, generating_software,
-                file_creation, bytes(header_user_data))
+                file_creation, user_data=bytes(user_data_in_header),
+                padding=bytes(user_data_after_header))
             # the record the counts go back into leads the block, which is
             # where _disguise_as_legacy put it
             if self.compatibility:
@@ -498,7 +505,8 @@ class Writer:
 
     def _build_header(self, record_length, version_minor, num_records,
                       vlr_size, scales, offsets, system_identifier,
-                      generating_software, file_creation, user_data):
+                      generating_software, file_creation, user_data,
+                      padding):
         header_size = _header_size(version_minor, len(user_data))
         day, year = file_creation
 
@@ -520,6 +528,11 @@ class Writer:
             # written behind the fields above, which is what makes the header
             # longer than its version's tables
             'user_data': user_data,
+            # what was written behind the records rather than in the header,
+            # so that a reader copying this file on finds it where it found
+            # the source's. Already written by the time this is built, unlike
+            # every other field here.
+            'user_data_after_header': padding,
             'number_of_variable_length_records': num_records,
             # the high bit is what tells a reader the points are compressed
             'point_data_format_id': (self.written_format
