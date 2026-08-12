@@ -158,6 +158,58 @@ class TestPointSemantics:
             assert got == want
 
 
+class TestReaderLifecycle:
+    """
+    The three states a Reader can be in, and what each one answers.
+
+    A Reader can be built without a file and opened later, which is what
+    makes "not open yet" a state rather than an impossibility, and it can be
+    closed. Both used to be reported by whatever an internal None happened to
+    do next -- an AttributeError from one, a TypeError from the other -- for
+    a condition Writer already answers with a ValueError.
+    """
+
+    def test_a_reader_that_was_never_opened_says_so(self):
+        reader = Reader()
+        for use in (lambda: reader.read(), lambda: reader.num_points,
+                    lambda: len(reader), lambda: reader.scales,
+                    lambda: reader.index, lambda: list(reader.points())):
+            with pytest.raises(ValueError, match="not open"):
+                use()
+
+    def test_a_closed_reader_says_so(self):
+        reader = Reader(fixture("pt1_v2.laz"))
+        reader.close()
+        for use in (lambda: reader.read(), lambda: reader.seek(0),
+                    lambda: reader.index, lambda: list(reader.points())):
+            with pytest.raises(ValueError, match="closed"):
+                use()
+
+    def test_a_closed_reader_still_describes_its_file(self):
+        """The header was read once and the file it describes has not
+        changed, so keeping it is useful rather than untidy -- and it is the
+        reason closed and never-opened have to be told apart."""
+        reader = Reader(fixture("pt1_v2.laz"))
+        count, scales = reader.num_points, reader.scales
+        reader.close()
+        assert (reader.num_points, reader.scales) == (count, scales)
+
+    def test_opening_again_does_not_strand_the_first_file(self):
+        """__init__ takes the filename optionally so that open() can be
+        called separately, which invites calling it twice."""
+        reader = Reader(fixture("pt1_v2.laz"))
+        first = reader.fp
+        reader.open(fixture("pt2_v2.laz"))
+        assert first.closed
+        assert reader.read() is not None      # and the second one works
+
+    def test_a_lent_file_is_still_not_ours_to_close(self):
+        with open(fixture("pt1_v2.laz"), "rb") as fp:
+            reader = Reader(fp)
+            reader.open(fixture("pt2_v2.laz"))
+            assert not fp.closed
+
+
 class TestFileProperties:
     def test_compressed_and_uncompressed_agree(self):
         """The .las and .laz of a legacy format hold the same points."""

@@ -223,7 +223,11 @@ class Reader:
         self.fp = None
         self.header = None
         self.laz_header = None
+        self.items = None
+        self.num_extra_bytes = None
+        self._scale_offset = None
         self._reader = None
+        self._was_opened = False
         self._owns_fp = False
         self._evlr_warning = None
         self._path = None
@@ -238,7 +242,12 @@ class Reader:
     # -- construction ----------------------------------------------------
 
     def open(self, filename):
-        """Open a file by path. Also accepts an already-open binary file."""
+        """Open a file by path. Also accepts an already-open binary file.
+
+        A reader that was already open is closed first, so opening a second
+        file through the same object does not strand the first one's handle.
+        """
+        self.close()
         self._path = None
         self._index = None
         self._index_looked_for = False
@@ -257,6 +266,7 @@ class Reader:
         except Exception:
             self.close()
             raise
+        self._was_opened = True
         return self
 
     def _setup(self):
@@ -518,6 +528,27 @@ class Reader:
 
     # -- properties ------------------------------------------------------
 
+    def _points(self):
+        """The point reader, or a refusal saying why there is not one.
+
+        Everything that touches the points goes through here, so that a
+        reader with no file behind it says so in one recognisable way rather
+        than letting an internal None surface as whatever the next line
+        happens to do with it. ValueError, and closed-means-closed, are what
+        :class:`Writer` already answers in the same situation.
+        """
+        if self._reader is None:
+            raise ValueError("reader is closed" if self._was_opened
+                             else "reader is not open")
+        return self._reader
+
+    def _fields(self):
+        """The header, or the same refusal. Kept after close, since it was
+        read once and describes a file that has not changed."""
+        if self.header is None:
+            raise ValueError("reader is not open")
+        return self.header
+
     @property
     def num_points(self):
         """How many points the file holds, which is also ``len(reader)``.
@@ -525,7 +556,7 @@ class Reader:
         The LAS 1.4 count where the header has one, since the legacy field
         is only 32 bits and saturates.
         """
-        return self.header['number_of_point_records']
+        return self._fields()['number_of_point_records']
 
     @property
     def chunking(self):
@@ -563,7 +594,7 @@ class Reader:
         the 1.4 format a compatibility-mode file stands in for rather than
         the legacy one it is written as.
         """
-        return self.header['point_data_format_id']
+        return self._fields()['point_data_format_id']
 
     @property
     def is_compressed(self):
@@ -578,19 +609,19 @@ class Reader:
         :attr:`offsets` gives the georeferenced coordinate. :meth:`scale`
         does this.
         """
-        h = self.header
+        h = self._fields()
         return (h['x_scale_factor'], h['y_scale_factor'], h['z_scale_factor'])
 
     @property
     def offsets(self):
         """``(x, y, z)`` offsets, added to the scaled coordinates."""
-        return (self.header['x_offset'], self.header['y_offset'],
-                self.header['z_offset'])
+        h = self._fields()
+        return (h['x_offset'], h['y_offset'], h['z_offset'])
 
     @property
     def index(self):
         """Index of the next point to be read."""
-        return self._reader.index
+        return self._points().index
 
     @property
     def warnings(self):
@@ -627,7 +658,7 @@ class Reader:
         The returned :class:`Point` is the reader's own buffer and is
         overwritten by the next ``read()``; call ``point.copy()`` to keep it.
         """
-        return self._reader.read()
+        return self._points().read()
 
     def checksum(self, count=None):
         """Decode *count* points and return ``(fnv1a_hash, points_read)``.
@@ -639,13 +670,13 @@ class Reader:
         """
         if count is None:
             count = self.num_points - self.index
-        return self._reader.checksum(max(0, count))
+        return self._points().checksum(max(0, count))
 
     def seek(self, index):
         """Position the reader so the next ``read()`` returns point *index*."""
         if index < 0 or index > self.num_points:
             raise IndexError(f"point index {index} out of range")
-        self._reader.seek(index)
+        self._points().seek(index)
 
     def scale(self, point):
         """Return the georeferenced (x, y, z) of *point* as floats."""
@@ -661,7 +692,7 @@ class Reader:
         if start:
             self.seek(start)
         remaining = self.num_points - start if count is None else count
-        read = self._reader.read      # hoisted: this loop runs per point
+        read = self._points().read      # hoisted: this loop runs per point
         for _ in range(remaining):
             yield read()
 
@@ -765,7 +796,7 @@ class Reader:
         self.seek(0)
         bounds = self._point_bounds()
         self.seek(0)
-        return self._reader.build_index(
+        return self._points().build_index(
             self.num_points, bounds, self.scales[:2], self.offsets[:2],
             float(cell_size), int(minimum_points), int(maximum_intervals),
             _RUN_GAP)
@@ -778,7 +809,7 @@ class Reader:
         would get a tree with everything in one cell. laszip's own index
         creation goes by the points too.
         """
-        stored = self._reader.bounds(self.num_points)
+        stored = self._points().bounds(self.num_points)
         scales, offsets = self.scales, self.offsets
         return tuple(value * scales[i % 2] + offsets[i % 2]
                      for i, value in enumerate(stored))
@@ -922,7 +953,7 @@ class Reader:
 
     def _points_in(self, region, spans):
         """Yield the points a query selects, interval by interval."""
-        read_within = self._reader.read_within
+        read_within = self._points().read_within
         for start, stop in spans:
             self.seek(start)
             while True:
@@ -980,7 +1011,7 @@ class Reader:
                                              self.num_extra_bytes)
 
         out, targets, packed = self._array_columns(names, count)
-        self._reader.read_into(targets, count)
+        self._points().read_into(targets, count)
         return self._finish_columns(out, packed, count)
 
     def _array_columns(self, names, count):
@@ -1061,7 +1092,7 @@ class Reader:
             self.seek(start)
             # each interval writes behind what the last one found, so the
             # columns are handed over sliced from there
-            found += self._reader.read_into_within(
+            found += self._points().read_into_within(
                 [(column[found:], offset, size)
                  for column, offset, size in targets], stop, region)
 
