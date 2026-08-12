@@ -29,6 +29,10 @@ numpy = ["numpy"]
 # Read the Docs installs these; so does the docs job in CI.
 docs = ["sphinx>=7", "furo", "myst-parser"]
 
+# The file summariser, also reachable as `python -m lazpy`.
+[project.scripts]
+lazpy = "lazpy.__main__:main"
+
 [project.urls]
 Homepage = "https://github.com/bmander/lazpy"
 Documentation = "https://lazpy.readthedocs.io"
