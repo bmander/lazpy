@@ -518,7 +518,9 @@ BOOL laz_readpoint_seek(LazReadPoint *rp, U64 current, U64 target)
             if (rp->current_chunk < (rp->tabled_chunks - 1)) {
                 laz_decoder_done(&rp->dec);
                 rp->current_chunk = rp->tabled_chunks - 1;
-                laz_stream_seek(rp->instream, rp->chunk_starts[rp->current_chunk]);
+                if (!laz_stream_seek(rp->instream,
+                                     rp->chunk_starts[rp->current_chunk]))
+                    return LAZ_FALSE;
                 if (!init_dec(rp)) return LAZ_FALSE;
                 rp->chunk_count = 0;
             }
@@ -526,7 +528,9 @@ BOOL laz_readpoint_seek(LazReadPoint *rp, U64 current, U64 target)
         } else if (rp->current_chunk != target_chunk || current > target) {
             laz_decoder_done(&rp->dec);
             rp->current_chunk = target_chunk;
-            laz_stream_seek(rp->instream, rp->chunk_starts[rp->current_chunk]);
+            if (!laz_stream_seek(rp->instream,
+                                 rp->chunk_starts[rp->current_chunk]))
+                return LAZ_FALSE;
             if (!init_dec(rp)) return LAZ_FALSE;
             rp->chunk_count = 0;
         } else {
@@ -534,7 +538,7 @@ BOOL laz_readpoint_seek(LazReadPoint *rp, U64 current, U64 target)
         }
     } else if (current > target) {
         laz_decoder_done(&rp->dec);
-        laz_stream_seek(rp->instream, rp->point_start);
+        if (!laz_stream_seek(rp->instream, rp->point_start)) return LAZ_FALSE;
         if (!init_dec(rp)) return LAZ_FALSE;
         delta = target;
     } else if (current < target) {
