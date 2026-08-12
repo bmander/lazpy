@@ -68,6 +68,13 @@ class Chunking(Enum):
     ADAPTIVE = 'adaptive'  # variable-size chunks; the chunk table has them
 
 
+#: The ``chunk_size`` that asks :class:`Writer` for adaptive chunking, where
+#: the caller ends each chunk itself with ``chunk()``. Reading names that
+#: state -- ``Chunking.ADAPTIVE`` -- and writing had only the number, so a
+#: caller wanting it had to know a magic constant from a docstring.
+ADAPTIVE_CHUNK_SIZE = 0xFFFFFFFF
+
+
 class Selective(IntEnum):
     """Attributes to decode, for the layered LAS 1.4 point formats.
 

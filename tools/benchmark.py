@@ -47,14 +47,14 @@ def generate(points, chunk_size, point_format):
 
 
 def best_of(repeat, fn):
-    """The fastest run, and whatever it returned."""
+    """The fastest run, and what that run returned."""
     best, value = None, None
     for _ in range(repeat):
         start = time.perf_counter()
-        value = fn()
+        result = fn()
         elapsed = time.perf_counter() - start
         if best is None or elapsed < best:
-            best = elapsed
+            best, value = elapsed, result
     return best, value
 
 
@@ -109,8 +109,10 @@ def main():
             data = fh.read()
         with Reader(io.BytesIO(data)) as reader:
             points, chunk_size = reader.num_points, reader.chunk_size
+        chunking = (f"chunks of {chunk_size}" if chunk_size
+                    else "one stream, no chunks")
         print(f"{os.path.basename(args.file)}: {points:,} points, "
-              f"chunks of {chunk_size}, {len(data) / 1e6:.1f} MB")
+              f"{chunking}, {len(data) / 1e6:.1f} MB")
     else:
         started = time.perf_counter()
         data = generate(args.points, args.chunk_size, args.format)

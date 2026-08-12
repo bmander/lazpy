@@ -6,7 +6,8 @@ import pytest
 
 from lazpy import _cpylaz as cpylaz
 from lazpy import Reader, LazError
-from helpers import REFERENCE_HASH, TESTDATA, field_span, load
+from helpers import (REFERENCE_HASH, SURVIVABLE, TESTDATA, field_span,
+                     load)
 
 
 # ---------------------------------------------------------------------------
@@ -22,15 +23,6 @@ from helpers import REFERENCE_HASH, TESTDATA, field_span, load
 # than the mutated blob itself -- the blob is 15 KB of which four bytes matter,
 # and a test that says which four is a test that says what went wrong.
 # ---------------------------------------------------------------------------
-
-# What a malformed file may do, which is raise. LazError is the intended
-# answer and is what the named tests below pin; the rest are what the header
-# parser raises before the point reader is reached. Kept in step with
-# EXPECTED in tools/fuzz.py, which cannot be imported from here -- tools/ is
-# not on the path a test runs with.
-SURVIVABLE = (LazError, ValueError, struct.error, EOFError, OSError,
-              MemoryError, IndexError, OverflowError, TypeError, KeyError,
-              RecursionError)
 
 
 def malformed(name):

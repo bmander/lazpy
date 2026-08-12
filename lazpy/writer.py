@@ -280,10 +280,10 @@ class Writer:
         point format.
 
         ``chunk_size`` is how many points share a chunk, which sets what
-        random access costs on read-back. ``0xFFFFFFFF`` leaves the boundaries
-        to the caller, who ends each chunk with ``chunk()``. It is recorded in
-        the VLR whatever the container, as laszip records it, but POINTWISE
-        has no chunks for it to describe.
+        random access costs on read-back. :data:`ADAPTIVE_CHUNK_SIZE` leaves
+        the boundaries to the caller, who ends each chunk with ``chunk()``.
+        It is recorded in the VLR whatever the container, as laszip records
+        it, but POINTWISE has no chunks for it to describe.
 
         ``scales`` and ``offsets`` are how the integer coordinates of a point
         become georeferenced ones; they are recorded in the header and applied
@@ -735,7 +735,8 @@ class Writer:
     def chunk(self):
         """Close the open chunk, for variable-size chunking.
 
-        Only meaningful for a file opened with ``chunk_size=0xFFFFFFFF``, where
+        Only meaningful for a file opened with
+        ``chunk_size=ADAPTIVE_CHUNK_SIZE``, where
         the boundaries are the caller's to choose.
         """
         self._writer.chunk()

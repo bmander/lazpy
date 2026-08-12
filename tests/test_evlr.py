@@ -16,8 +16,14 @@ from helpers import (FIXTURES, REFERENCE_HASH, a_record, field_span, fixture,
 # records sit behind the point data, and two header fields aim at them.
 # ---------------------------------------------------------------------------
 
-EVLR_OFFSET_FIELD = 235      # start_of_first_extended_variable_length_record
-EVLR_COUNT_FIELD = 243       # number_of_extended_variable_length_records
+# Derived from the header tables rather than written down, which is what
+# field_span is for: the same two fields are located that way further down,
+# and a header this file disagreed with would be a header these tests were
+# quietly testing something else about.
+EVLR_OFFSET_FIELD = field_span(
+    "start_of_first_extended_variable_length_record", 4)[0]
+EVLR_COUNT_FIELD = field_span(
+    "number_of_extended_variable_length_records", 4)[0]
 EVLR_LENGTH_FIELD = 20       # record_length_after_header, within a record
 
 # LAS 1.4, which is the only version with extended records; the same points

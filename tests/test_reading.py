@@ -460,7 +460,8 @@ class TestErrors:
                     reader.read()
 
     def test_truncated_file_is_reported(self, tmp_path):
-        whole = open(fixture("pt6_v3.laz"), "rb").read()
+        with open(fixture("pt6_v3.laz"), "rb") as fh:
+            whole = fh.read()
         path = tmp_path / "truncated.laz"
         path.write_bytes(whole[:len(whole) // 2])
         with pytest.raises(LazError):
@@ -524,12 +525,19 @@ class TestErrors:
             def tell(self):
                 return self._fh.tell()
 
+            def close(self):
+                self._fh.close()
+
         fh = Exploding(fixture("pt1_v2.laz"))
-        reader = Reader(fh)          # header parsing must succeed
-        fh.armed = True              # now break the decoder's refill
-        with pytest.raises(PermissionError):
-            for _ in range(reader.num_points):
-                reader.read()
+        try:
+            reader = Reader(fh)      # header parsing must succeed
+            fh.armed = True          # now break the decoder's refill
+            with pytest.raises(PermissionError):
+                for _ in range(reader.num_points):
+                    reader.read()
+        finally:
+            fh.armed = False         # or closing it raises too
+            fh.close()
 
 
 # ---------------------------------------------------------------------------
