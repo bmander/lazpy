@@ -1,5 +1,6 @@
 
 import io
+import struct
 
 import pytest
 
@@ -367,6 +368,76 @@ def test_the_padding_before_the_points_is_kept():
 def test_a_file_with_no_padding_says_so(name):
     """An always-present key, so nothing has to ask whether a file has any."""
     assert load(name).header["user_data_after_header"] == b""
+
+
+class TestChunkTableRecovery:
+    """
+    Reading a file whose chunk table is not there, or not readable.
+
+    Where every chunk holds the same number of points the table is a
+    convenience: the boundaries are implied by the size, so a reader can
+    rebuild it as it goes and the file still reads whole. That is what makes
+    an interrupted compressor's output readable at all, which is the case
+    this exists for -- and it is the only thing lazpy warns about that it can
+    also carry on from, so a warning is how it says the file was damaged
+    without refusing it.
+
+    Both files are built here rather than kept in testdata/, since each is a
+    single field of an otherwise ordinary file and saying which field is the
+    whole of the explanation.
+    """
+
+    POINTS = 500
+
+    @staticmethod
+    def a_chunked_file():
+        buf = io.BytesIO()
+        with Writer(buf, 1, chunk_size=50) as writer:
+            for x in range(TestChunkTableRecovery.POINTS):
+                writer.write(Point(X=x, Y=x, Z=x))
+        return buf.getvalue()
+
+    @staticmethod
+    def point_data_start(data):
+        with Reader(io.BytesIO(data)) as reader:
+            return reader.header["offset_to_point_data"]
+
+    def test_a_table_the_compressor_never_wrote(self):
+        """What laszip leaves when it is stopped partway: the eight bytes in
+        front of the first chunk still hold their own position, because
+        nothing came back to patch in where the table went."""
+        data = bytearray(self.a_chunked_file())
+        start = self.point_data_start(data)
+        struct.pack_into("<q", data, start, start)
+
+        with Reader(io.BytesIO(bytes(data))) as reader:
+            assert [p.X for p in reader] == list(range(self.POINTS))
+            assert reader.warnings == (
+                "compressor was interrupted before writing the chunk table",)
+
+    def test_a_table_that_cannot_be_read(self):
+        """A table that is there and says something impossible -- a version
+        this reader does not know -- rather than one that is missing."""
+        data = bytearray(self.a_chunked_file())
+        table_at = struct.unpack_from(
+            "<q", data, self.point_data_start(data))[0]
+        struct.pack_into("<I", data, table_at, 99)
+
+        with Reader(io.BytesIO(bytes(data))) as reader:
+            assert [p.X for p in reader] == list(range(self.POINTS))
+            assert reader.warnings == ("corrupt or missing chunk table",)
+
+    def test_the_warning_does_not_stop_the_file_being_indexed(self):
+        """Recovery has to leave a reader that works, not merely one that
+        reads: everything downstream takes its chunk starts from the table
+        that was rebuilt."""
+        data = bytearray(self.a_chunked_file())
+        start = self.point_data_start(data)
+        struct.pack_into("<q", data, start, start)
+
+        with Reader(io.BytesIO(bytes(data))) as reader:
+            reader.seek(300)
+            assert reader.read().X == 300
 
 
 def test_a_clean_file_has_no_warnings():

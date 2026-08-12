@@ -54,7 +54,10 @@ jobs:
           set -euo pipefail
           mkdir -p ~/sdist-check && tar xzf dist/*.tar.gz -C ~/sdist-check
           python -m venv ~/sdist-venv
-          ~/sdist-venv/bin/pip install pytest dist/*.tar.gz
+          # numpy too, or the array tests skip and this job passes without
+          # ever running them -- which is what tests.yml and cibuildwheel's
+          # test-requires both install it for
+          ~/sdist-venv/bin/pip install pytest numpy dist/*.tar.gz
           cd ~/sdist-check
           ~/sdist-venv/bin/pytest -q lazpy-*/tests
 
