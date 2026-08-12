@@ -102,15 +102,6 @@ static void reader_recode_compat(ReaderObject *self)
 }
 
 /*
- * Decode the next point, whole.
- *
- * Every path that hands a point to a caller goes through here, so that "a
- * decoded point has had its LAS 1.4 fields put back" is one statement rather
- * than one per read loop. Seeking decodes points too (laz_readpoint_seek) and
- * deliberately does not come this way: those points are passed over, not
- * handed out.
- */
-/*
  * Whether the file object underneath is still answering.
  *
  * The core reads a stream that cannot fail: past the end it hands back zeros
@@ -127,6 +118,31 @@ static BOOL reader_stream_ok(ReaderObject *self)
     return !self->stream || !self->stream->failed;
 }
 
+/*
+ * Whether __init__ ran, raising if it did not.
+ *
+ * Everything that touches the point reader, the decoded point or the view
+ * onto it has to ask, since none of those exist until then and __new__ hands
+ * back the zeroed object regardless. The getters below that only read a
+ * scalar out of that struct do not: zero is a truthful answer for a reader
+ * that has read nothing, and guarding them would buy nothing.
+ */
+static BOOL reader_ready(ReaderObject *self)
+{
+    if (self->ready) return LAZ_TRUE;
+    PyErr_SetString(PyExc_ValueError, "reader is not initialised");
+    return LAZ_FALSE;
+}
+
+/*
+ * Decode the next point, whole.
+ *
+ * Every path that hands a point to a caller goes through here, so that "a
+ * decoded point has had its LAS 1.4 fields put back" is one statement rather
+ * than one per read loop. Seeking decodes points too (laz_readpoint_seek) and
+ * deliberately does not come this way: those points are passed over, not
+ * handed out.
+ */
 static BOOL reader_next(ReaderObject *self)
 {
     if (!laz_readpoint_read(&self->rp, &self->point, self->extra_bytes))
@@ -324,10 +340,7 @@ static PyObject *reader_error(ReaderObject *self)
 static PyObject *Reader_read(ReaderObject *self, PyObject *Py_UNUSED(i))
 {
     BOOL ok;
-    if (!self->ready) {
-        PyErr_SetString(PyExc_ValueError, "reader is not initialised");
-        return NULL;
-    }
+    if (!reader_ready(self)) return NULL;
     /* The GIL is deliberately held. Decoding one point costs less than a
      * release/reacquire pair, and the only Python re-entry underneath is the
      * stream refill roughly once per 64 KB. */
@@ -364,6 +377,7 @@ static PyObject *Reader_bounds(ReaderObject *self, PyObject *args)
     U64 done = 0;
     BOOL ok = LAZ_TRUE;
 
+    if (!reader_ready(self)) return NULL;
     if (!PyArg_ParseTuple(args, "K", &count)) return NULL;
     if (count == 0) {
         PyErr_SetString(LazErrorType, "a file with no points has no extent");
@@ -415,6 +429,7 @@ static PyObject *Reader_build_index(ReaderObject *self, PyObject *args)
     I64 size = 0;
     U64 done = 0;
     BOOL ok = LAZ_TRUE;
+    if (!reader_ready(self)) return NULL;
     if (!PyArg_ParseTuple(
             args, "K(dddd)(dd)(dd)dIiI", &count,
             &min_x, &min_y, &max_x, &max_y, &scale_x, &scale_y,
@@ -473,6 +488,7 @@ static PyObject *Reader_checksum(ReaderObject *self, PyObject *args)
     U64 done = 0;
     BOOL ok = LAZ_TRUE;
 
+    if (!reader_ready(self)) return NULL;
     if (!PyArg_ParseTuple(args, "|L", &count)) return NULL;
 
     Py_BEGIN_ALLOW_THREADS
@@ -510,8 +526,13 @@ static PyObject *Reader_checksum(ReaderObject *self, PyObject *args)
     }
     Py_END_ALLOW_THREADS
 
-    if (!ok) return reader_error(self);
+    /* As in read_into: the points that did decode stay decoded, so the index
+     * follows them whether or not the read that came after them failed.
+     * Leaving it behind would put the reader's own count out of step with
+     * where the stream actually is, and the next seek would work out its
+     * distance from the wrong place and quietly return the wrong points. */
     self->index += done;
+    if (!ok) return reader_error(self);
     return Py_BuildValue("(KK)", (unsigned long long)h, (unsigned long long)done);
 }
 
@@ -613,10 +634,7 @@ static PyObject *Reader_read_within(ReaderObject *self, PyObject *args)
 
     if (!PyArg_ParseTuple(args, "KO&", &stop, region_convert, &region))
         return NULL;
-    if (!self->ready) {
-        PyErr_SetString(PyExc_ValueError, "reader is not initialised");
-        return NULL;
-    }
+    if (!reader_ready(self)) return NULL;
 
     /*
      * The first candidate is decoded with the GIL held, as read() is and for
@@ -777,10 +795,7 @@ static PyObject *Reader_read_into(ReaderObject *self, PyObject *args)
     BOOL ok = LAZ_TRUE;
 
     if (!PyArg_ParseTuple(args, "On", &targets, &count)) return NULL;
-    if (!self->ready) {
-        PyErr_SetString(PyExc_ValueError, "reader is not initialised");
-        return NULL;
-    }
+    if (!reader_ready(self)) return NULL;
     if (count < 0) {
         PyErr_SetString(PyExc_ValueError, "count must not be negative");
         return NULL;
@@ -831,10 +846,7 @@ static PyObject *Reader_read_into_within(ReaderObject *self, PyObject *args)
 
     if (!PyArg_ParseTuple(args, "OKO&", &targets, &stop, region_convert, &region))
         return NULL;
-    if (!self->ready) {
-        PyErr_SetString(PyExc_ValueError, "reader is not initialised");
-        return NULL;
-    }
+    if (!reader_ready(self)) return NULL;
 
     /* Every point between here and `stop` could be inside, so that is what
      * the buffers have to hold. */
@@ -862,6 +874,7 @@ static PyObject *Reader_seek(ReaderObject *self, PyObject *args)
 {
     unsigned long long target;
     BOOL ok;
+    if (!reader_ready(self)) return NULL;
     if (!PyArg_ParseTuple(args, "K", &target)) return NULL;
 
     Py_BEGIN_ALLOW_THREADS
@@ -874,7 +887,12 @@ static PyObject *Reader_seek(ReaderObject *self, PyObject *args)
 }
 
 static PyObject *Reader_get_point(ReaderObject *self, void *c)
-{ (void)c; Py_INCREF(self->point_view); return self->point_view; }
+{
+    (void)c;
+    if (!reader_ready(self)) return NULL;
+    Py_INCREF(self->point_view);
+    return self->point_view;
+}
 
 static PyObject *Reader_get_index(ReaderObject *self, void *c)
 { (void)c; return PyLong_FromUnsignedLongLong(self->index); }

@@ -37,6 +37,13 @@ typedef struct {
     LazBitModel m;
 } BitModelObject;
 
+/*
+ * Either owns its model, which is `storage` and is what a model built from
+ * Python has, or borrows one belonging to an IntegerCompressor, in which case
+ * `owner` keeps that object alive. `m` says which: it points at `storage` for
+ * the first and into the owner for the second, and is never NULL -- every
+ * method reaches through it to ask whether the model has been initialised.
+ */
 typedef struct {
     PyObject_HEAD
     LazSymbolModel *m;
