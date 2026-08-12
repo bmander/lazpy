@@ -12,6 +12,7 @@ from .formats import (LASINDEX_EVLR_KEY, Compressor, Coder,
 from .headers import (EVLR_HEADER_FORMAT, EVLR_HEADER_SIZE, unpack_format,
                       _can_seek, _read_las_header, _find_laz_header)
 from .compat import _compatibility_layout, _upgrade_to_las_14
+from .crs import read_crs
 
 # ---------------------------------------------------------------------------
 # The array API.
@@ -175,6 +176,10 @@ def _array_field(name, num_extra_bytes):
 # saves it a seek. lasindex gives no flag for it, so neither does this.
 _RUN_GAP = 1000
 
+# What Reader.crs holds before it has been asked for, since None is the answer
+# for a file that names no projection and is worth caching too.
+_UNPARSED = object()
+
 
 def _numpy():
     """numpy, imported on use.
@@ -287,6 +292,7 @@ class Reader:
         self._was_opened = False
         self._owns_fp = False
         self._evlr_warning = None
+        self._crs = _UNPARSED
         self._path = None
         self._index = None
         self._index_looked_for = False
@@ -308,6 +314,7 @@ class Reader:
         self._path = None
         self._index = None
         self._index_looked_for = False
+        self._crs = _UNPARSED
 
         if hasattr(filename, 'read'):
             self.fp = filename
@@ -587,6 +594,31 @@ class Reader:
         """``(x, y, z)`` offsets, added to the scaled coordinates."""
         h = self._fields()
         return (h['x_offset'], h['y_offset'], h['z_offset'])
+
+    @property
+    def crs(self):
+        """The coordinate reference system the file declares, or None.
+
+        A :class:`pyproj.CRS`, read from the file's projection record the
+        first time it is asked for and kept thereafter -- so a reader never
+        asked pays neither the parse nor the import::
+
+            with rasterio.open("dem.tif", "w", crs=reader.crs, ...) as dst:
+
+        None means the file said nothing usable: no projection record, one too
+        damaged to read, or a system it names as user-defined. Nothing about a
+        projection is warned about; :mod:`lazpy.crs` says why, and reading this
+        is how a file that has put its coordinates somewhere unexpected is
+        diagnosed.
+
+        Needs pyproj, which ``pip install lazpy[crs]`` adds; a reader that
+        never touches this does not.
+        """
+        if self._crs is _UNPARSED:
+            header = self.header
+            self._crs = read_crs(header['variable_length_records'],
+                                 header['extended_variable_length_records'])
+        return self._crs
 
     @property
     def index(self):

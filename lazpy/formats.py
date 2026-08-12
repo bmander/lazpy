@@ -24,6 +24,19 @@ EXTRA_BYTES_VLR_KEY = (b"LASF_Spec", 4)
 # in the LAS header points at it; the LASzip record's "special EVLR" fields do.
 LASINDEX_EVLR_KEY = (b"LAStools", 30)
 
+# Where a file states its coordinate reference system: the GeoTIFF
+# GeoKeyDirectory, and the OGC WKT string LAS 1.4 uses in its place for the
+# extended point formats. lazpy.crs reads and builds both.
+GEOKEY_DIRECTORY_KEY = (b"LASF_Projection", 34735)
+WKT_VLR_KEY = (b"LASF_Projection", 2112)
+PROJECTION_VLR_KEYS = (GEOKEY_DIRECTORY_KEY, WKT_VLR_KEY)
+
+#: Bit 4 of a header's ``global_encoding``: the file states its coordinate
+#: reference system in the WKT record rather than the geokeys. LAS 1.4 added
+#: it, so a 1.2 or 1.3 file carrying WKT has no way to say so and the record
+#: itself is the only evidence.
+WKT_GLOBAL_ENCODING_BIT = 0x10
+
 
 # LazError is defined in the C extension so decode failures raised from C and
 # header failures raised from Python are one catchable category.

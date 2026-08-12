@@ -6,10 +6,35 @@ Installed as the ``lazpy`` command too. Reading a file this way asks the
 library most of what it can be asked about one, which is what makes it worth
 shipping rather than keeping beside the source.
 """
+import importlib.util
 import sys
 
-from .formats import Chunking
+from .formats import Chunking, PROJECTION_VLR_KEYS
 from .reader import Reader
+
+
+def _crs(reader):
+    """What the file says about its projection, in a line, or None.
+
+    Asked only of a file that carries a projection record at all, since
+    Reader.crs imports pyproj whatever the answer turns out to be and that
+    import costs more than the rest of a summary put together. A summary is
+    worth having without pyproj installed, so its absence leaves the line out
+    rather than ending the run.
+    """
+    header = reader.header
+    if not any(key in header['variable_length_records']
+               or key in header['extended_variable_length_records']
+               for key in PROJECTION_VLR_KEYS):
+        return None
+    if importlib.util.find_spec('pyproj') is None:
+        return None
+
+    crs = reader.crs
+    if crs is None:
+        return None
+    code = crs.to_epsg()
+    return crs.name if code is None else f"{crs.name} (EPSG:{code})"
 
 
 def summarize(reader):
@@ -44,6 +69,9 @@ def summarize(reader):
     print(f"extra bytes      {reader.num_extra_bytes}")
     print(f"scales           {reader.scales}")
     print(f"offsets          {reader.offsets}")
+    crs = _crs(reader)
+    if crs is not None:
+        print(f"crs              {crs}")
     print(f"bounds x         {header['min_x']} .. {header['max_x']}")
     print(f"bounds y         {header['min_y']} .. {header['max_y']}")
     print(f"bounds z         {header['min_z']} .. {header['max_z']}")

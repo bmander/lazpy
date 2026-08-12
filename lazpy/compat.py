@@ -9,7 +9,7 @@ from .extra_bytes import (EXTRA_BYTES_ATTRIBUTE_SIZE, ExtraBytesAttribute,
                           _described_width, _extra_bytes_attributes,
                           _pack_attribute)
 from .formats import (LASCOMPATIBLE_VLR_KEY, EXTRA_BYTES_VLR_KEY,
-                      _POINT_FORMATS)
+                      WKT_VLR_KEY, WKT_GLOBAL_ENCODING_BIT, _POINT_FORMATS)
 from .headers import (HEADER_FORMAT_13, HEADER_FORMAT_14, format_size,
                       pack_format, unpack_format, _header_size)
 
@@ -167,8 +167,8 @@ def _upgrade_to_las_14(header, layout, num_extra_bytes):
 
     # LAS 1.4 notes an OGC WKT record in the header; 1.2 and 1.3 had no bit
     # to say it with, so it is only knowable from the record itself
-    if (b'LASF_Projection', 2112) in header['variable_length_records']:
-        header['global_encoding'] |= 1 << 4
+    if WKT_VLR_KEY in header['variable_length_records']:
+        header['global_encoding'] |= WKT_GLOBAL_ENCODING_BIT
 
     point_format = _UPGRADED_FORMAT[
         header['point_data_format_id']][layout.nir != -1]
