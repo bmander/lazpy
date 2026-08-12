@@ -330,6 +330,7 @@ class Writer:
         self.header = None
         self._writer = None
         self._closed = False
+        self._failure = None
         self._owns_fp = False
         self._compatibility_at = None
 
@@ -746,16 +747,60 @@ class Writer:
     def close(self):
         """Finish the point block, write the extended records behind it, and
         fill in the header fields that needed every point to be known.
-        Idempotent."""
+
+        What the caller can still put right is asked about first, so a
+        mistake in the header or the extended records is something to correct
+        and close again rather than something that costs the file.
+
+        Idempotent once it has worked, and not over a failure: a close that
+        raised leaves the file unfinished, and every later close says so
+        rather than returning as though it had been finished.
+        """
+        if self._failure is not None:
+            raise LazError(
+                "this writer was left unfinished by a close that failed, and "
+                "the file it wrote is missing the header fields only close "
+                "can fill in") from self._failure
         if self._closed:
             return
-        self._closed = True
+        self._check_closable()
         try:
             self._writer.done()
             self._write_extended_records()
             self._patch_header()
+        except BaseException as exc:
+            # BaseException, so that an interrupt counts too: it leaves the
+            # file exactly as unfinished as any other failure does. What is
+            # raised on a later close names that state rather than repeating
+            # this, which would report an interrupt where none was asked for
+            # -- and would be uncatchable by the caller's except Exception.
+            self._failure = exc
+            raise
         finally:
             self._close_file()
+        self._closed = True
+
+    def _check_closable(self):
+        """Everything close() needs from what the caller set, asked before the
+        point block is finished rather than after.
+
+        All three are settled the moment the caller sets them, and all three
+        used to be found out only once done() had written the chunk table --
+        past the point where the file can still be saved, so a header field
+        edited to an impossible length cost every point written. Asked here,
+        nothing has happened yet and the writer is still closable.
+
+        Repeating the work rather than remembering it is what _records is
+        built for: it says so, and passes records it has already been over
+        through unchanged, so that the extended ones can be checked when they
+        are given and again when they are written. The header is packed and
+        thrown away, which costs a few hundred bytes and is the only way to
+        ask whether it still fits the length the file has already declared.
+        """
+        records = _records(self.evlrs)
+        if records:
+            self._check_extended(self.header['version_minor'])
+        self._pack_header(self.header)
 
     def _close_file(self):
         if self.fp is not None and self._owns_fp:
