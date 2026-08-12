@@ -712,19 +712,29 @@ class Reader:
         return (point.X * sx + ox, point.Y * sy + oy, point.Z * sz + oz)
 
     def points(self, start=0, count=None):
-        """Yield points, one at a time, without copying.
+        """Yield *count* points from point *start*, without copying.
 
         Each iteration yields the same object with new contents, so store
         ``point.copy()`` if points need to outlive the loop.
+
+        *start* is a position to go to, not a number of points to skip, so
+        the default reads the file from the beginning however much of it has
+        been read already. Being a generator, it goes there when the first
+        point is asked for rather than when it is called.
+
+        Note that :meth:`arrays` and :meth:`xyz` spell the same argument
+        ``start`` but default it to where the reader already is; only this
+        one rewinds.
         """
-        if start:
-            self.seek(start)
+        self.seek(start)
         remaining = self.num_points - start if count is None else count
         read = self._reader.read      # hoisted: this loop runs per point
         for _ in range(remaining):
             yield read()
 
     def __iter__(self):
+        """Yield the points from here on, so that iterating a reader something
+        has already read from carries on rather than starting again."""
         return self.points(self.index)
 
     def __len__(self):
