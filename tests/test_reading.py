@@ -309,15 +309,15 @@ class TestReaderLifecycle:
         called separately, which invites calling it twice."""
         reader = Reader(fixture("pt1_v2.laz"))
         first = reader.fp
-        reader.open(fixture("pt2_v2.laz"))
-        assert first.closed
-        assert reader.read() is not None      # and the second one works
+        with reader.open(fixture("pt2_v2.laz")) as reopened:
+            assert first.closed
+            assert reopened.read() is not None    # and the second one works
 
     def test_a_lent_file_is_still_not_ours_to_close(self):
         with open(fixture("pt1_v2.laz"), "rb") as fp:
             reader = Reader(fp)
-            reader.open(fixture("pt2_v2.laz"))
-            assert not fp.closed
+            with reader.open(fixture("pt2_v2.laz")):
+                assert not fp.closed
 
 
 class TestFileProperties:
@@ -476,7 +476,8 @@ class TestErrors:
         is further back than the stream is does not fail -- it decodes from
         the wrong place and hands back the wrong points.
         """
-        whole = open(fixture("pt1_v2.laz"), "rb").read()
+        with open(fixture("pt1_v2.laz"), "rb") as fh:
+            whole = fh.read()
         truncated = whole[:len(whole) // 2]
 
         with Reader(io.BytesIO(whole)) as reader:
