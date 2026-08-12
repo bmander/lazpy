@@ -37,6 +37,13 @@ typedef struct {
     LazBitModel m;
 } BitModelObject;
 
+/*
+ * Either owns its model, which is `storage` and is what a model built from
+ * Python has, or borrows one belonging to an IntegerCompressor, in which case
+ * `owner` keeps that object alive. `m` says which: it points at `storage` for
+ * the first and into the owner for the second, and is never NULL -- every
+ * method reaches through it to ask whether the model has been initialised.
+ */
 typedef struct {
     PyObject_HEAD
     LazSymbolModel *m;
@@ -89,8 +96,9 @@ PyObject *encoder_result(EncoderObject *self);
 /* The part of LazPoint the item readers fill; everything past it is
  * bookkeeping (the extra-bytes count and pointer), not decoded data. It
  * bounds a read_into target and a write_from source alike, which is why it
- * is here rather than in either one's file. */
-#define POINT_FIXED_EXTENT (LAZ_POINT_OFFSET_WAVEPACKET + 29)
+ * is here rather than in either one's file, and it is what POINT_LAYOUT
+ * publishes as __extent__. */
+#define POINT_FIXED_EXTENT (LAZ_POINT_OFFSET_WAVEPACKET + LAZ_WAVEPACKET_SIZE)
 
 PointObject *point_alloc(PyTypeObject *type);
 

@@ -66,6 +66,88 @@ def test_reader_reports_its_position(name):
         assert reader.index == 11
 
 
+class TestSeekAcrossDroppedLayers:
+    """
+    A v3/v4 layer whose value never changes inside a chunk is not written at
+    all: the chunk's first point carries it raw and the layer's own bytes stay
+    empty. A reader that leaves the caller's point untouched for such a layer
+    is right only by accident -- the previous read left the value in the
+    buffer being handed back.
+
+    Seeking takes the accident away. Skipping to the target point reads the
+    points in between into a buffer of the reader's own, so the raw first
+    point of the target chunk, the only carrier of the value, never reaches
+    the caller. What comes back is whatever the last read left there: the
+    previous chunk's value, or zeros on a reader that has read nothing.
+
+    Point format 10 carries every layered item at once, so one file pins them
+    all. The fixtures cannot: every point in them has a wavepacket of its own,
+    so the layer is always written and the case never arises.
+    """
+
+    CHUNK = 50
+
+    @classmethod
+    def byte_at(cls, index):
+        """Constant within each chunk and different between them, which is
+        what makes both chunks drop their layers while disagreeing."""
+        return 0x11 if index < cls.CHUNK else 0x22
+
+    @staticmethod
+    def point_of(byte):
+        """Every layered field set from one byte, so a run of these is
+        constant in all of them at once."""
+        return Point(X=byte, Y=byte, Z=byte, gps_time=float(byte),
+                     rgb=(byte * 0x101,) * 4,
+                     wave_packet=bytes([byte]) * 29,
+                     extra_bytes=bytes([byte]) * 4)
+
+    @staticmethod
+    def layers_of(point):
+        return (tuple(point.rgb), bytes(point.wave_packet),
+                bytes(point.extra_bytes))
+
+    @classmethod
+    def expected(cls, index):
+        return cls.layers_of(cls.point_of(cls.byte_at(index)))
+
+    @pytest.fixture(scope="class")
+    @classmethod
+    def two_chunks(cls):
+        buf = io.BytesIO()
+        with Writer(buf, 10, chunk_size=cls.CHUNK, version_minor=4,
+                    num_extra_bytes=4) as writer:
+            for i in range(2 * cls.CHUNK):
+                writer.write(cls.point_of(cls.byte_at(i)))
+        return buf.getvalue()
+
+    def test_the_file_repeats_one_value_per_chunk(self, two_chunks):
+        """The premise the seek tests rest on, and the sequential reading
+        they are measured against: a layer that holds still across a chunk
+        is a layer the encoder does not write."""
+        with Reader(io.BytesIO(two_chunks)) as reader:
+            got = [self.layers_of(p) for p in reader]
+        assert got == [self.expected(i) for i in range(2 * self.CHUNK)]
+
+    @pytest.mark.parametrize("index", [0, 1, 50, 51, 99])
+    def test_seek_on_a_fresh_reader(self, two_chunks, index):
+        """Nothing has been read, so nothing can have left the right bytes
+        behind."""
+        with Reader(io.BytesIO(two_chunks)) as reader:
+            reader.seek(index)
+            assert self.layers_of(reader.read()) == self.expected(index)
+
+    def test_seek_across_a_chunk_boundary(self, two_chunks):
+        """The reader holds one chunk's values and is sent to the other's,
+        where a stale answer looks plausible instead of looking like zeros."""
+        with Reader(io.BytesIO(two_chunks)) as reader:
+            reader.read()
+            reader.seek(75)
+            assert self.layers_of(reader.read()) == self.expected(75)
+            reader.seek(25)
+            assert self.layers_of(reader.read()) == self.expected(25)
+
+
 POINTWISE_FIXTURES = [n for n in FIXTURES if n.endswith("_pointwise.laz")]
 
 
@@ -305,6 +387,30 @@ class TestErrors:
             with Reader(str(path)) as reader:
                 for _ in range(reader.num_points):
                     reader.read()
+
+    def test_a_failed_checksum_leaves_the_position_it_reached(self):
+        """The reader's own count of where it is has to follow the points
+        that decoded, not just the ones a successful call returned. A seek
+        works out how far to go from that count, so a reader that thinks it
+        is further back than the stream is does not fail -- it decodes from
+        the wrong place and hands back the wrong points.
+        """
+        whole = open(fixture("pt1_v2.laz"), "rb").read()
+        truncated = whole[:len(whole) // 2]
+
+        with Reader(io.BytesIO(whole)) as reader:
+            every_x = [p.X for p in reader]
+
+        with Reader(io.BytesIO(truncated)) as reader:
+            with pytest.raises(LazError):
+                reader.checksum()
+            reached = reader.index
+            assert 0 < reached < reader.num_points   # it did get part way
+
+            # and the position it reports is the one the stream is really at
+            reader.seek(0)
+            assert [p.X for p in reader.points(count=reached)] == \
+                every_x[:reached]
 
     def test_every_failure_is_one_catchable_category(self):
         """Header, setup and decode failures all raise LazError."""
