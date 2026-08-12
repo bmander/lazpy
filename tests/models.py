@@ -17,7 +17,7 @@ class ArithmeticBitModel:
     def update(self):
         # halve counts when threshold is reached
         self.bit_count += self.update_cycle
-        if self.bit_count >= self.BM_MAX_COUNT:
+        if self.bit_count > self.BM_MAX_COUNT:
             self.bit_count = (self.bit_count + 1) >> 1
             self.bit_0_count = (self.bit_0_count + 1) >> 1
             if self.bit_0_count == self.bit_count:

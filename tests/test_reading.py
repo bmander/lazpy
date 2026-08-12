@@ -1,5 +1,6 @@
 
 import io
+import struct
 
 import pytest
 
@@ -64,6 +65,88 @@ def test_reader_reports_its_position(name):
         assert reader.index == 10
         reader.read()
         assert reader.index == 11
+
+
+class TestSeekAcrossDroppedLayers:
+    """
+    A v3/v4 layer whose value never changes inside a chunk is not written at
+    all: the chunk's first point carries it raw and the layer's own bytes stay
+    empty. A reader that leaves the caller's point untouched for such a layer
+    is right only by accident -- the previous read left the value in the
+    buffer being handed back.
+
+    Seeking takes the accident away. Skipping to the target point reads the
+    points in between into a buffer of the reader's own, so the raw first
+    point of the target chunk, the only carrier of the value, never reaches
+    the caller. What comes back is whatever the last read left there: the
+    previous chunk's value, or zeros on a reader that has read nothing.
+
+    Point format 10 carries every layered item at once, so one file pins them
+    all. The fixtures cannot: every point in them has a wavepacket of its own,
+    so the layer is always written and the case never arises.
+    """
+
+    CHUNK = 50
+
+    @classmethod
+    def byte_at(cls, index):
+        """Constant within each chunk and different between them, which is
+        what makes both chunks drop their layers while disagreeing."""
+        return 0x11 if index < cls.CHUNK else 0x22
+
+    @staticmethod
+    def point_of(byte):
+        """Every layered field set from one byte, so a run of these is
+        constant in all of them at once."""
+        return Point(X=byte, Y=byte, Z=byte, gps_time=float(byte),
+                     rgb=(byte * 0x101,) * 4,
+                     wave_packet=bytes([byte]) * 29,
+                     extra_bytes=bytes([byte]) * 4)
+
+    @staticmethod
+    def layers_of(point):
+        return (tuple(point.rgb), bytes(point.wave_packet),
+                bytes(point.extra_bytes))
+
+    @classmethod
+    def expected(cls, index):
+        return cls.layers_of(cls.point_of(cls.byte_at(index)))
+
+    @pytest.fixture(scope="class")
+    @classmethod
+    def two_chunks(cls):
+        buf = io.BytesIO()
+        with Writer(buf, 10, chunk_size=cls.CHUNK, version_minor=4,
+                    num_extra_bytes=4) as writer:
+            for i in range(2 * cls.CHUNK):
+                writer.write(cls.point_of(cls.byte_at(i)))
+        return buf.getvalue()
+
+    def test_the_file_repeats_one_value_per_chunk(self, two_chunks):
+        """The premise the seek tests rest on, and the sequential reading
+        they are measured against: a layer that holds still across a chunk
+        is a layer the encoder does not write."""
+        with Reader(io.BytesIO(two_chunks)) as reader:
+            got = [self.layers_of(p) for p in reader]
+        assert got == [self.expected(i) for i in range(2 * self.CHUNK)]
+
+    @pytest.mark.parametrize("index", [0, 1, 50, 51, 99])
+    def test_seek_on_a_fresh_reader(self, two_chunks, index):
+        """Nothing has been read, so nothing can have left the right bytes
+        behind."""
+        with Reader(io.BytesIO(two_chunks)) as reader:
+            reader.seek(index)
+            assert self.layers_of(reader.read()) == self.expected(index)
+
+    def test_seek_across_a_chunk_boundary(self, two_chunks):
+        """The reader holds one chunk's values and is sent to the other's,
+        where a stale answer looks plausible instead of looking like zeros."""
+        with Reader(io.BytesIO(two_chunks)) as reader:
+            reader.read()
+            reader.seek(75)
+            assert self.layers_of(reader.read()) == self.expected(75)
+            reader.seek(25)
+            assert self.layers_of(reader.read()) == self.expected(25)
 
 
 POINTWISE_FIXTURES = [n for n in FIXTURES if n.endswith("_pointwise.laz")]
@@ -156,6 +239,85 @@ class TestPointSemantics:
             reader.seek(10)
             want = [reader.read().X for _ in range(5)]
             assert got == want
+
+    def test_points_goes_to_its_start_wherever_the_reader_is(self):
+        """start is a place to go to, not a number of points to skip past, so
+        the default of 0 has to mean the beginning even for a reader that has
+        already read some -- which is the one case where going nowhere and
+        starting from zero are not the same thing."""
+        with Reader(fixture("pt2_v2.laz")) as reader:
+            for _ in range(3):
+                reader.read()
+            whole = [p.X for p in reader.points()]
+            assert len(whole) == reader.num_points
+            # and again, from the end it has now been left at
+            assert [p.X for p in reader.points()] == whole
+
+    def test_iterating_carries_on_from_the_current_point(self):
+        """Iterating a reader something has read from continues rather than
+        starting again -- the one behaviour that would break if *start* ever
+        came to mean "stay where you are", which is the other way this could
+        have been fixed. Nothing else in the suite iterates a part-read
+        reader."""
+        with Reader(fixture("pt2_v2.laz")) as reader:
+            whole = [p.X for p in reader.points()]
+            reader.seek(0)
+
+            head = [reader.read().X for _ in range(5)]
+            assert head == whole[:5]
+            assert [p.X for p in reader] == whole[5:]
+
+
+class TestReaderLifecycle:
+    """
+    The three states a Reader can be in, and what each one answers.
+
+    A Reader can be built without a file and opened later, which is what
+    makes "not open yet" a state rather than an impossibility, and it can be
+    closed. Both used to be reported by whatever an internal None happened to
+    do next -- an AttributeError from one, a TypeError from the other -- for
+    a condition Writer already answers with a ValueError.
+    """
+
+    def test_a_reader_that_was_never_opened_says_so(self):
+        reader = Reader()
+        for use in (lambda: reader.read(), lambda: reader.num_points,
+                    lambda: len(reader), lambda: reader.scales,
+                    lambda: reader.index, lambda: list(reader.points())):
+            with pytest.raises(ValueError, match="not open"):
+                use()
+
+    def test_a_closed_reader_says_so(self):
+        reader = Reader(fixture("pt1_v2.laz"))
+        reader.close()
+        for use in (lambda: reader.read(), lambda: reader.seek(0),
+                    lambda: reader.index, lambda: list(reader.points())):
+            with pytest.raises(ValueError, match="closed"):
+                use()
+
+    def test_a_closed_reader_still_describes_its_file(self):
+        """The header was read once and the file it describes has not
+        changed, so keeping it is useful rather than untidy -- and it is the
+        reason closed and never-opened have to be told apart."""
+        reader = Reader(fixture("pt1_v2.laz"))
+        count, scales = reader.num_points, reader.scales
+        reader.close()
+        assert (reader.num_points, reader.scales) == (count, scales)
+
+    def test_opening_again_does_not_strand_the_first_file(self):
+        """__init__ takes the filename optionally so that open() can be
+        called separately, which invites calling it twice."""
+        reader = Reader(fixture("pt1_v2.laz"))
+        first = reader.fp
+        reader.open(fixture("pt2_v2.laz"))
+        assert first.closed
+        assert reader.read() is not None      # and the second one works
+
+    def test_a_lent_file_is_still_not_ours_to_close(self):
+        with open(fixture("pt1_v2.laz"), "rb") as fp:
+            reader = Reader(fp)
+            reader.open(fixture("pt2_v2.laz"))
+            assert not fp.closed
 
 
 class TestFileProperties:
@@ -306,6 +468,30 @@ class TestErrors:
                 for _ in range(reader.num_points):
                     reader.read()
 
+    def test_a_failed_checksum_leaves_the_position_it_reached(self):
+        """The reader's own count of where it is has to follow the points
+        that decoded, not just the ones a successful call returned. A seek
+        works out how far to go from that count, so a reader that thinks it
+        is further back than the stream is does not fail -- it decodes from
+        the wrong place and hands back the wrong points.
+        """
+        whole = open(fixture("pt1_v2.laz"), "rb").read()
+        truncated = whole[:len(whole) // 2]
+
+        with Reader(io.BytesIO(whole)) as reader:
+            every_x = [p.X for p in reader]
+
+        with Reader(io.BytesIO(truncated)) as reader:
+            with pytest.raises(LazError):
+                reader.checksum()
+            reached = reader.index
+            assert 0 < reached < reader.num_points   # it did get part way
+
+            # and the position it reports is the one the stream is really at
+            reader.seek(0)
+            assert [p.X for p in reader.points(count=reached)] == \
+                every_x[:reached]
+
     def test_every_failure_is_one_catchable_category(self):
         """Header, setup and decode failures all raise LazError."""
         assert issubclass(UnsupportedFileError, LazError)
@@ -367,6 +553,76 @@ def test_the_padding_before_the_points_is_kept():
 def test_a_file_with_no_padding_says_so(name):
     """An always-present key, so nothing has to ask whether a file has any."""
     assert load(name).header["user_data_after_header"] == b""
+
+
+class TestChunkTableRecovery:
+    """
+    Reading a file whose chunk table is not there, or not readable.
+
+    Where every chunk holds the same number of points the table is a
+    convenience: the boundaries are implied by the size, so a reader can
+    rebuild it as it goes and the file still reads whole. That is what makes
+    an interrupted compressor's output readable at all, which is the case
+    this exists for -- and it is the only thing lazpy warns about that it can
+    also carry on from, so a warning is how it says the file was damaged
+    without refusing it.
+
+    Both files are built here rather than kept in testdata/, since each is a
+    single field of an otherwise ordinary file and saying which field is the
+    whole of the explanation.
+    """
+
+    POINTS = 500
+
+    @staticmethod
+    def a_chunked_file():
+        buf = io.BytesIO()
+        with Writer(buf, 1, chunk_size=50) as writer:
+            for x in range(TestChunkTableRecovery.POINTS):
+                writer.write(Point(X=x, Y=x, Z=x))
+        return buf.getvalue()
+
+    @staticmethod
+    def point_data_start(data):
+        with Reader(io.BytesIO(data)) as reader:
+            return reader.header["offset_to_point_data"]
+
+    def test_a_table_the_compressor_never_wrote(self):
+        """What laszip leaves when it is stopped partway: the eight bytes in
+        front of the first chunk still hold their own position, because
+        nothing came back to patch in where the table went."""
+        data = bytearray(self.a_chunked_file())
+        start = self.point_data_start(data)
+        struct.pack_into("<q", data, start, start)
+
+        with Reader(io.BytesIO(bytes(data))) as reader:
+            assert [p.X for p in reader] == list(range(self.POINTS))
+            assert reader.warnings == (
+                "compressor was interrupted before writing the chunk table",)
+
+    def test_a_table_that_cannot_be_read(self):
+        """A table that is there and says something impossible -- a version
+        this reader does not know -- rather than one that is missing."""
+        data = bytearray(self.a_chunked_file())
+        table_at = struct.unpack_from(
+            "<q", data, self.point_data_start(data))[0]
+        struct.pack_into("<I", data, table_at, 99)
+
+        with Reader(io.BytesIO(bytes(data))) as reader:
+            assert [p.X for p in reader] == list(range(self.POINTS))
+            assert reader.warnings == ("corrupt or missing chunk table",)
+
+    def test_the_warning_does_not_stop_the_file_being_indexed(self):
+        """Recovery has to leave a reader that works, not merely one that
+        reads: everything downstream takes its chunk starts from the table
+        that was rebuilt."""
+        data = bytearray(self.a_chunked_file())
+        start = self.point_data_start(data)
+        struct.pack_into("<q", data, start, start)
+
+        with Reader(io.BytesIO(bytes(data))) as reader:
+            reader.seek(300)
+            assert reader.read().X == 300
 
 
 def test_a_clean_file_has_no_warnings():

@@ -12,6 +12,7 @@ from .formats import (EXTRA_BYTES_VLR_KEY, LASCOMPATIBLE_VLR_KEY,
                       Coder, UnsupportedFileError, _POINT_FORMATS,
                       items_for_point_format, _versioned_items,
                       _default_version_minor, _min_version_minor)
+from .reader import _array_field, _numpy
 from .headers import (EVLR_HEADER_FORMAT, LASZIP_SPECIAL_EVLRS_AT,
                       LASZIP_SPECIAL_EVLR_FORMAT, MAX_VLR_PAYLOAD,
                       VLR_HEADER_FORMAT, VLR_HEADER_SIZE,
@@ -327,6 +328,7 @@ class Writer:
         self.header = None
         self._writer = None
         self._closed = False
+        self._failure = None
         self._owns_fp = False
         self._compatibility_at = None
 
@@ -645,6 +647,58 @@ class Writer:
         """
         self._writer.write(point)
 
+    def write_arrays(self, columns, count=None):
+        """Append points from numpy arrays, one per field.
+
+        The inverse of :meth:`Reader.arrays`, and takes what that returns:
+        ``{name: array}``, keyed by the same field names::
+
+            with Reader("in.laz") as reader, Writer("out.laz", 1) as writer:
+                while reader.index < reader.num_points:
+                    writer.write_arrays(reader.arrays(count=1_000_000))
+
+        Which is what it is for. Reading in bulk has never had a counterpart
+        here, so a conversion ran at the speed of ``write()`` -- a Python
+        call, a type check and a point object each time -- however fast the
+        reading side went.
+
+        Fields no column names are written as zero, so a caller who reads
+        four fields and writes them back gets a file whose other fields are
+        empty rather than one that repeats the last point. Names are those of
+        :meth:`Reader.arrays`, ``extra_bytes`` included.
+
+        Needs numpy, as the array side of reading does.
+        """
+        np = _numpy()
+        if count is None:
+            count = min((len(column) for column in columns.values()),
+                        default=0)
+        if not count:
+            return
+
+        # The fields packed several to a byte are given back unpacked, so they
+        # are put back together here: one byte per group, or'd from whichever
+        # of its fields the caller named.
+        targets, bytes_by_offset = [], {}
+        for name, column in columns.items():
+            field = _array_field(name, self.num_extra_bytes)
+            column = np.ascontiguousarray(column[:count])
+            if field.mask is None:
+                if column.dtype != np.dtype(field.dtype):
+                    column = column.astype(field.dtype)
+                targets.append((column, field.offset,
+                                column.itemsize * field.width))
+                continue
+            packed = bytes_by_offset.get(field.offset)
+            if packed is None:
+                packed = bytes_by_offset[field.offset] = np.zeros(
+                    count, dtype=field.dtype)
+                targets.append((packed, field.offset, 1))
+            packed |= ((column.astype(field.dtype) & field.mask)
+                       << field.shift)
+
+        self._writer.write_from(targets, count)
+
     def unscale(self, x, y, z):
         """The integer coordinates a point standing at ``(x, y, z)`` holds.
 
@@ -689,16 +743,60 @@ class Writer:
     def close(self):
         """Finish the point block, write the extended records behind it, and
         fill in the header fields that needed every point to be known.
-        Idempotent."""
+
+        What the caller can still put right is asked about first, so a
+        mistake in the header or the extended records is something to correct
+        and close again rather than something that costs the file.
+
+        Idempotent once it has worked, and not over a failure: a close that
+        raised leaves the file unfinished, and every later close says so
+        rather than returning as though it had been finished.
+        """
+        if self._failure is not None:
+            raise LazError(
+                "this writer was left unfinished by a close that failed, and "
+                "the file it wrote is missing the header fields only close "
+                "can fill in") from self._failure
         if self._closed:
             return
-        self._closed = True
+        self._check_closable()
         try:
             self._writer.done()
             self._write_extended_records()
             self._patch_header()
+        except BaseException as exc:
+            # BaseException, so that an interrupt counts too: it leaves the
+            # file exactly as unfinished as any other failure does. What is
+            # raised on a later close names that state rather than repeating
+            # this, which would report an interrupt where none was asked for
+            # -- and would be uncatchable by the caller's except Exception.
+            self._failure = exc
+            raise
         finally:
             self._close_file()
+        self._closed = True
+
+    def _check_closable(self):
+        """Everything close() needs from what the caller set, asked before the
+        point block is finished rather than after.
+
+        All three are settled the moment the caller sets them, and all three
+        used to be found out only once done() had written the chunk table --
+        past the point where the file can still be saved, so a header field
+        edited to an impossible length cost every point written. Asked here,
+        nothing has happened yet and the writer is still closable.
+
+        Repeating the work rather than remembering it is what _records is
+        built for: it says so, and passes records it has already been over
+        through unchanged, so that the extended ones can be checked when they
+        are given and again when they are written. The header is packed and
+        thrown away, which costs a few hundred bytes and is the only way to
+        ask whether it still fits the length the file has already declared.
+        """
+        records = _records(self.evlrs)
+        if records:
+            self._check_extended(self.header['version_minor'])
+        self._pack_header(self.header)
 
     def _close_file(self):
         if self.fp is not None and self._owns_fp:

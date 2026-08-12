@@ -100,27 +100,40 @@ static U32 wlayer_num_bytes(WLayer *l)
     return (U32)size;
 }
 
-/* Closes a kept layer's encoder and emits its length; a dropped layer's size
+/*
+ * Closes a kept layer's encoder and emits its length; a dropped layer's size
  * goes out as zero and its encoder is never finished, because nothing will
  * read the bytes it would flush. Each layer encodes into its own array sink,
- * so closing one here cannot disturb another's byte count. */
-static void wlayer_put_size(WLayer *l, LazOutStream *out)
+ * so closing one here cannot disturb another's byte count.
+ *
+ * Both return whether the layer is all there. That sink stops taking bytes
+ * and records it if it cannot grow, and a layer that ran out of memory
+ * partway is one whose byte count no longer describes its contents -- so
+ * writing either the count or the bytes would put a chunk in the file that
+ * no reader can make sense of. Nothing else would notice: the file stream is
+ * fine, and the file stream is what laz_writepoint_write checks.
+ */
+static BOOL wlayer_put_size(WLayer *l, LazOutStream *out)
 {
     if (!l->changed) {
         laz_outstream_put32(out, 0);
-        return;
+        return LAZ_TRUE;
     }
     laz_encoder_done(&l->enc);
+    if (l->stream->failed) return LAZ_FALSE;
     laz_outstream_put32(out, wlayer_num_bytes(l));
+    return LAZ_TRUE;
 }
 
-static void wlayer_put_bytes(WLayer *l, LazOutStream *out)
+static BOOL wlayer_put_bytes(WLayer *l, LazOutStream *out)
 {
     I64 size;
     const U8 *data;
-    if (!l->changed) return;
+    if (!l->changed) return LAZ_TRUE;
+    if (l->stream->failed) return LAZ_FALSE;
     data = laz_outstream_array_data(l->stream, &size);
     laz_outstream_put_bytes(out, data, size);
+    return LAZ_TRUE;
 }
 
 /* Every layered writer reaches its chunk's output through the shared encoder,
@@ -585,36 +598,38 @@ static void p14_write_gps_time(Point14v3 *w, I64 gps_time)
 
 static BOOL p14_chunk_sizes(LazWriteItem *self)
 {
+    BOOL ok = LAZ_TRUE;
     Point14v3 *w = (Point14v3 *)self;
     LazOutStream *out = chunk_stream(self);
 
-    wlayer_put_size(&w->channel_returns_XY, out);
-    wlayer_put_size(&w->Z, out);
-    wlayer_put_size(&w->classification, out);
-    wlayer_put_size(&w->flags, out);
-    wlayer_put_size(&w->intensity, out);
-    wlayer_put_size(&w->scan_angle, out);
-    wlayer_put_size(&w->user_data, out);
-    wlayer_put_size(&w->point_source, out);
-    wlayer_put_size(&w->gps_time, out);
-    return LAZ_TRUE;
+    ok &= wlayer_put_size(&w->channel_returns_XY, out);
+    ok &= wlayer_put_size(&w->Z, out);
+    ok &= wlayer_put_size(&w->classification, out);
+    ok &= wlayer_put_size(&w->flags, out);
+    ok &= wlayer_put_size(&w->intensity, out);
+    ok &= wlayer_put_size(&w->scan_angle, out);
+    ok &= wlayer_put_size(&w->user_data, out);
+    ok &= wlayer_put_size(&w->point_source, out);
+    ok &= wlayer_put_size(&w->gps_time, out);
+    return ok;
 }
 
 static BOOL p14_chunk_bytes(LazWriteItem *self)
 {
+    BOOL ok = LAZ_TRUE;
     Point14v3 *w = (Point14v3 *)self;
     LazOutStream *out = chunk_stream(self);
 
-    wlayer_put_bytes(&w->channel_returns_XY, out);
-    wlayer_put_bytes(&w->Z, out);
-    wlayer_put_bytes(&w->classification, out);
-    wlayer_put_bytes(&w->flags, out);
-    wlayer_put_bytes(&w->intensity, out);
-    wlayer_put_bytes(&w->scan_angle, out);
-    wlayer_put_bytes(&w->user_data, out);
-    wlayer_put_bytes(&w->point_source, out);
-    wlayer_put_bytes(&w->gps_time, out);
-    return LAZ_TRUE;
+    ok &= wlayer_put_bytes(&w->channel_returns_XY, out);
+    ok &= wlayer_put_bytes(&w->Z, out);
+    ok &= wlayer_put_bytes(&w->classification, out);
+    ok &= wlayer_put_bytes(&w->flags, out);
+    ok &= wlayer_put_bytes(&w->intensity, out);
+    ok &= wlayer_put_bytes(&w->scan_angle, out);
+    ok &= wlayer_put_bytes(&w->user_data, out);
+    ok &= wlayer_put_bytes(&w->point_source, out);
+    ok &= wlayer_put_bytes(&w->gps_time, out);
+    return ok;
 }
 
 static void p14_destroy(LazWriteItem *self)
@@ -804,15 +819,17 @@ static BOOL rgb14_write(LazWriteItem *self, const U8 *item, U32 *context)
 
 static BOOL rgb14_chunk_sizes(LazWriteItem *self)
 {
+    BOOL ok = LAZ_TRUE;
     Rgb14v3 *w = (Rgb14v3 *)self;
-    wlayer_put_size(&w->rgb, chunk_stream(self));
-    return LAZ_TRUE;
+    ok &= wlayer_put_size(&w->rgb, chunk_stream(self));
+    return ok;
 }
 
 static BOOL rgb14_chunk_bytes(LazWriteItem *self)
 {
-    wlayer_put_bytes(&((Rgb14v3 *)self)->rgb, chunk_stream(self));
-    return LAZ_TRUE;
+    BOOL ok = LAZ_TRUE;
+    ok &= wlayer_put_bytes(&((Rgb14v3 *)self)->rgb, chunk_stream(self));
+    return ok;
 }
 
 static void rgb14_destroy(LazWriteItem *self)
@@ -945,20 +962,22 @@ static BOOL rgbnir14_write(LazWriteItem *self, const U8 *item, U32 *context)
 
 static BOOL rgbnir14_chunk_sizes(LazWriteItem *self)
 {
+    BOOL ok = LAZ_TRUE;
     RgbNir14v3 *w = (RgbNir14v3 *)self;
     LazOutStream *out = chunk_stream(self);
-    wlayer_put_size(&w->rgb, out);
-    wlayer_put_size(&w->nir, out);
-    return LAZ_TRUE;
+    ok &= wlayer_put_size(&w->rgb, out);
+    ok &= wlayer_put_size(&w->nir, out);
+    return ok;
 }
 
 static BOOL rgbnir14_chunk_bytes(LazWriteItem *self)
 {
+    BOOL ok = LAZ_TRUE;
     RgbNir14v3 *w = (RgbNir14v3 *)self;
     LazOutStream *out = chunk_stream(self);
-    wlayer_put_bytes(&w->rgb, out);
-    wlayer_put_bytes(&w->nir, out);
-    return LAZ_TRUE;
+    ok &= wlayer_put_bytes(&w->rgb, out);
+    ok &= wlayer_put_bytes(&w->nir, out);
+    return ok;
 }
 
 static void rgbnir14_destroy(LazWriteItem *self)
@@ -1125,15 +1144,17 @@ static BOOL wave14_write(LazWriteItem *self, const U8 *item, U32 *context)
 
 static BOOL wave14_chunk_sizes(LazWriteItem *self)
 {
+    BOOL ok = LAZ_TRUE;
     Wave14v3 *w = (Wave14v3 *)self;
-    wlayer_put_size(&w->wavepacket, chunk_stream(self));
-    return LAZ_TRUE;
+    ok &= wlayer_put_size(&w->wavepacket, chunk_stream(self));
+    return ok;
 }
 
 static BOOL wave14_chunk_bytes(LazWriteItem *self)
 {
-    wlayer_put_bytes(&((Wave14v3 *)self)->wavepacket, chunk_stream(self));
-    return LAZ_TRUE;
+    BOOL ok = LAZ_TRUE;
+    ok &= wlayer_put_bytes(&((Wave14v3 *)self)->wavepacket, chunk_stream(self));
+    return ok;
 }
 
 static void wave14_destroy(LazWriteItem *self)
@@ -1261,20 +1282,22 @@ static BOOL byte14_write(LazWriteItem *self, const U8 *item, U32 *context)
 
 static BOOL byte14_chunk_sizes(LazWriteItem *self)
 {
+    BOOL ok = LAZ_TRUE;
     Byte14v3 *w = (Byte14v3 *)self;
     LazOutStream *out = chunk_stream(self);
     U32 i;
-    for (i = 0; i < w->number; i++) wlayer_put_size(&w->layers[i], out);
-    return LAZ_TRUE;
+    for (i = 0; i < w->number; i++) ok &= wlayer_put_size(&w->layers[i], out);
+    return ok;
 }
 
 static BOOL byte14_chunk_bytes(LazWriteItem *self)
 {
+    BOOL ok = LAZ_TRUE;
     Byte14v3 *w = (Byte14v3 *)self;
     LazOutStream *out = chunk_stream(self);
     U32 i;
-    for (i = 0; i < w->number; i++) wlayer_put_bytes(&w->layers[i], out);
-    return LAZ_TRUE;
+    for (i = 0; i < w->number; i++) ok &= wlayer_put_bytes(&w->layers[i], out);
+    return ok;
 }
 
 static void byte14_destroy(LazWriteItem *self)

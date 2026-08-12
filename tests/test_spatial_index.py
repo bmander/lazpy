@@ -724,3 +724,81 @@ def test_an_index_of_no_points_is_refused():
     with Reader(io.BytesIO(buf.getvalue())) as reader:
         with pytest.raises(LazError, match="nothing to index"):
             reader.build_spatial_index()
+
+
+class TestRegionArguments:
+    """One area, spelled the same way whichever query is asked.
+
+    A rectangle used to be four positional numbers for the point queries and
+    a `rect=` tuple for the array ones, and a circle had a method of its own
+    on one side and a `circle=` keyword on the other -- so moving a query
+    from points to arrays meant reshaping its arguments for no reason the
+    caller could see. All four take both now, the older spellings included.
+    """
+
+    RECT = (1490, 1690, 1510, 1710)
+    CIRCLE = (1500.0, 1700.0, 20.0)
+
+    @staticmethod
+    def xs(points):
+        return [p.X for p in points]
+
+    def test_a_rectangle_either_way(self):
+        with Reader(fixture("pt1_v2.laz")) as reader:
+            positional = self.xs(reader.points_within(*self.RECT))
+            reader.seek(0)
+            keyword = self.xs(reader.points_within(rect=self.RECT))
+        assert positional == keyword and positional
+
+    def test_a_circle_either_way(self):
+        with Reader(fixture("pt1_v2.laz")) as reader:
+            method = self.xs(reader.points_within_circle(*self.CIRCLE))
+            reader.seek(0)
+            keyword = self.xs(reader.points_within(circle=self.CIRCLE))
+        assert method == keyword and method
+
+    def test_the_two_spellings_cannot_be_mixed(self):
+        with Reader(fixture("pt1_v2.laz")) as reader:
+            with pytest.raises(TypeError):
+                list(reader.points_within(*self.RECT, rect=self.RECT))
+            with pytest.raises(TypeError):
+                list(reader.points_within(1490, 1690))
+
+
+class TestArraysWithinBlocking:
+    """arrays_within sizes its arrays for the points it is looking through,
+    which without an index is every point in the file. It reads in blocks so
+    that what a query costs is bounded rather than proportional to the file
+    it is asked about -- and the answer must not depend on where the block
+    boundaries fall.
+    """
+
+    RECT = (1490, 1690, 1510, 1710)
+
+    @staticmethod
+    def query(block):
+        original = Reader.WITHIN_BLOCK
+        Reader.WITHIN_BLOCK = block
+        try:
+            with Reader(fixture("pt1_v2.laz")) as reader:
+                return reader.arrays_within(
+                    "X", "Y", "classification",
+                    rect=TestArraysWithinBlocking.RECT)
+        finally:
+            Reader.WITHIN_BLOCK = original
+
+    @pytest.mark.parametrize("block", [1, 7, 64, 499, 500, 501])
+    def test_the_block_size_does_not_change_the_answer(self, block):
+        np = pytest.importorskip("numpy")
+        whole = self.query(Reader.WITHIN_BLOCK)
+        split = self.query(block)
+        assert sorted(whole) == sorted(split)
+        for name in whole:
+            assert np.array_equal(whole[name], split[name]), name
+
+    def test_an_area_holding_nothing_gives_empty_columns(self):
+        pytest.importorskip("numpy")
+        with Reader(fixture("pt1_v2.laz")) as reader:
+            a = reader.arrays_within("X", "Y", circle=(0.0, 0.0, 0.0))
+        assert sorted(a) == ["X", "Y"]
+        assert all(len(column) == 0 for column in a.values())

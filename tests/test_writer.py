@@ -213,6 +213,19 @@ class TestWrittenHeader:
             assert reader.header["version_minor"] == expected
 
 
+class BreaksOnRewind(io.BytesIO):
+    """Takes points happily, then stops answering when close() goes back to
+    the front to patch the header -- a failure the caller cannot put right,
+    and the only kind that still reaches close()'s own error handling."""
+
+    armed = False
+
+    def seek(self, pos, whence=0):
+        if self.armed and whence == 0 and pos < self.tell():
+            raise OSError("device on fire")
+        return super().seek(pos, whence)
+
+
 class TestWriterFiles:
 
     def test_writes_a_file_by_name(self, tmp_path):
@@ -256,6 +269,63 @@ class TestWriterFiles:
         with pytest.raises(ValueError):
             writer.write(Point(X=2))
         assert writer.num_points == 1     # still answers for what it wrote
+
+    def test_a_bad_header_edit_can_be_put_right_and_closed_again(self):
+        """What close needs from the caller is asked before the point block is
+        finished, so a header field edited to a length the file cannot declare
+        costs nothing but the attempt."""
+        buf = io.BytesIO()
+        writer = Writer(buf, 1)
+        for x in range(5):
+            writer.write(Point(X=x))
+        writer.header["user_data"] = b"x" * 1000     # no longer that long
+
+        with pytest.raises(LazError):
+            writer.close()
+
+        writer.header["user_data"] = b""             # put right
+        writer.close()
+
+        buf.seek(0)
+        with Reader(buf) as reader:
+            assert [p.X for p in reader] == list(range(5))
+
+    def test_a_close_that_failed_does_not_report_success_next_time(self):
+        """The state a writer cannot recover from, and the one where saying
+        nothing is worst: the points are written, the header that describes
+        them is not, and a reader opens the result without complaint and calls
+        it empty. So every later close says so rather than returning as though
+        it had worked.
+
+        It takes a file that stops answering to get here now -- what the
+        caller could have put right is asked about before anything is
+        finished.
+        """
+        buf = BreaksOnRewind()
+        writer = Writer(buf, 1)
+        writer.write(Point(X=1))
+        buf.armed = True
+
+        with pytest.raises(OSError) as first:
+            writer.close()
+        for _ in range(2):
+            with pytest.raises(LazError) as again:
+                writer.close()
+            # the later ones name the state and keep the first as the cause,
+            # rather than repeating it as though it had just happened
+            assert again.value is not first.value
+            assert again.value.__cause__ is first.value
+
+        buf.armed = False
+        with Reader(io.BytesIO(buf.getvalue())) as reader:
+            assert reader.num_points == 0      # the file really is unfinished
+
+    def test_a_failing_close_reaches_a_with_block(self):
+        buf = BreaksOnRewind()
+        with pytest.raises(OSError):
+            with Writer(buf, 1) as writer:
+                writer.write(Point(X=1))
+                buf.armed = True
 
     def test_a_lent_file_object_is_left_at_the_end_of_what_was_written(self):
         """Closing goes back to the front to patch the header, and comes back:
@@ -924,3 +994,103 @@ def test_a_header_whose_length_stops_making_sense_is_refused():
     writer.header["header_size"] = 300
     with pytest.raises(LazError, match="but this file declares 300"):
         writer.close()
+
+
+class TestWriteArrays:
+    """
+    Writing from columns, the inverse of Reader.arrays.
+
+    The reading side has had a bulk path since read_into; the writing side
+    had none, so a conversion ran at the speed of write() -- a Python call, a
+    type check and a point object each time -- however fast the reading went.
+
+    What it has to produce is not merely equivalent but identical: the same
+    file writing those points one at a time produces, since anything else
+    would mean two answers to what writing a point means.
+    """
+
+    CASES = [("pt1_v2.laz", 1), ("pt3_v2.laz", 3), ("pt6_v3.laz", 6),
+             ("pt10_v4.laz", 10)]
+
+    @staticmethod
+    def source(name):
+        with Reader(fixture(name)) as reader:
+            columns = reader.arrays()
+            reader.seek(0)          # arrays() left it at the end
+            return (columns, [p.copy() for p in reader],
+                    dict(num_extra_bytes=reader.num_extra_bytes,
+                         scales=reader.scales, offsets=reader.offsets),
+                    reader.header["version_minor"])
+
+    @pytest.mark.parametrize("name,point_format", CASES)
+    def test_it_writes_the_file_writing_points_would(self, name,
+                                                     point_format):
+        pytest.importorskip("numpy")
+        columns, points, layout, version_minor = self.source(name)
+
+        one_by_one = io.BytesIO()
+        with Writer(one_by_one, point_format, version_minor=version_minor,
+                    **layout) as writer:
+            for point in points:
+                writer.write(point)
+
+        in_bulk = io.BytesIO()
+        with Writer(in_bulk, point_format, version_minor=version_minor,
+                    **layout) as writer:
+            writer.write_arrays(columns)
+
+        assert in_bulk.getvalue() == one_by_one.getvalue()
+
+    @pytest.mark.parametrize("name,point_format", CASES)
+    def test_the_points_survive_the_round_trip(self, name, point_format):
+        np = pytest.importorskip("numpy")
+        columns, _, layout, version_minor = self.source(name)
+
+        buf = io.BytesIO()
+        with Writer(buf, point_format, version_minor=version_minor,
+                    **layout) as writer:
+            writer.write_arrays(columns)
+
+        buf.seek(0)
+        with Reader(buf) as reader:
+            back = reader.arrays()
+        assert sorted(back) == sorted(columns)
+        for field in columns:
+            assert np.array_equal(back[field], columns[field]), field
+
+    def test_it_can_be_written_in_batches(self):
+        """What a conversion does: read a block, write it, repeat."""
+        pytest.importorskip("numpy")
+        _, _, layout, _ = self.source("pt1_v2.laz")
+
+        buf = io.BytesIO()
+        with Reader(fixture("pt1_v2.laz")) as reader, \
+                Writer(buf, 1, **layout) as writer:
+            while reader.index < reader.num_points:
+                writer.write_arrays(reader.arrays(count=137))
+
+        buf.seek(0)
+        with Reader(buf) as reader, Reader(fixture("pt1_v2.laz")) as source:
+            assert reader.checksum() == source.checksum()
+
+    def test_fields_no_column_names_are_written_as_zero(self):
+        """Rather than repeating whatever the last point left there."""
+        np = pytest.importorskip("numpy")
+        buf = io.BytesIO()
+        with Writer(buf, 1) as writer:
+            writer.write_arrays({"X": np.arange(10, dtype="=i4"),
+                                 "classification": np.full(10, 2, dtype="u1")})
+
+        buf.seek(0)
+        with Reader(buf) as reader:
+            a = reader.arrays()
+        assert np.array_equal(a["X"], np.arange(10))
+        assert np.array_equal(a["classification"], np.full(10, 2))
+        assert np.array_equal(a["intensity"], np.zeros(10))
+        assert np.array_equal(a["Y"], np.zeros(10))
+
+    def test_an_unknown_field_is_refused(self):
+        pytest.importorskip("numpy")
+        with Writer(io.BytesIO(), 1) as writer:
+            with pytest.raises(ValueError, match="unknown point field"):
+                writer.write_arrays({"nonsense": [1, 2, 3]})

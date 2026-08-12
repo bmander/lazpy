@@ -87,6 +87,66 @@ class TestChunking:
                 point = reader.read()
                 assert (point.X, point.gps_time) == sequential[index]
 
+    def with_no_chunks_declared(self, written):
+        """The same file, with its chunk table saying it holds none."""
+        data = bytearray(written.data)
+        start = load(self.NAME).header["offset_to_point_data"]
+        table_at = struct.unpack_from("<q", data, start)[0]
+        struct.pack_into("<I", data, table_at + 4, 0)
+        return bytes(data)
+
+    def test_a_lost_fixed_size_table_is_rebuilt_from_the_points(self, records,
+                                                                expected):
+        """Where every chunk holds the same number of points, the boundaries
+        are implied by the size and the table is a convenience -- so a file
+        that lost it still reads, whole."""
+        data = self.with_no_chunks_declared(self.written(records, 137))
+        with Reader(io.BytesIO(data)) as reader:
+            assert reader.checksum() == expected
+
+    def test_a_lost_adaptive_table_is_refused_rather_than_guessed(self,
+                                                                  records):
+        """Where the caller picked the boundaries, the table is the only
+        record of them, and nothing else in the file implies where they fall.
+        Decoding on regardless never restarts the decoder at the boundaries
+        the points really have, so every point past the first one comes back
+        wrong -- which is worth an error rather than an answer."""
+        data = self.with_no_chunks_declared(
+            self.written(records, -1, breaks=(1, 2, 199, 200)))
+        # every way in, since a seek opens the first chunk itself and a read
+        # that follows one takes a different path through the chunk logic
+        for reach in (lambda r: list(r),
+                      lambda r: [r.read() for _ in range(len(records))],
+                      lambda r: (r.seek(50), r.read())):
+            with pytest.raises(LazError):
+                with Reader(io.BytesIO(data)) as reader:
+                    reach(reader)
+
+    def test_reading_past_the_last_adaptive_chunk_raises(self, records):
+        """The running totals end at the last chunk, so the chunk after it has
+        no size stated anywhere -- and a read that runs off the end of the
+        points is exactly what asks for one."""
+        written = self.written(records, -1, breaks=(1, 2, 199, 200))
+        with Reader(io.BytesIO(written.data)) as reader:
+            for _ in range(len(records)):
+                reader.read()
+            with pytest.raises(LazError):
+                reader.read()
+
+    @pytest.mark.parametrize("chunk_size", (-1, 137))
+    def test_an_empty_file_can_be_read_and_seeked(self, chunk_size):
+        """A table that declares no chunks states no chunk sizes: there is no
+        chunk for a seek to find, and nothing at chunk_totals[1] for the
+        decoder to take a first chunk size from. Both are files the writer
+        produces itself -- no points, with the boundaries left to the caller
+        or fixed."""
+        written = self.written([], chunk_size)
+        assert written.number_chunks == 0
+        with Reader(io.BytesIO(written.data)) as reader:
+            assert reader.num_points == 0
+            reader.seek(0)
+            assert list(reader) == []
+
     def test_closing_a_chunk_no_point_went_into_does_nothing(self, records):
         """So a caller may end every chunk itself without special-casing
         the first one, or two boundaries that fall together."""

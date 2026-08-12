@@ -1,10 +1,15 @@
-"""Print a summary of a LAS/LAZ file and a sample of its points.
+"""Print a summary of a LAS or LAZ file and a sample of its points.
 
-    python script.py cloud.laz [num_points]
+    python -m lazpy cloud.laz [num_points]
+
+Installed as the ``lazpy`` command too. Reading a file this way asks the
+library most of what it can be asked about one, which is what makes it worth
+shipping rather than keeping beside the source.
 """
 import sys
 
-from lazpy import Chunking, Reader
+from .formats import Chunking
+from .reader import Reader
 
 
 def summarize(reader):
@@ -44,7 +49,16 @@ def summarize(reader):
     print(f"bounds z         {header['min_z']} .. {header['max_z']}")
 
 
-def main(filename, count):
+def main(argv=None):
+    """The command line: a file to summarise, and how many points to show."""
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if not argv:
+        print(__doc__)
+        return 1
+    return summarize_file(argv[0], int(argv[1]) if len(argv) > 1 else 10)
+
+
+def summarize_file(filename, count):
     with Reader(filename) as reader:
         summarize(reader)
 
@@ -65,7 +79,4 @@ def main(filename, count):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) < 2:
-        print(__doc__)
-        sys.exit(1)
-    sys.exit(main(sys.argv[1], int(sys.argv[2]) if len(sys.argv) > 2 else 10))
+    sys.exit(main())

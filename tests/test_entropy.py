@@ -1,5 +1,6 @@
 import io
 import random
+import sys
 
 import pytest
 
@@ -10,10 +11,19 @@ from lazpy import LazError
 from lazpy import _cpylaz as cpylaz
 
 
+# The two symbol models, run through one set of assertions. They are the
+# same table of probabilities either way, and the literals below are what
+# LASzip fills it with, so a difference between the two is a difference
+# from LASzip.
+implementations = pytest.mark.parametrize("impl", [models, cpylaz],
+                                          ids=["python", "c"])
+
+
+@implementations
 class TestArithmeticModel:
 
-    def test_create(self):
-        model = models.ArithmeticModel(256, False)
+    def test_create(self, impl):
+        model = impl.ArithmeticModel(256, False)
         assert model.num_symbols == 256
         assert model.compress is False
 
@@ -28,8 +38,8 @@ class TestArithmeticModel:
 
         assert model.has_decoder_table() is False
 
-    def test_init_4(self):
-        model = models.ArithmeticModel(4, False)
+    def test_init_4(self, impl):
+        model = impl.ArithmeticModel(4, False)
         model.init()
 
         assert model.num_symbols == 4
@@ -52,8 +62,8 @@ class TestArithmeticModel:
 
         assert model.has_decoder_table() is False
 
-    def test_init_256(self):
-        model = models.ArithmeticModel(256, False)
+    def test_init_256(self, impl):
+        model = impl.ArithmeticModel(256, False)
         model.init()
 
         assert model.num_symbols == 256
@@ -79,96 +89,8 @@ class TestArithmeticModel:
 
         assert model.has_decoder_table() is True
 
-    def test_table_init(self):
-        model = models.ArithmeticModel(8, False)
-        with pytest.raises(ValueError):
-            model.init([1, 1, 2, 3, 5, 8, 13, 21, 34])
-
-        model.init([1, 1, 2, 3, 5, 8, 13, 21])
-
-        assert model.symbol_count_lookup(0) == 1
-        assert model.symbol_count_lookup(7) == 21
-
-        assert model.has_decoder_table() is False
-
-        assert model.distribution_lookup(0) == 0
-        assert model.distribution_lookup(4) == 28672
-        assert model.distribution_lookup(5) == 49152
-        assert model.distribution_lookup(6) == 16384
-        assert model.distribution_lookup(7) == 4096
-
-
-class TestCArithmeticModel:
-
-    def test_create(self):
-        model = cpylaz.ArithmeticModel(256, False)
-        assert model.num_symbols == 256
-        assert model.compress is False
-
-        with pytest.raises(Exception):
-            model.decoder_table_lookup(0)
-
-        with pytest.raises(Exception):
-            model.distribution_lookup(0)
-
-        with pytest.raises(Exception):
-            model.symbol_count_lookup(0)
-
-        assert model.has_decoder_table() is False
-
-    def test_init_4(self):
-        model = cpylaz.ArithmeticModel(4, False)
-        model.init()
-
-        assert model.num_symbols == 4
-        assert model.compress is False
-
-        with pytest.raises(Exception):
-            model.decoder_table_lookup(0)
-
-        assert model.symbol_count_lookup(0) == 1
-        assert model.symbol_count_lookup(2) == 1
-        assert model.symbol_count_lookup(3) == 1
-        with pytest.raises(Exception):
-            model.symbol_count_lookup(4)
-
-        assert model.distribution_lookup(0) == 0
-        assert model.distribution_lookup(2) == 16384
-        assert model.distribution_lookup(3) == 24576
-        with pytest.raises(Exception):
-            model.distribution_lookup(4)
-
-        assert model.has_decoder_table() is False
-
-    def test_init_256(self):
-        model = cpylaz.ArithmeticModel(256, False)
-        model.init()
-
-        assert model.num_symbols == 256
-        assert model.compress is False
-
-        assert model.decoder_table_lookup(0) == 0
-        assert model.decoder_table_lookup(32) == 127
-        assert model.decoder_table_lookup(65) == 255
-        with pytest.raises(Exception):
-            model.decoder_table_lookup(66)
-
-        assert model.symbol_count_lookup(0) == 1
-        assert model.symbol_count_lookup(32) == 1
-        assert model.symbol_count_lookup(255) == 1
-        with pytest.raises(Exception):
-            model.symbol_count_lookup(256)
-
-        assert model.distribution_lookup(0) == 0
-        assert model.distribution_lookup(32) == 4096
-        assert model.distribution_lookup(255) == 32640
-        with pytest.raises(Exception):
-            model.distribution_lookup(256)
-
-        assert model.has_decoder_table() is True
-
-    def test_table_init(self):
-        model = cpylaz.ArithmeticModel(8, False)
+    def test_table_init(self, impl):
+        model = impl.ArithmeticModel(8, False)
         with pytest.raises(ValueError):
             model.init([1, 1, 2, 3, 5, 8, 13, 21, 34])
 
@@ -383,7 +305,7 @@ class TestCArithmeticDecoder:
 
     def test_read_bits(self):
         fp = io.BytesIO(file_contents)
-        decoder = encoder.ArithmeticDecoder(fp)
+        decoder = cpylaz.ArithmeticDecoder(fp)
         decoder.start()
 
         assert decoder.read_bits(32) == 3142626653
@@ -531,6 +453,13 @@ class TestCIntegerCompressor:
 # Both implementations are run through the same tests, and one test asserts
 # that they emit the same bytes, so a desync in either shows up as a
 # disagreement rather than as two implementations wrong in the same way.
+#
+# That only holds while the two are separate all the way down, which is why
+# the Python coder builds Python models and never reaches for cpylaz. It also
+# rests on that one byte-comparing test rather than on the round trips: a
+# round trip encodes and decodes through the same model, so it agrees with
+# itself whatever the model does, and a model both sides share is a model
+# nothing here can check at all.
 # ---------------------------------------------------------------------------
 
 # (encoder, decoder, integer compressor) for each implementation
@@ -557,6 +486,18 @@ def decoder_for(coder, data):
     dec = coder[1](io.BytesIO(data))
     dec.start()
     return dec
+
+
+def bit_model_for(coder):
+    """The bit model belonging to this implementation.
+
+    A symbol model comes from the coder itself, through create_symbol_model,
+    so it is always the right one; a bit model has no such hook, and taking
+    the C one for both would put the same model under both coders and leave
+    nothing for them to disagree about.
+    """
+    return (cpylaz.ArithmeticBitModel if coder is C_CODER
+            else models.ArithmeticBitModel)()
 
 
 def pseudorandom(count, modulus, seed=1):
@@ -606,14 +547,14 @@ class TestArithmeticEncoder:
         bits = pseudorandom(5000, 2)
 
         def encode_into(enc):
-            m = cpylaz.ArithmeticBitModel()
+            m = bit_model_for(coder)
             for b in bits:
                 enc.encode_bit(m, b)
 
         data = encode(coder, encode_into)
 
         dec = decoder_for(coder, data)
-        m = cpylaz.ArithmeticBitModel()
+        m = bit_model_for(coder)
         assert [int(dec.decode_bit(m)) for _ in bits] == bits
 
     # 16 symbols or fewer needs no decoder table on the decode side; more does,
@@ -623,6 +564,18 @@ class TestArithmeticEncoder:
     def test_symbols_round_trip(self, coder, num_symbols):
         symbols = pseudorandom(4000, num_symbols, seed=num_symbols)
         assert symbols_round_trip(coder, num_symbols, symbols)[0] == symbols
+
+    def test_symbols_round_trip_past_the_rescaling(self, coder):
+        """Long enough that the model halves its counts.
+
+        A symbol model rescales once they total DM_MAX_COUNT, which takes
+        about 33,000 symbols -- more than any other test here encodes. So the
+        branch that does it was reached by neither implementation, and getting
+        it wrong in one of them was something both this and the test that
+        compares their output would have passed over.
+        """
+        symbols = pseudorandom(40_000, 8, seed=11)
+        assert symbols_round_trip(coder, 8, symbols)[0] == symbols
 
     def test_raw_bits_round_trip(self, coder):
         rand = random.Random(7)
@@ -724,19 +677,29 @@ def test_a_failing_write_is_not_swallowed():
 
 
 def test_the_two_encoders_emit_the_same_bytes():
-    symbols = pseudorandom(4000, 256, seed=17)
-    bits = pseudorandom(4000, 2, seed=19)
+    """The differential proper, and the only test here that can catch a model
+    the two implementations disagree about: a round trip cannot, since encode
+    and decode share whichever model is wrong and stay in step with it.
 
-    def encode_into(enc):
-        m = enc.create_symbol_model(256)
-        m.init()
-        bit_model = cpylaz.ArithmeticBitModel()
-        for symbol, bit in zip(symbols, bits):
-            enc.encode_symbol(m, symbol)
-            enc.encode_bit(bit_model, bit)
-            enc.write_bits(11, symbol * 8 + bit)
+    Long enough for the symbol model to halve its counts, which takes about
+    33,000 symbols. Below that the rescaling branch is never reached, and an
+    error in one implementation's copy of it went unnoticed.
+    """
+    symbols = pseudorandom(40_000, 256, seed=17)
+    bits = pseudorandom(40_000, 2, seed=19)
 
-    assert encode(PY_CODER, encode_into) == encode(C_CODER, encode_into)
+    def encoded_by(coder):
+        def encode_into(enc):
+            m = enc.create_symbol_model(256)
+            m.init()
+            bit_model = bit_model_for(coder)
+            for symbol, bit in zip(symbols, bits):
+                enc.encode_symbol(m, symbol)
+                enc.encode_bit(bit_model, bit)
+                enc.write_bits(11, symbol * 8 + bit)
+        return encode(coder, encode_into)
+
+    assert encoded_by(PY_CODER) == encoded_by(C_CODER)
 
 
 @coders
@@ -840,3 +803,202 @@ class TestCIntegerCompressorDirection:
         enc.start()
         with pytest.raises(ValueError):
             ic.compress(0, 1)
+
+
+class TestUninitialised:
+    """
+    What every type does when it exists but has never been told anything.
+
+    ``__new__`` without ``__init__`` is not an exotic thing to do: pickle and
+    copy both build objects that way, and so does a subclass whose own
+    ``__init__`` forgets to call up. The extension types used to hand back a
+    zeroed struct there, and reaching into one crashed the interpreter --
+    a NULL model pointer dereferenced, a coder with no stream, or a division
+    by a total that was zero because nothing had set it.
+
+    Where a type can settle its own invariant it now does, from ``__new__``:
+    a bit model is told nothing at all, so it is a working model from the
+    moment it exists, and a symbol model points at its own storage so it is
+    an empty model rather than a NULL one. Where a type cannot -- a coder
+    needs a file and a reader needs a container -- the answer is an exception
+    naming what is missing.
+    """
+
+    # taken from the module rather than listed, so the next type added to
+    # the extension is covered by having been added
+    TYPES = [t for t in vars(cpylaz).values()
+             if isinstance(t, type) and not issubclass(t, BaseException)]
+
+    @staticmethod
+    def poke(obj, name):
+        """Read the attribute, and call it if it is callable, with the fewest
+        zeros it will accept.
+
+        A TypeError is taken as the wrong arity and retried wider, which also
+        swallows one raised by the body -- acceptable here, where the only
+        thing being asserted is that the process is still running."""
+        attribute = getattr(obj, name)
+        if not callable(attribute):
+            return
+        for args in ((), (0,), (0, 0)):
+            try:
+                attribute(*args)
+                return
+            except TypeError:
+                continue
+
+    @pytest.mark.parametrize("kind", TYPES, ids=[t.__name__ for t in TYPES])
+    def test_nothing_reachable_from_new_alone_crashes(self, kind):
+        """Every public member of an object built by __new__, poked. The
+        interpreter surviving is the whole assertion -- what each one raises
+        is its own business, and several answer perfectly sensibly."""
+        obj = kind.__new__(kind)
+        poked = 0
+        for name in dir(kind):
+            if name.startswith("__"):
+                continue
+            poked += 1
+            try:
+                self.poke(obj, name)
+            except Exception:
+                pass          # an exception is a fine answer; a crash is not
+        # otherwise a type that stopped exposing anything would pass by
+        # exercising nothing; the smallest of these has six members
+        assert poked >= 5, kind.__name__
+
+    def test_a_bit_model_is_usable_before_init(self):
+        """It is told nothing, so there is nothing to wait for: one built by
+        __new__ alone is the same model as one built the ordinary way, and
+        goes on behaving like it."""
+        fresh = cpylaz.ArithmeticBitModel.__new__(cpylaz.ArithmeticBitModel)
+        ordinary = cpylaz.ArithmeticBitModel()
+        assert fresh.bit_0_prob == ordinary.bit_0_prob
+        assert fresh.bit_0_count == ordinary.bit_0_count
+
+        fresh.update()                       # divided by zero before
+        ordinary.update()
+        assert fresh.bit_0_prob == ordinary.bit_0_prob
+
+    def test_a_symbol_model_is_empty_before_init(self):
+        model = cpylaz.ArithmeticModel.__new__(cpylaz.ArithmeticModel)
+        assert model.num_symbols == 0
+        with pytest.raises(ValueError):
+            model.distribution_lookup(0)
+
+    def test_an_unready_coder_cannot_be_built_on(self):
+        """The pair, which poking one object at a time cannot reach.
+
+        An IntegerCompressor reaches into its coder's struct and codes
+        through it without going near the guards on the coder's own methods,
+        so a coder with no file taken here is a crash later rather than a
+        refusal now -- a division by an interval length of zero on the way
+        in, a write through an output byte that was never allocated on the
+        way out. It is the state __new__ leaves behind, one step removed.
+        """
+        for kind in (cpylaz.ArithmeticDecoder, cpylaz.ArithmeticEncoder):
+            with pytest.raises(ValueError, match="has no file"):
+                cpylaz.IntegerCompressor(kind.__new__(kind), 8)
+
+    def test_a_coder_without_a_file_says_so(self):
+        for kind in (cpylaz.ArithmeticEncoder, cpylaz.ArithmeticDecoder):
+            coder = kind.__new__(kind)
+            assert coder.fp is None
+        with pytest.raises(ValueError):
+            cpylaz.ArithmeticDecoder.__new__(cpylaz.ArithmeticDecoder).start()
+        with pytest.raises(ValueError):
+            cpylaz.ArithmeticEncoder.__new__(cpylaz.ArithmeticEncoder).done()
+
+
+class TestReinitialisation:
+    """__init__ is callable again on a live object, and what the last call
+    built has to be let go of rather than stranded."""
+
+    def test_a_coder_does_not_strand_its_last_file(self):
+        for kind, payload in ((cpylaz.ArithmeticEncoder, b""),
+                              (cpylaz.ArithmeticDecoder, bytes(100))):
+            fp = io.BytesIO(payload)
+            coder = kind(fp)
+            before = sys.getrefcount(fp)
+            for _ in range(5):
+                coder.__init__(fp)
+            assert sys.getrefcount(fp) == before, kind.__name__
+
+    def test_an_integer_compressor_does_not_strand_its_coder(self):
+        """The third of the same shape, after the two coders."""
+        decoder = cpylaz.ArithmeticDecoder(io.BytesIO(bytes(1000)))
+        compressor = cpylaz.IntegerCompressor(decoder, 8)
+        before = sys.getrefcount(decoder)
+        for _ in range(5):
+            compressor.__init__(decoder, 8)
+        assert sys.getrefcount(decoder) == before
+
+    def test_a_borrowed_model_lets_go_of_its_owner(self):
+        """A model handed out by an IntegerCompressor keeps that compressor
+        alive; re-initialising it makes the model its own again, which has to
+        release the compressor too or nothing ever frees it."""
+        decoder = cpylaz.ArithmeticDecoder(io.BytesIO(bytes(1000)))
+        compressor = cpylaz.IntegerCompressor(decoder, 8)
+        compressor.init_decompressor()
+        before = sys.getrefcount(compressor)
+
+        borrowed = compressor.get_m_bits(0)
+        borrowed.__init__(8)
+        del borrowed
+        assert sys.getrefcount(compressor) == before
+
+
+class TestDecoderStreamFailures:
+    """
+    A file object that raises partway through a decode.
+
+    The stream underneath cannot fail: past the end of its data it hands back
+    zeros so that decoding carries on rather than stopping, which is what lets
+    a truncated file be reported as a decode error instead of a read error.
+    A file object whose read raised is not that. The stream records it and
+    leaves the Python exception set for whoever holds the GIL, and every
+    decode call that ignores it returns a number worked out from those zeros
+    while the exception waits for something unrelated to trip over it -- which
+    it eventually does, as a SystemError from whichever call is next to return
+    a value with an exception already pending.
+
+    PointReader has asked this question since it was written; the decoder
+    wrapper had not.
+    """
+
+    class ExplodesAfter(io.BytesIO):
+        """Answers `allow` refills and then stops."""
+
+        def __init__(self, data, allow=1):
+            super().__init__(data)
+            self.allow = allow
+            self.calls = 0
+
+        def readinto(self, buffer):
+            self.calls += 1
+            if self.calls > self.allow:
+                raise PermissionError("device on fire")
+            return super().readinto(buffer)
+
+    def test_a_raising_file_reaches_the_caller(self):
+        """As itself, so that a broken file object is distinguishable from a
+        file that merely ran out."""
+        fp = self.ExplodesAfter(bytes(1_000_000))
+        decoder = cpylaz.ArithmeticDecoder(fp)
+        decoder.start()
+
+        with pytest.raises(PermissionError):
+            for _ in range(100_000):
+                decoder.read_bits(32)
+        assert fp.calls > 1          # it really did have to come back for more
+
+    def test_decoding_symbols_reaches_the_caller_too(self):
+        fp = self.ExplodesAfter(bytes(1_000_000))
+        decoder = cpylaz.ArithmeticDecoder(fp)
+        decoder.start()
+        model = cpylaz.ArithmeticModel(256, False)
+        model.init()
+
+        with pytest.raises(PermissionError):
+            for _ in range(200_000):
+                decoder.decode_symbol(model)
+                decoder.read_bits(32)

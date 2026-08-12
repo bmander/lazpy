@@ -178,6 +178,32 @@ class TestMalformedChunks:
                 for _ in range(reader.num_points):
                     reader.read()
 
+    def test_a_chunk_table_claiming_eleven_gigabytes(self):
+        """The chunk table's own count, rather than the layer sizes inside a
+        chunk: it is a u32 out of the file and two arrays are sized from it,
+        so a corrupt one asks for eight bytes per chunk of whatever it says.
+        A chunk takes at least a byte of the point data it describes, so
+        there cannot be more chunks than there are bytes between the first
+        one and the table -- which is what this file is now refused by,
+        before anything is allocated for it.
+        """
+        with pytest.raises(LazError, match="corrupt"):
+            with Reader(malformed("chunk_table_11gb.laz")) as reader:
+                for _ in range(reader.num_points):
+                    reader.read()
+
+    def test_a_layer_of_no_bytes_at_all(self):
+        """A layered chunk whose layer is declared empty. Its decoder starts
+        with an interval length of zero, and the first decode divides by it
+        -- a SIGFPE, which takes the process rather than raising. The decoder
+        starts at U32_MAX instead now, so an empty layer runs out of stream
+        and is reported as the corrupt chunk it is.
+        """
+        with pytest.raises(LazError, match="corrupt"):
+            with Reader(malformed("empty_layer_sigfpe.laz")) as reader:
+                for _ in range(reader.num_points):
+                    reader.read()
+
     def test_a_seek_the_file_object_refuses_is_reported_as_itself(self):
         """Found by fuzzing, as a SystemError from an unrelated place.
 

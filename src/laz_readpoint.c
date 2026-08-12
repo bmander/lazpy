@@ -344,12 +344,22 @@ static BOOL read_chunk_table(LazReadPoint *rp)
     return LAZ_TRUE;
 }
 
+/* Whether *index* is a chunk this file's table describes, which is what every
+ * reader of chunk_totals has to establish first. Neither test it might be
+ * mistaken for answers it: the array is allocated for a table of no chunks
+ * too, holding only the zero it starts from, and chunk_size == U32_MAX stops
+ * meaning "adaptive" the moment init_dec overwrites it below. */
+static BOOL chunk_is_tabled(const LazReadPoint *rp, U32 index)
+{
+    return rp->chunk_totals != NULL && index < rp->number_chunks;
+}
+
 static BOOL init_dec(LazReadPoint *rp)
 {
     if (rp->number_chunks == U32_MAX) {
         if (!read_chunk_table(rp)) return LAZ_FALSE;
         rp->current_chunk = 0;
-        if (rp->chunk_totals) rp->chunk_size = (U32)rp->chunk_totals[1];
+        if (chunk_is_tabled(rp, 0)) rp->chunk_size = (U32)rp->chunk_totals[1];
     }
     rp->point_start = laz_stream_tell(rp->instream);
     rp->readers = NULL;
@@ -369,6 +379,26 @@ BOOL laz_readpoint_read(LazReadPoint *rp, LazPoint *point, U8 *extra_bytes)
     }
 
     if (rp->have_dec) {
+        /*
+         * A point about to be decoded out of an adaptive file whose table
+         * states no size for the chunk it falls in: either the table lied
+         * about how many chunks there are, or this is a read past the last
+         * point. Carrying on would leave chunk_size at U32_MAX, so no later
+         * read would take a chunk transition and the decoder would never
+         * restart at the boundaries the file really has -- every point from
+         * the first of them on comes back wrong, with nothing raised.
+         *
+         * Asked here rather than where a chunk is opened, because a seek
+         * opens one itself and then reading takes neither branch. Where the
+         * boundaries are fixed the table is rebuilt while reading instead,
+         * which recovers such a file completely; adaptive boundaries are not
+         * recoverable, which is why the file was asked to state them.
+         */
+        if (rp->chunk_totals && !chunk_is_tabled(rp, rp->current_chunk)) {
+            set_error(rp, "chunk table gives no size for chunk %u",
+                      rp->current_chunk);
+            return LAZ_FALSE;
+        }
         if (rp->chunk_count == rp->chunk_size) {
             if (rp->point_start != 0) {
                 laz_decoder_done(&rp->dec);
@@ -397,7 +427,7 @@ BOOL laz_readpoint_read(LazReadPoint *rp, LazPoint *point, U8 *extra_bytes)
                 }
                 rp->chunk_starts[rp->tabled_chunks] = rp->point_start;
                 rp->tabled_chunks++;
-            } else if (rp->chunk_totals) {
+            } else if (chunk_is_tabled(rp, rp->current_chunk)) {
                 rp->chunk_size = (U32)(rp->chunk_totals[rp->current_chunk + 1] -
                                        rp->chunk_totals[rp->current_chunk]);
             }
@@ -474,9 +504,13 @@ BOOL laz_readpoint_read(LazReadPoint *rp, LazPoint *point, U8 *extra_bytes)
     return LAZ_TRUE;
 }
 
+/* Which chunk holds point *index*, by bisection over the running totals. The
+ * caller guarantees a range with a chunk in it; the loop stops on an empty
+ * one anyway, since an equality test there would spin on a range it can never
+ * close. */
 static U32 search_chunk_table(const LazReadPoint *rp, U64 index, U32 lower, U32 upper)
 {
-    while (lower + 1 != upper) {
+    while (lower + 1 < upper) {
         U32 mid = (lower + upper) / 2;
         if (index >= rp->chunk_totals[mid]) lower = mid; else upper = mid;
     }
@@ -504,7 +538,7 @@ BOOL laz_readpoint_seek(LazReadPoint *rp, U64 current, U64 target)
 
     if (rp->chunk_starts) {
         U32 target_chunk;
-        if (rp->chunk_totals) {
+        if (chunk_is_tabled(rp, 0)) {
             target_chunk = search_chunk_table(rp, target, 0, rp->number_chunks);
             rp->chunk_size = (U32)(rp->chunk_totals[target_chunk + 1] -
                                    rp->chunk_totals[target_chunk]);
@@ -518,7 +552,9 @@ BOOL laz_readpoint_seek(LazReadPoint *rp, U64 current, U64 target)
             if (rp->current_chunk < (rp->tabled_chunks - 1)) {
                 laz_decoder_done(&rp->dec);
                 rp->current_chunk = rp->tabled_chunks - 1;
-                laz_stream_seek(rp->instream, rp->chunk_starts[rp->current_chunk]);
+                if (!laz_stream_seek(rp->instream,
+                                     rp->chunk_starts[rp->current_chunk]))
+                    return LAZ_FALSE;
                 if (!init_dec(rp)) return LAZ_FALSE;
                 rp->chunk_count = 0;
             }
@@ -526,7 +562,9 @@ BOOL laz_readpoint_seek(LazReadPoint *rp, U64 current, U64 target)
         } else if (rp->current_chunk != target_chunk || current > target) {
             laz_decoder_done(&rp->dec);
             rp->current_chunk = target_chunk;
-            laz_stream_seek(rp->instream, rp->chunk_starts[rp->current_chunk]);
+            if (!laz_stream_seek(rp->instream,
+                                 rp->chunk_starts[rp->current_chunk]))
+                return LAZ_FALSE;
             if (!init_dec(rp)) return LAZ_FALSE;
             rp->chunk_count = 0;
         } else {
@@ -534,7 +572,7 @@ BOOL laz_readpoint_seek(LazReadPoint *rp, U64 current, U64 target)
         }
     } else if (current > target) {
         laz_decoder_done(&rp->dec);
-        laz_stream_seek(rp->instream, rp->point_start);
+        if (!laz_stream_seek(rp->instream, rp->point_start)) return LAZ_FALSE;
         if (!init_dec(rp)) return LAZ_FALSE;
         delta = target;
     } else if (current < target) {
