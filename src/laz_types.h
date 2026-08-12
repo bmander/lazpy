@@ -236,6 +236,10 @@ static inline BOOL laz_host_order_ok(void)
  * one rule hold on every host -- and is why no assertion here has anything to
  * say about bit positions: they are no longer the compiler's to choose.
  */
+/* A wavepacket is an opaque blob, so its width is a number several places
+ * have to agree about rather than something sizeof settles locally. */
+#define LAZ_WAVEPACKET_SIZE 29
+
 typedef struct {
     I32 X;                              /* offset  0 */
     I32 Y;                              /* offset  4 */
@@ -256,7 +260,7 @@ typedef struct {
 
     F64 gps_time;                       /* offset 32 */
     U16 rgb[4];                         /* offset 40 (r, g, b, nir) */
-    U8 wave_packet[29];                 /* offset 48 */
+    U8 wave_packet[LAZ_WAVEPACKET_SIZE];  /* offset 48 */
 
     I32 num_extra_bytes;
     U8 *extra_bytes;

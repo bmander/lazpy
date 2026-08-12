@@ -5,7 +5,7 @@ from collections.abc import Mapping
 import io
 import os
 
-from ._cpylaz import PointReader, SpatialIndex, LazError
+from ._cpylaz import PointReader, SpatialIndex, LazError, POINT_LAYOUT
 from .formats import (LASZIP_VLR_KEY, LASINDEX_EVLR_KEY, Compressor, Coder,
                       Chunking, Selective, UnsupportedFileError,
                       items_for_point_format, _POINT_FORMATS)
@@ -25,53 +25,98 @@ from .compat import _compatibility_layout, _upgrade_to_las_14
 # their containing byte, which is cheaper than teaching the decode loop about
 # bit layouts -- and the ones sharing a byte share one read of it.
 #
-# Offsets are into LazPoint (src/laz_types.h), which mirrors LASzip's own
-# point struct; -1 means the extra bytes instead. Types are spelled in native
-# order ('='), because read_into copies the decoded point's bytes straight
-# through and a decoded point is in host order -- see the byte-order note on
-# LazPoint. The sub-byte shifts are host-independent: LazPoint packs those
-# bytes by hand rather than leaving them to the compiler, for exactly this
-# reason.
+# Where each one sits comes from C, through POINT_LAYOUT: the extension takes
+# it from LazPoint with offsetof, so the offsets are stated once, in the file
+# that decides them. Restating them here used to mean that reordering the
+# struct made every array silently wrong, with only a test between that and a
+# released version.
 #
-# This restates a layout that C owns, so it is pinned from the outside:
-# test_arrays_match_reading_point_by_point compares every column of every
-# fixture against Point's own getters, which are themselves pinned to laszip.
+# What stays is what C has no opinion about: the numpy type a field lands in,
+# and how the ones packed into part of a byte come out of it. Types are
+# spelled in native order ('='), because read_into copies the decoded point's
+# bytes straight through and a decoded point is in host order -- see the
+# byte-order note on LazPoint. The sub-byte shifts are host-independent:
+# LazPoint packs those bytes by hand rather than leaving them to the compiler,
+# for exactly this reason.
+#
+# A field's offset is a member's plus how far into it the field starts, which
+# is only ever non-zero for the four colours sharing `rgb`. -1 means the extra
+# bytes instead, which are not part of the struct at all.
 # ---------------------------------------------------------------------------
+
+# the one width C states rather than a numpy dtype implying it
+_WAVEPACKET_WIDTH = POINT_LAYOUT['wave_packet'][1]
 
 _Field = namedtuple("_Field", "offset dtype width shift mask",
                     defaults=(1, 0, None))
 
-_ARRAY_FIELDS = {
-    'X': _Field(0, '=i4'),
-    'Y': _Field(4, '=i4'),
-    'Z': _Field(8, '=i4'),
-    'intensity': _Field(12, '=u2'),
-    'return_number': _Field(14, 'u1', mask=0x07),
-    'number_of_returns': _Field(14, 'u1', shift=3, mask=0x07),
-    'scan_direction_flag': _Field(14, 'u1', shift=6, mask=0x01),
-    'edge_of_flight_line': _Field(14, 'u1', shift=7, mask=0x01),
-    'classification': _Field(15, 'u1', mask=0x1F),
-    'synthetic_flag': _Field(15, 'u1', shift=5, mask=0x01),
-    'keypoint_flag': _Field(15, 'u1', shift=6, mask=0x01),
-    'withheld_flag': _Field(15, 'u1', shift=7, mask=0x01),
-    'scan_angle_rank': _Field(16, 'i1'),
-    'user_data': _Field(17, 'u1'),
-    'point_source_ID': _Field(18, '=u2'),
-    'extended_scan_angle': _Field(20, '=i2'),
-    'extended_point_type': _Field(22, 'u1', mask=0x03),
-    'extended_scanner_channel': _Field(22, 'u1', shift=2, mask=0x03),
-    'extended_classification_flags': _Field(22, 'u1', shift=4, mask=0x0F),
-    'extended_classification': _Field(23, 'u1'),
-    'extended_return_number': _Field(24, 'u1', mask=0x0F),
-    'extended_number_of_returns': _Field(24, 'u1', shift=4, mask=0x0F),
-    'gps_time': _Field(32, '=f8'),
-    'red': _Field(40, '=u2'),
-    'green': _Field(42, '=u2'),
-    'blue': _Field(44, '=u2'),
-    'nir': _Field(46, '=u2'),
+# Each field as its own column: the member of LazPoint it comes out of, how
+# far into that member it starts, and the rest. `within` is for the two
+# members that hold more than one field end to end -- the three colours and
+# the near infrared share `rgb`, as they do on disk.
+_Column = namedtuple("_Column", "member dtype within width shift mask",
+                     defaults=(0, 1, 0, None))
+
+_ARRAY_COLUMNS = {
+    'X': _Column('X', '=i4'),
+    'Y': _Column('Y', '=i4'),
+    'Z': _Column('Z', '=i4'),
+    'intensity': _Column('intensity', '=u2'),
+    'return_number': _Column('returns_and_flags', 'u1', mask=0x07),
+    'number_of_returns': _Column('returns_and_flags', 'u1', shift=3,
+                                 mask=0x07),
+    'scan_direction_flag': _Column('returns_and_flags', 'u1', shift=6,
+                                   mask=0x01),
+    'edge_of_flight_line': _Column('returns_and_flags', 'u1', shift=7,
+                                   mask=0x01),
+    'classification': _Column('classification_bits', 'u1', mask=0x1F),
+    'synthetic_flag': _Column('classification_bits', 'u1', shift=5, mask=0x01),
+    'keypoint_flag': _Column('classification_bits', 'u1', shift=6, mask=0x01),
+    'withheld_flag': _Column('classification_bits', 'u1', shift=7, mask=0x01),
+    'scan_angle_rank': _Column('scan_angle_rank', 'i1'),
+    'user_data': _Column('user_data', 'u1'),
+    'point_source_ID': _Column('point_source_ID', '=u2'),
+    'extended_scan_angle': _Column('extended_scan_angle', '=i2'),
+    'extended_point_type': _Column('extended_flags', 'u1', mask=0x03),
+    'extended_scanner_channel': _Column('extended_flags', 'u1', shift=2,
+                                        mask=0x03),
+    'extended_classification_flags': _Column('extended_flags', 'u1', shift=4,
+                                             mask=0x0F),
+    'extended_classification': _Column('extended_classification', 'u1'),
+    'extended_return_number': _Column('extended_returns', 'u1', mask=0x0F),
+    'extended_number_of_returns': _Column('extended_returns', 'u1', shift=4,
+                                          mask=0x0F),
+    'gps_time': _Column('gps_time', '=f8'),
+    'red': _Column('rgb', '=u2'),
+    'green': _Column('rgb', '=u2', within=2),
+    'blue': _Column('rgb', '=u2', within=4),
+    'nir': _Column('rgb', '=u2', within=6),
     # a wavepacket keeps its on-disk order in the point, so it is bytes here
-    'wave_packet': _Field(48, 'u1', width=29),
+    'wave_packet': _Column('wave_packet', 'u1', width=_WAVEPACKET_WIDTH),
 }
+
+
+def _array_fields():
+    """The columns above, placed where the C struct really keeps them.
+
+    Only the placing comes from C; which numpy type a field lands in, and how
+    the ones sharing a byte are unpacked out of it, are numpy's business and
+    stay here. The width of a blob is checked against what C says rather than
+    restated, so a wavepacket that grew would be a failure to import rather
+    than a column reading 29 bytes of a longer field.
+    """
+    fields = {}
+    for name, column in _ARRAY_COLUMNS.items():
+        offset, size = POINT_LAYOUT[column.member]
+        if column.within + column.width > size:
+            raise RuntimeError(
+                f"{name} does not fit in LazPoint.{column.member}")
+        fields[name] = _Field(offset + column.within, column.dtype,
+                              column.width, column.shift, column.mask)
+    return fields
+
+
+_ARRAY_FIELDS = _array_fields()
 
 # The fields every point format carries, in the order LAS lists them.
 _CORE_FIELDS = ('X', 'Y', 'Z', 'intensity', 'return_number',
