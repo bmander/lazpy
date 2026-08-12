@@ -549,10 +549,6 @@ typedef struct {
     Py_ssize_t size;
 } Column;
 
-/* The part of LazPoint the item readers fill; everything past it is
- * bookkeeping (the extra-bytes count and pointer), not decoded data. */
-#define POINT_FIXED_EXTENT (LAZ_POINT_OFFSET_WAVEPACKET + 29)
-
 /* ----------------------------------------------------------- region queries */
 
 /*
