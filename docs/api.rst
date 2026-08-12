@@ -8,6 +8,7 @@ API reference
 
    reader
    writer
+   crs
    types
    formats
    container

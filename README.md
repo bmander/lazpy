@@ -283,6 +283,7 @@ RES = 1.0                                    # metres per pixel
 
 with Reader("cloud.laz") as reader:
     x, y, z = reader.xyz().T
+    crs = reader.crs                          # what the file says it is in
 
 rows = ((y.max() - y) / RES).astype(np.intp)  # north-up: row 0 is the top
 cols = ((x - x.min()) / RES).astype(np.intp)
@@ -293,10 +294,33 @@ dsm[np.isneginf(dsm)] = np.nan                # cells no point landed in
 
 with rasterio.open("dsm.tif", "w", driver="GTiff",
                    width=dsm.shape[1], height=dsm.shape[0], count=1,
-                   dtype="float32", nodata=np.nan, crs="EPSG:32610",
+                   dtype="float32", nodata=np.nan, crs=crs,
                    transform=from_origin(x.min(), y.max(), RES, RES)) as dst:
     dst.write(dsm, 1)
 ```
+
+## Coordinate reference systems
+
+`reader.crs` is what the file says its coordinates are in, as a
+[pyproj](https://pyproj4.github.io/pyproj/) CRS, or `None` where the file says
+nothing usable. Writing takes the same thing back:
+
+```python
+with Writer("out.laz", point_format=1, crs=reader.crs) as writer:
+    ...
+```
+
+It is read from the GeoTIFF geokeys, or from the OGC WKT record LAS 1.4 uses
+in their place — and written the same way round, WKT for point formats 6–10
+and geokeys otherwise. `pip install lazpy[crs]` adds pyproj; a program that
+never asks for a CRS does not need it.
+
+What a file says is reported as the file said it, with nothing inferred and
+nothing warned about. A file naming an EPSG code in metres while its
+coordinates are in feet — the `ProjLinearUnits` geokey is the usual sign — is
+a real thing to meet, and it comes back as the code it names; `lazpy
+cloud.laz` prints that code, and passing the CRS you actually want to whatever
+consumes the raster is a one-line change.
 
 ## What is supported
 

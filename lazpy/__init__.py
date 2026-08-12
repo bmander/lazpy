@@ -39,8 +39,11 @@ from .formats import (ADAPTIVE_CHUNK_SIZE,  # noqa: F401
                       LASZIP_VLR_RECORD_ID, LASZIP_VLR_USER_ID,  # noqa: F401
                       LASZIP_VLR_KEY, LASCOMPATIBLE_VLR_KEY,
                       EXTRA_BYTES_VLR_KEY, LASINDEX_EVLR_KEY,
+                      GEOKEY_DIRECTORY_KEY, WKT_VLR_KEY,
+                      WKT_GLOBAL_ENCODING_BIT,
                       UnsupportedFileError, Compressor, Coder, Chunking,
                       Selective, ItemType, items_for_point_format)
+from .crs import crs_record, read_crs  # noqa: F401
 from .headers import (header_formats, format_size,  # noqa: F401
                       unpack_format, pack_format, EXTRA_BYTES_ATTRIBUTE_SIZE)
 from .extra_bytes import (ExtraBytesAttribute,  # noqa: F401
@@ -52,4 +55,5 @@ from .writer import (Writer, auto_offsets,  # noqa: F401
 __all__ = ["Reader", "Writer", "Point", "Chunking", "Compressor", "Coder",
            "ItemType", "Selective", "LazError", "UnsupportedFileError",
            "ExtendedVariableLengthRecord", "ExtraBytesAttribute",
-           "extra_bytes_record", "auto_offsets", "append_spatial_index"]
+           "extra_bytes_record", "crs_record", "read_crs", "auto_offsets",
+           "append_spatial_index"]

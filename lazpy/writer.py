@@ -8,10 +8,13 @@ from ._utils import cstr, pack_cstr
 from .compat import _compatibility_payload, _disguise, _DISGUISED_FORMAT
 from .extra_bytes import _described_width
 from .formats import (EXTRA_BYTES_VLR_KEY, LASCOMPATIBLE_VLR_KEY,
-                      LASINDEX_EVLR_KEY, LASZIP_VLR_KEY, Compressor,
+                      LASINDEX_EVLR_KEY, LASZIP_VLR_KEY,
+                      PROJECTION_VLR_KEYS, WKT_GLOBAL_ENCODING_BIT,
+                      Compressor,
                       Coder, UnsupportedFileError, _POINT_FORMATS,
                       items_for_point_format, _versioned_items,
                       _default_version_minor, _min_version_minor)
+from .crs import crs_record
 from .reader import _array_field, _numpy
 from .headers import (EVLR_HEADER_FORMAT, LASZIP_SPECIAL_EVLRS_AT,
                       LASZIP_SPECIAL_EVLR_FORMAT, MAX_VLR_PAYLOAD,
@@ -172,6 +175,22 @@ def _records(vlrs):
     return records
 
 
+def _add_crs(records, crs, wkt, description):
+    """`records` with a projection record for `crs` on the end.
+
+    A caller either hands over a CRS and lets this build the record, or builds
+    it themselves and passes it among ``vlrs``. Doing both is refused: it is
+    two answers to one question, and which of them a reader found would be a
+    matter of record order.
+    """
+    if any((record['user_id'], record['record_id']) in PROJECTION_VLR_KEYS
+           for record in records):
+        raise ValueError("crs= and a projection record in vlrs are two "
+                         "answers to where the points are; give one")
+    return records + _records([crs_record(crs, wkt=wkt,
+                                          description=description)])
+
+
 def _record(key, data, description, reserved=0):
     """One record, sized by the payload it holds."""
     return {
@@ -264,7 +283,7 @@ class Writer:
                  offsets=(0.0, 0.0, 0.0), compressed=None, compressor=None,
                  laz_version=None, chunk_size=50000, num_extra_bytes=None,
                  version_minor=None, system_identifier=b'',
-                 generating_software=None, vlrs=(), evlrs=(),
+                 generating_software=None, crs=None, vlrs=(), evlrs=(),
                  vlr_description=b'lazpy', file_creation=(0, 0),
                  compatibility=False, user_data_in_header=b'',
                  user_data_after_header=b''):
@@ -289,11 +308,24 @@ class Writer:
         become georeferenced ones; they are recorded in the header and applied
         to nothing here, since points are written as they are given.
 
+        ``crs`` is the coordinate reference system the points are in --
+        anything ``pyproj.CRS.from_user_input`` takes, so a
+        :class:`pyproj.CRS`, an ``"EPSG:2927"``, a WKT string. It is written
+        as an OGC WKT record for the LAS 1.4 point formats, which is what
+        those call for, and as GeoTIFF geokeys otherwise::
+
+            with Writer("out.laz", point_format=1,
+                        crs=reader.crs) as writer:
+
+        Passing a projection record in ``vlrs`` as well is refused, since a
+        file can only have one and a reader would find whichever came first.
+
         ``vlrs`` are the variable length records the file carries besides the
-        LASzip one, which is the writer's own: a coordinate reference system,
-        an "extra bytes" descriptor, whatever a file being copied had. They
-        are taken here rather than later because the header records how far
-        past itself the points begin.
+        LASzip one, which is the writer's own: an "extra bytes" descriptor,
+        whatever a file being copied had, a projection record built by hand
+        with :func:`~lazpy.crs_record` rather than handed over as ``crs``.
+        They are taken here rather than later because the header records how
+        far past itself the points begin.
 
         ``evlrs`` are the extended records, which LAS 1.4 keeps behind the
         point data and which may hold payloads no ordinary record can. They
@@ -353,6 +385,12 @@ class Writer:
         self.items = items_for_point_format(self.written_format, record_length)
         point14 = _POINT_FORMATS[self.written_format][5]
 
+        # after the disguise, so a LAS 1.4 file written as a legacy one states
+        # its projection the way the version it claims to be would
+        if crs is not None:
+            records = _add_crs(records, crs, wkt=point14,
+                               description=vlr_description)
+
         if compressed is None:
             compressed = not str(filename).lower().endswith('.las')
         if version_minor is None:
@@ -400,6 +438,10 @@ class Writer:
                 scales, offsets, system_identifier, generating_software,
                 file_creation, user_data=bytes(user_data_in_header),
                 padding=bytes(user_data_after_header))
+            # LAS 1.4 notes a WKT record in the header, as compat.py does for
+            # a file being upgraded into one
+            if crs is not None and point14:
+                self.header['global_encoding'] |= WKT_GLOBAL_ENCODING_BIT
             # the record the counts go back into leads the block, which is
             # where _disguise_as_legacy put it
             if self.compatibility:

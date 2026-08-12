@@ -132,6 +132,28 @@ LASZIP_ITEM_FORMAT = (
     ('version', 2, unsigned_int),
 )
 
+# The GeoTIFF GeoKeyDirectory record's payload, followed by one entry per key
+# -- the same header-then-repeated-rows shape the LASzip record has. The keys
+# are TIFF's own, borrowed by GeoTIFF and borrowed again by LAS; lazpy.crs
+# reads and builds them.
+#
+# A key states its value in value_offset when tiff_tag_location is 0, and
+# otherwise names the record it is held in: 34736 for doubles, 34737 for
+# ASCII, with value_offset an index into that record and count a length.
+GEOKEY_DIRECTORY_FORMAT = (
+    ('key_directory_version', 2, unsigned_int),
+    ('key_revision', 2, unsigned_int),
+    ('minor_revision', 2, unsigned_int),
+    ('number_of_keys', 2, unsigned_int),
+)
+
+GEOKEY_ENTRY_FORMAT = (
+    ('key_id', 2, unsigned_int),
+    ('tiff_tag_location', 2, unsigned_int),
+    ('count', 2, unsigned_int),
+    ('value_offset', 2, unsigned_int),
+)
+
 # One attribute out of an "extra bytes" record, which is how a file says what
 # the opaque bytes on the end of its points mean. The records are laid end to
 # end, one fixed-width descriptor each.

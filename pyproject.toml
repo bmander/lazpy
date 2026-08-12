@@ -26,6 +26,9 @@ classifiers = [
 # Reader.xyz()) wants numpy, and it imports it on use rather than on import.
 [project.optional-dependencies]
 numpy = ["numpy"]
+# Reader.crs and Writer(crs=...) turn the projection records into a pyproj
+# CRS, and import pyproj on use as the array API imports numpy.
+crs = ["pyproj"]
 # Read the Docs installs these; so does the docs job in CI.
 docs = ["sphinx>=7", "furo", "myst-parser"]
 
