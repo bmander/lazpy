@@ -157,6 +157,33 @@ class TestPointSemantics:
             want = [reader.read().X for _ in range(5)]
             assert got == want
 
+    def test_points_goes_to_its_start_wherever_the_reader_is(self):
+        """start is a place to go to, not a number of points to skip past, so
+        the default of 0 has to mean the beginning even for a reader that has
+        already read some -- which is the one case where going nowhere and
+        starting from zero are not the same thing."""
+        with Reader(fixture("pt2_v2.laz")) as reader:
+            for _ in range(3):
+                reader.read()
+            whole = [p.X for p in reader.points()]
+            assert len(whole) == reader.num_points
+            # and again, from the end it has now been left at
+            assert [p.X for p in reader.points()] == whole
+
+    def test_iterating_carries_on_from_the_current_point(self):
+        """Iterating a reader something has read from continues rather than
+        starting again -- the one behaviour that would break if *start* ever
+        came to mean "stay where you are", which is the other way this could
+        have been fixed. Nothing else in the suite iterates a part-read
+        reader."""
+        with Reader(fixture("pt2_v2.laz")) as reader:
+            whole = [p.X for p in reader.points()]
+            reader.seek(0)
+
+            head = [reader.read().X for _ in range(5)]
+            assert head == whole[:5]
+            assert [p.X for p in reader] == whole[5:]
+
 
 class TestFileProperties:
     def test_compressed_and_uncompressed_agree(self):
