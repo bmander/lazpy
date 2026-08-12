@@ -884,7 +884,23 @@ class Reader:
                   center_x, center_y, radius)
         return region, spans
 
-    def points_within(self, min_x, min_y, max_x, max_y):
+    @staticmethod
+    def _area(bounds, rect, circle):
+        """One area from either spelling of it.
+
+        A rectangle may be given as four numbers or as ``rect=``, so that the
+        point queries and the array queries take the same arguments while the
+        older positional form goes on working.
+        """
+        if not bounds:
+            return rect, circle
+        if rect is not None or circle is not None:
+            raise TypeError("give a rectangle once, not twice")
+        if len(bounds) != 4:
+            raise TypeError("a rectangle is min_x, min_y, max_x, max_y")
+        return bounds, None
+
+    def points_within(self, *bounds, rect=None, circle=None):
         """Yield the points inside a rectangle, in file order.
 
         The rectangle is half-open -- a point counts when ``min_x <= x <
@@ -897,13 +913,19 @@ class Reader:
         inside are decoded. Without one it is a filtered full scan: the same
         points, at the cost of reading everything.
 
+        The rectangle is four numbers, or ``rect=(min_x, min_y, max_x,
+        max_y)``; ``circle=(center_x, center_y, radius)`` selects that shape
+        instead. Those are the arguments :meth:`arrays_within` and
+        :meth:`xyz_within` take, so a query keeps its shape when it moves
+        between them.
+
         As with :meth:`points`, each iteration yields the same object with new
         contents; call ``point.copy()`` to keep one. The reader is left
         wherever the last interval ended, so :meth:`seek` before reading
         sequentially again.
         """
-        return self._points_in(*self._region(rect=(min_x, min_y,
-                                                   max_x, max_y)))
+        rect, circle = self._area(bounds, rect, circle)
+        return self._points_in(*self._region(rect=rect, circle=circle))
 
     def points_within_circle(self, center_x, center_y, radius):
         """Yield the points inside a circle, in file order.
@@ -916,9 +938,11 @@ class Reader:
         With a spatial index this reaches fewer cells than the square around
         the circle would -- the corners of that square are cells a circle
         never touches -- so it decodes less as well as returning less.
+
+        The same as ``points_within(circle=(center_x, center_y, radius))``,
+        named because selecting around a point is worth a name.
         """
-        return self._points_in(*self._region(circle=(center_x, center_y,
-                                                     radius)))
+        return self.points_within(circle=(center_x, center_y, radius))
 
     def _points_in(self, region, spans):
         """Yield the points a query selects, interval by interval."""
@@ -1048,24 +1072,51 @@ class Reader:
             a = reader.arrays_within("X", "Y", "Z", rect=(x0, y0, x1, y1))
             a = reader.arrays_within("X", "Y", circle=(x, y, 30.0))
 
-        Arrays are sized for every candidate the index turns up and trimmed
+        Arrays are sized for the candidates being looked through and trimmed
         to what was really inside, so a query briefly holds more than it
-        returns. The reader is left wherever the last interval ended.
+        returns -- but never more than :data:`WITHIN_BLOCK` points' worth at
+        a time, which is what keeps a small query over a file with no index
+        from sizing itself for the whole file. The reader is left wherever
+        the last interval ended.
         """
         region, spans = self._region(rect=rect, circle=circle)
-        candidates = sum(stop - start for start, stop in spans)
-        out, targets, packed = self._array_columns(names, candidates)
+        blocks = [self._within_block(names, region, start, stop)
+                  for span_start, span_stop in spans
+                  for start, stop in self._blocks(span_start, span_stop)]
+        return self._joined(names, blocks)
 
-        found = 0
-        for start, stop in spans:
-            self.seek(start)
-            # each interval writes behind what the last one found, so the
-            # columns are handed over sliced from there
-            found += self._reader.read_into_within(
-                [(column[found:], offset, size)
-                 for column, offset, size in targets], stop, region)
+    #: How many points an area query looks through at once. Its arrays are
+    #: sized for that many, so it bounds what a query costs where the index
+    #: cannot narrow it: without an index every point is a candidate, and
+    #: sizing for the candidates would be sizing for the file.
+    WITHIN_BLOCK = 1 << 20
 
+    @classmethod
+    def _blocks(cls, start, stop):
+        while start < stop:
+            end = min(stop, start + cls.WITHIN_BLOCK)
+            yield start, end
+            start = end
+
+    def _within_block(self, names, region, start, stop):
+        """The points of one run that are inside the region, as columns."""
+        out, targets, packed = self._array_columns(names, stop - start)
+        self.seek(start)
+        found = self._reader.read_into_within(targets, stop, region)
         return self._finish_columns(out, packed, found)
+
+    def _joined(self, names, blocks):
+        """One set of columns from several, without copying where there is
+        only one -- which is every query small enough to fit a block, and so
+        every indexed query over a modest area."""
+        if len(blocks) == 1:
+            return blocks[0]
+        if not blocks:
+            out, _, packed = self._array_columns(names, 0)
+            return self._finish_columns(out, packed, 0)
+        np = _numpy()
+        return {name: np.concatenate([block[name] for block in blocks])
+                for name in blocks[0]}
 
     def xyz_within(self, rect=None, circle=None):
         """The georeferenced points inside an area, as ``(N, 3)`` floats.
