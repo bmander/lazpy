@@ -47,6 +47,20 @@ while reader.index < reader.num_points:
     ...
 ```
 
+Writing takes the same form, which is what converting a file in blocks looks
+like:
+
+```python
+with Reader("in.laz") as reader, Writer("out.laz", reader.point_format,
+                                        scales=reader.scales,
+                                        offsets=reader.offsets) as writer:
+    while reader.index < reader.num_points:
+        writer.write_arrays(reader.arrays(count=1_000_000))
+```
+
+`write_arrays` takes what `arrays` returns. Fields it is not given are written
+as zero.
+
 numpy is an optional dependency — `pip install lazpy[numpy]` — and is imported
 only when one of these is called.
 

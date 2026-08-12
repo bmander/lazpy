@@ -94,8 +94,10 @@ PyObject *coder_create_symbol_model(PyObject *args, PyObject *compress);
 PyObject *encoder_result(EncoderObject *self);
 
 /* The part of LazPoint the item readers fill; everything past it is
- * bookkeeping (the extra-bytes count and pointer), not decoded data. Bounds
- * a read_into target, and is what POINT_LAYOUT publishes as __extent__. */
+ * bookkeeping (the extra-bytes count and pointer), not decoded data. It
+ * bounds a read_into target and a write_from source alike, which is why it
+ * is here rather than in either one's file, and it is what POINT_LAYOUT
+ * publishes as __extent__. */
 #define POINT_FIXED_EXTENT (LAZ_POINT_OFFSET_WAVEPACKET + LAZ_WAVEPACKET_SIZE)
 
 PointObject *point_alloc(PyTypeObject *type);

@@ -337,6 +337,161 @@ static PyObject *Writer_write(WriterObject *self, PyObject *arg)
     Py_RETURN_NONE;
 }
 
+/* ------------------------------------------------------- writing in bulk - */
+
+/*
+ * The mirror of PointReader.read_into, and the same triples: a buffer, the
+ * offset into the decoded point its bytes belong at, and how many per point.
+ * An offset of -1 means the extra bytes instead.
+ *
+ * What it is for is the same thing in the other direction. read_into exists
+ * so a whole file can be decoded without a Python object per point; without
+ * this, writing one back put the object -- and a call, and a type check --
+ * back in front of every point, so a conversion ran at the speed of the half
+ * that had no bulk path.
+ */
+typedef struct {
+    const U8 *src;          /* walks the caller's column */
+    U8 *dst;                /* fixed: where in the point it lands */
+    Py_ssize_t size;
+} Source;
+
+typedef struct {
+    PyObject *seq;
+    Source *cols;
+    Py_buffer *views;
+    Py_ssize_t n, held;
+} Sources;
+
+static void sources_close(Sources *s)
+{
+    Py_ssize_t i;
+    for (i = 0; i < s->held; i++) PyBuffer_Release(&s->views[i]);
+    PyMem_Free(s->views);
+    PyMem_Free(s->cols);
+    Py_XDECREF(s->seq);
+}
+
+static BOOL sources_open(WriterObject *self, PyObject *targets,
+                         Py_ssize_t count, Sources *s)
+{
+    Py_ssize_t i;
+
+    s->seq = NULL; s->cols = NULL; s->views = NULL; s->n = 0; s->held = 0;
+
+    s->seq = PySequence_Fast(targets, "targets must be a sequence");
+    if (!s->seq) return LAZ_FALSE;
+    s->n = PySequence_Fast_GET_SIZE(s->seq);
+
+    s->cols = (Source *)PyMem_Malloc((size_t)s->n * sizeof(Source));
+    s->views = (Py_buffer *)PyMem_Malloc((size_t)s->n * sizeof(Py_buffer));
+    if (!s->cols || !s->views) { PyErr_NoMemory(); return LAZ_FALSE; }
+
+    for (i = 0; i < s->n; i++) {
+        PyObject *t = PySequence_Fast_GET_ITEM(s->seq, i);
+        PyObject *buf;
+        Py_ssize_t offset, size;
+
+        if (!PyArg_ParseTuple(t, "Onn", &buf, &offset, &size))
+            return LAZ_FALSE;
+        if (size <= 0) {
+            PyErr_SetString(PyExc_ValueError, "field width must be positive");
+            return LAZ_FALSE;
+        }
+        if (count > PY_SSIZE_T_MAX / size) {
+            PyErr_SetString(PyExc_OverflowError, "count is too large");
+            return LAZ_FALSE;
+        }
+        /* bounded by subtraction, as columns_open does it: offset and size
+         * are the caller's and adding them could overflow */
+        if (offset == -1) {
+            if (size > (Py_ssize_t)self->wp.num_extra_bytes) {
+                PyErr_SetString(PyExc_ValueError,
+                                "field lies outside the extra bytes");
+                return LAZ_FALSE;
+            }
+            s->cols[i].dst = self->extra_bytes;
+        } else {
+            if (offset < 0 || offset > POINT_FIXED_EXTENT - size) {
+                PyErr_SetString(PyExc_ValueError,
+                                "field lies outside the decoded point");
+                return LAZ_FALSE;
+            }
+            s->cols[i].dst = (U8 *)&self->point + offset;
+        }
+
+        if (PyObject_GetBuffer(buf, &s->views[i], PyBUF_C_CONTIGUOUS) < 0)
+            return LAZ_FALSE;
+        s->held = i + 1;
+        if (s->views[i].len < count * size) {
+            PyErr_SetString(PyExc_ValueError,
+                            "a column is shorter than the point count");
+            return LAZ_FALSE;
+        }
+        s->cols[i].src = (const U8 *)s->views[i].buf;
+        s->cols[i].size = size;
+    }
+    return LAZ_TRUE;
+}
+
+/* One point's worth out of every column, into the point. */
+static void sources_take(Sources *s)
+{
+    Py_ssize_t i;
+    for (i = 0; i < s->n; i++) {
+        memcpy(s->cols[i].dst, s->cols[i].src, (size_t)s->cols[i].size);
+        s->cols[i].src += s->cols[i].size;
+    }
+}
+
+static PyObject *Writer_write_from(WriterObject *self, PyObject *args)
+{
+    PyObject *targets, *result = NULL;
+    Py_ssize_t count, done = 0;
+    Sources s;
+    BOOL ok = LAZ_TRUE;
+
+    if (!PyArg_ParseTuple(args, "On", &targets, &count)) return NULL;
+    if (!self->ready) {
+        PyErr_SetString(PyExc_ValueError, "writer is closed");
+        return NULL;
+    }
+    if (count < 0) {
+        PyErr_SetString(PyExc_ValueError, "count must not be negative");
+        return NULL;
+    }
+    if (!sources_open(self, targets, count, &s)) { sources_close(&s); return NULL; }
+
+    /* Everything a column does not fill keeps whatever the last point left,
+     * so the point is cleared once and the extra bytes with it -- a caller
+     * naming three fields means the rest are zero, not the previous point's. */
+    memset(&self->point, 0, sizeof(self->point));
+    self->point.num_extra_bytes = (I32)self->wp.num_extra_bytes;
+    self->point.extra_bytes = self->extra_bytes;
+    if (self->wp.num_extra_bytes)
+        memset(self->extra_bytes, 0, self->wp.num_extra_bytes);
+
+    for (done = 0; done < count; done++) {
+        sources_take(&s);
+        laz_writepoint_init_point(&self->wp, &self->point);
+        writer_tally(self);
+        if (self->compat) writer_recode_compat(self);
+        if (!laz_writepoint_write(&self->wp, &self->point, self->extra_bytes)) {
+            ok = LAZ_FALSE;
+            break;
+        }
+        /* per point, not once at the end: the tally reads it to know whether
+         * this is the first point, which is what starts the bounding box at
+         * a real coordinate rather than at the extremes of I32 */
+        self->index++;
+    }
+
+    result = ok ? (Py_INCREF(Py_None), Py_None) : writer_error(self);
+
+    sources_close(&s);
+    return result;
+}
+
 static PyObject *Writer_chunk(WriterObject *self, PyObject *Py_UNUSED(i))
 {
     if (!self->ready) {
@@ -395,6 +550,12 @@ static PyMethodDef Writer_methods[] = {
     {"write", (PyCFunction)Writer_write, METH_O,
      "write(point) -> None\n\n"
      "Append one point: a Point, or the bytes of one on-disk record."},
+    {"write_from", (PyCFunction)Writer_write_from, METH_VARARGS,
+     "write_from(targets, count) -> None\n\n"
+     "Append count points straight out of buffers, one field per target.\n"
+     "The mirror of PointReader.read_into, and the same (buffer, offset,\n"
+     "size) triples; an offset of -1 means the extra bytes. Fields no\n"
+     "target names are written as zero."},
     {"chunk", (PyCFunction)Writer_chunk, METH_NOARGS,
      "chunk() -> None\n\n"
      "Close the open chunk. Only meaningful with variable-size chunking, "
