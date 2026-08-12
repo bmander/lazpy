@@ -566,11 +566,36 @@ static int decoder_ready(DecoderObject *self)
     return 0;
 }
 
+/*
+ * Whether the file underneath is still answering, and the mirror of what
+ * PointReader does with reader_stream_ok. The other half of the bracket:
+ * decoder_ready asks before, this asks after, and a decode call needs both.
+ *
+ * The core decodes from a stream that cannot fail: past the end it hands back
+ * zeros so a decode carries on rather than stopping. A file object whose
+ * read() raised is not that -- the stream records it and leaves the exception
+ * set for whoever holds the GIL. Without asking, every decode call here would
+ * return a number worked out from zeros and leave the exception hanging for
+ * some later, unrelated call to trip over.
+ *
+ * Takes the value the caller decoded so it can be handed straight back, or
+ * released and replaced by NULL when the stream is the thing that failed.
+ * Safe to dereference the stream, every caller having passed decoder_ready.
+ */
+static PyObject *decoder_result(DecoderObject *self, PyObject *value)
+{
+    if (!self->stream->failed) return value;
+    Py_XDECREF(value);
+    if (PyErr_Occurred()) return NULL;          /* the file object's own */
+    PyErr_SetString(LazErrorType, "error reading from the underlying file");
+    return NULL;
+}
+
 static PyObject *Decoder_start(DecoderObject *self, PyObject *Py_UNUSED(i))
 {
     if (decoder_ready(self) < 0) return NULL;
     laz_decoder_init(&self->d, self->stream, LAZ_TRUE);
-    Py_RETURN_NONE;
+    return decoder_result(self, Py_NewRef(Py_None));
 }
 
 static PyObject *Decoder_decode_bit(DecoderObject *self, PyObject *args)
@@ -578,7 +603,8 @@ static PyObject *Decoder_decode_bit(DecoderObject *self, PyObject *args)
     PyObject *m;
     if (decoder_ready(self) < 0) return NULL;
     if (!PyArg_ParseTuple(args, "O!", &BitModel_Type, &m)) return NULL;
-    return PyLong_FromUnsignedLong(laz_decode_bit(&self->d, &((BitModelObject *)m)->m));
+    return decoder_result(self, PyLong_FromUnsignedLong(
+        laz_decode_bit(&self->d, &((BitModelObject *)m)->m)));
 }
 
 static PyObject *Decoder_decode_symbol(DecoderObject *self, PyObject *args)
@@ -592,7 +618,8 @@ static PyObject *Decoder_decode_symbol(DecoderObject *self, PyObject *args)
         PyErr_SetString(PyExc_ValueError, "model not initialized");
         return NULL;
     }
-    return PyLong_FromUnsignedLong(laz_decode_symbol(&self->d, sm));
+    return decoder_result(self,
+                          PyLong_FromUnsignedLong(laz_decode_symbol(&self->d, sm)));
 }
 
 static PyObject *Decoder_read_bits(DecoderObject *self, PyObject *args)
@@ -604,13 +631,15 @@ static PyObject *Decoder_read_bits(DecoderObject *self, PyObject *args)
         PyErr_SetString(PyExc_ValueError, "bits must be in 1..32");
         return NULL;
     }
-    return PyLong_FromUnsignedLong(laz_read_bits(&self->d, bits));
+    return decoder_result(self,
+                          PyLong_FromUnsignedLong(laz_read_bits(&self->d, bits)));
 }
 
 static PyObject *Decoder_read_int(DecoderObject *self, PyObject *Py_UNUSED(i))
 {
     if (decoder_ready(self) < 0) return NULL;
-    return PyLong_FromUnsignedLong(laz_read_int(&self->d));
+    return decoder_result(self,
+                          PyLong_FromUnsignedLong(laz_read_int(&self->d)));
 }
 
 static PyObject *Decoder_create_symbol_model(DecoderObject *self, PyObject *args)

@@ -152,18 +152,27 @@ BOOL laz_writepoint_init(LazWritePoint *wp, LazOutStream *outstream)
  * buffered per layer and is only now laid out -- point count, every writer's
  * layer sizes, then every writer's layer bytes, which is the order
  * laz_readpoint_read expects to find them in. */
-static void close_chunk(LazWritePoint *wp)
+static BOOL close_chunk(LazWritePoint *wp)
 {
     U32 i;
+    BOOL ok = LAZ_TRUE;
     if (wp->layered_las14_compression) {
         laz_outstream_put32(wp->outstream, wp->chunk_count);
+        /* Both hooks say whether the layers they laid out were whole. The
+         * only way they are not is a layer buffer that could not grow, and
+         * writing the chunk anyway would leave declared sizes that do not
+         * match the bytes behind them. The reader checks the same pair of
+         * hooks for the same reason. */
         for (i = 0; i < wp->num_writers; i++)
-            wp->writers_compressed[i]->chunk_sizes(wp->writers_compressed[i]);
+            ok &= wp->writers_compressed[i]->chunk_sizes(wp->writers_compressed[i]);
         for (i = 0; i < wp->num_writers; i++)
-            wp->writers_compressed[i]->chunk_bytes(wp->writers_compressed[i]);
+            ok &= wp->writers_compressed[i]->chunk_bytes(wp->writers_compressed[i]);
+        if (!ok) set_error(wp, "out of memory buffering chunk %u",
+                           wp->number_chunks);
     } else {
         laz_encoder_done(&wp->enc);
     }
+    return ok;
 }
 
 static BOOL add_chunk_to_table(LazWritePoint *wp)
@@ -197,7 +206,7 @@ static BOOL add_chunk_to_table(LazWritePoint *wp)
  * writers again. */
 static BOOL close_and_record(LazWritePoint *wp)
 {
-    close_chunk(wp);
+    if (!close_chunk(wp)) return LAZ_FALSE;
     if (!add_chunk_to_table(wp)) return LAZ_FALSE;
     wp->writers = NULL;
     wp->chunk_count = 0;
@@ -341,7 +350,7 @@ BOOL laz_writepoint_done(LazWritePoint *wp)
 
     if (wp->writers == wp->writers_compressed) {
         /* a chunk is open, and it has at least the point that opened it */
-        close_chunk(wp);
+        if (!close_chunk(wp)) return LAZ_FALSE;
         if (wp->chunked) {
             if (!add_chunk_to_table(wp)) return LAZ_FALSE;
             if (!write_chunk_table(wp)) return LAZ_FALSE;

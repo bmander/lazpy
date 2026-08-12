@@ -983,3 +983,60 @@ class TestReinitialisation:
         borrowed.__init__(8)
         del borrowed
         assert sys.getrefcount(compressor) == before
+
+
+class TestDecoderStreamFailures:
+    """
+    A file object that raises partway through a decode.
+
+    The stream underneath cannot fail: past the end of its data it hands back
+    zeros so that decoding carries on rather than stopping, which is what lets
+    a truncated file be reported as a decode error instead of a read error.
+    A file object whose read raised is not that. The stream records it and
+    leaves the Python exception set for whoever holds the GIL, and every
+    decode call that ignores it returns a number worked out from those zeros
+    while the exception waits for something unrelated to trip over it -- which
+    it eventually does, as a SystemError from whichever call is next to return
+    a value with an exception already pending.
+
+    PointReader has asked this question since it was written; the decoder
+    wrapper had not.
+    """
+
+    class ExplodesAfter(io.BytesIO):
+        """Answers `allow` refills and then stops."""
+
+        def __init__(self, data, allow=1):
+            super().__init__(data)
+            self.allow = allow
+            self.calls = 0
+
+        def readinto(self, buffer):
+            self.calls += 1
+            if self.calls > self.allow:
+                raise PermissionError("device on fire")
+            return super().readinto(buffer)
+
+    def test_a_raising_file_reaches_the_caller(self):
+        """As itself, so that a broken file object is distinguishable from a
+        file that merely ran out."""
+        fp = self.ExplodesAfter(bytes(1_000_000))
+        decoder = cpylaz.ArithmeticDecoder(fp)
+        decoder.start()
+
+        with pytest.raises(PermissionError):
+            for _ in range(100_000):
+                decoder.read_bits(32)
+        assert fp.calls > 1          # it really did have to come back for more
+
+    def test_decoding_symbols_reaches_the_caller_too(self):
+        fp = self.ExplodesAfter(bytes(1_000_000))
+        decoder = cpylaz.ArithmeticDecoder(fp)
+        decoder.start()
+        model = cpylaz.ArithmeticModel(256, False)
+        model.init()
+
+        with pytest.raises(PermissionError):
+            for _ in range(200_000):
+                decoder.decode_symbol(model)
+                decoder.read_bits(32)
