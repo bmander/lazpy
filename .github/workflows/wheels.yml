@@ -1,9 +1,22 @@
 name: wheels
 
+# Five runners, every CPython in requires-python on each, and the whole test
+# suite inside every wheel: the most expensive thing in this repository by a
+# wide margin. tests.yml already covers the same three operating systems at
+# the oldest and newest Python on every push, so what this adds is packaging
+# -- which only what goes into a package can break. Hence the paths filter:
+# a change to lazpy/ or tests/ alone is covered by tests.yml, and a release
+# builds everything regardless of what changed.
 on:
   push:
     branches: [main]
+    paths: &packaging
+      - 'src/**'
+      - 'pyproject.toml'
+      - 'MANIFEST.in'
+      - '.github/workflows/wheels.yml'
   pull_request:
+    paths: *packaging
   release:
     types: [published]
   workflow_dispatch:
@@ -76,5 +89,17 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      # A version on PyPI cannot be replaced, so publishing one that does not
+      # match the tag is not something to notice afterwards. The version comes
+      # from pyproject.toml and the tag from whoever made the release, and
+      # nothing has been making them agree.
+      - name: Check the tag against the version being published
+        run: |
+          set -euo pipefail
+          version=$(ls dist/lazpy-*.tar.gz | sed -E 's|.*/lazpy-(.+)\.tar\.gz|\1|')
+          tag=${GITHUB_REF_NAME#v}
+          echo "tag $GITHUB_REF_NAME, built version $version"
+          test "$version" = "$tag"
 
       - uses: pypa/gh-action-pypi-publish@release/v1

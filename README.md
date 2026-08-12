@@ -11,6 +11,13 @@ Every LAZ point format and every LASzip item version is supported for both read 
 pip install lazpy
 ```
 
+Installing also gives you a `lazpy` command, which summarises a file and
+prints a few of its points:
+
+```bash
+lazpy cloud.laz          # or: python -m lazpy cloud.laz
+```
+
 ## Reading
 
 ```python
