@@ -11,9 +11,10 @@ crasher is reproducible from the last line of output:
 
     python tools/fuzz.py --seed 41253 --count 1
 
-Findings go in `testdata/malformed/` as regression cases; `tests.py` reads
-every file there and asserts only that opening it does not take the process
-down with it.
+Findings go in `testdata/malformed/` as regression cases;
+`tests/test_malformed.py` reads every file there and asserts only that
+opening it does not take the process down with it -- and then a named test
+is written beside it saying what that file should raise.
 
 This is a smoke test, not a coverage-guided fuzzer. It finds what random
 mutation finds, which is the shallow half; libFuzzer or Atheris over the same
@@ -23,20 +24,19 @@ import argparse
 import io
 import os
 import random
-import struct
 import sys
 
-from lazpy import LazError, Reader
+from lazpy import Reader
 
 TESTDATA = os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "testdata")
 
-# What a malformed file is allowed to do. LazError is the intended answer;
-# the rest are what the header parser raises before the point reader is
-# reached, or what a nonsensical count does to an ordinary Python expression.
-EXPECTED = (LazError, ValueError, struct.error, EOFError, OSError,
-            MemoryError, IndexError, OverflowError, TypeError, KeyError,
-            RecursionError)
+# What a malformed file is allowed to do, taken from the test suite so that
+# the fuzzer and the tests cannot come to disagree about it -- one reporting
+# findings the other accepts would be worse than either being wrong.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "tests"))
+from helpers import SURVIVABLE as EXPECTED        # noqa: E402
 
 # The header is 227 bytes at its shortest and the point data begins a few
 # hundred bytes in, so these two spans are where the fields that drive
@@ -122,6 +122,9 @@ def main():
                         help="how many cases to run (default 500)")
     parser.add_argument("--corpus", default=TESTDATA,
                         help="directory of seed files (default testdata/)")
+    parser.add_argument("--output", default=".",
+                        help="where to write the files that crashed "
+                             "(default: the current directory)")
     parser.add_argument("--quiet", action="store_true",
                         help="only report findings")
     args = parser.parse_args()
@@ -143,9 +146,9 @@ def main():
             exercise(data)
         except EXPECTED:
             pass
-        except Exception as exc:                     # noqa: BLE001
+        except Exception as exc:
             findings += 1
-            path = f"crash-{seed}.laz"
+            path = os.path.join(args.output, f"crash-{seed}.laz")
             with open(path, "wb") as fh:
                 fh.write(data)
             print(f"FINDING seed {seed} ({name}): "

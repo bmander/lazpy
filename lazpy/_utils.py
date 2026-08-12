@@ -7,38 +7,38 @@ packer that undoes it.
 import struct
 
 
-def unsigned_int(bytes):
-    return int.from_bytes(bytes, byteorder='little', signed=False)
+def unsigned_int(data):
+    return int.from_bytes(data, byteorder='little', signed=False)
 
 
-def signed_int(bytes):
-    return int.from_bytes(bytes, byteorder='little', signed=True)
+def signed_int(data):
+    return int.from_bytes(data, byteorder='little', signed=True)
 
 
-def u32_array(bytes):
-    return [unsigned_int(bytes[i:i+4]) for i in range(0, len(bytes), 4)]
+def u32_array(data):
+    return [unsigned_int(data[i:i+4]) for i in range(0, len(data), 4)]
 
 
-def u64_array(bytes):
-    return [unsigned_int(bytes[i:i+8]) for i in range(0, len(bytes), 8)]
+def u64_array(data):
+    return [unsigned_int(data[i:i+8]) for i in range(0, len(data), 8)]
 
 
-def double(bytes):
+def double(data):
     # '<d', not 'd': the header is little-endian on disk, and 'd' would mean
     # whatever the host is. The two agree on a little-endian host, which is why
     # this went unnoticed until the suite ran on s390x.
-    return struct.unpack('<d', bytes)[0]
+    return struct.unpack('<d', data)[0]
 
 
-def double_array(bytes):
-    return [double(bytes[i:i+8]) for i in range(0, len(bytes), 8)]
+def double_array(data):
+    return [double(data[i:i+8]) for i in range(0, len(data), 8)]
 
 
-def cstr(bytes):
-    return bytes.rstrip(b'\0')
+def cstr(data):
+    return data.rstrip(b'\0')
 
 
-def raw(bytes):
+def raw(data):
     """A field with no interpretation of its own: the bytes as they lie.
 
     For a field whose meaning is elsewhere -- the "extra bytes" descriptor
@@ -75,6 +75,11 @@ def _pack_array(values, size, width, pack):
 
 
 def pack_double(value, size):
+    """The inverse of `double`, which is eight bytes -- but the width comes
+    from the field table like every other packer's, so a table that ever
+    declares another one is refused rather than quietly written as eight."""
+    if size != 8:
+        raise ValueError(f"a double is 8 bytes, not {size}")
     return struct.pack('<d', value)
 
 

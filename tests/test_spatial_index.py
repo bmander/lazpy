@@ -91,7 +91,8 @@ def inside_by_scan(name, rect):
 def without_sidecar(name, tmp_path):
     """A copy of a fixture with its ".lax" left behind."""
     copy = tmp_path / os.path.basename(name)
-    copy.write_bytes(open(fixture(name), "rb").read())
+    with open(fixture(name), "rb") as fh:
+        copy.write_bytes(fh.read())
     return str(copy)
 
 
@@ -259,7 +260,8 @@ class TestFindingTheIndex:
         """Unlike a record the header merely counted, this one was pointed
         at, so a record that is not all there is worth saying so about."""
         copy = tmp_path / "pt1_v2_appended.laz"
-        data = open(fixture("pt1_v2_appended.laz"), "rb").read()
+        with open(fixture("pt1_v2_appended.laz"), "rb") as fh:
+            data = fh.read()
         copy.write_bytes(data[:-16])
         with Reader(str(copy)) as reader:
             with pytest.raises(LazError, match="runs past the end"):
@@ -628,12 +630,18 @@ SIDECAR_FIXTURES = [name for name in INDEXED_FIXTURES
                     if name != "pt1_v2_appended.laz"]
 
 
+def committed_index(name):
+    """The .lax lasindex built beside this fixture."""
+    with open(fixture(name.rsplit(".", 1)[0] + ".lax"), "rb") as fh:
+        return fh.read()
+
+
 @pytest.mark.parametrize("name", SIDECAR_FIXTURES)
 def test_the_tree_is_the_one_laszip_built(name):
     """Byte for byte, as far as the cells: the same levels over the same
     square, which is what the cell size and the extent of the points decide.
     """
-    committed = open(fixture(name.rsplit(".", 1)[0] + ".lax"), "rb").read()
+    committed = committed_index(name)
 
     assert built_index(name)[:QUADTREE_BYTES] == committed[:QUADTREE_BYTES]
 
@@ -641,8 +649,7 @@ def test_the_tree_is_the_one_laszip_built(name):
 @pytest.mark.parametrize("name", SIDECAR_FIXTURES)
 def test_a_built_index_answers_what_laszips_own_answers(name):
     """Every cell and every run of points, by what the two select."""
-    committed = cpylaz.SpatialIndex(
-        open(fixture(name.rsplit(".", 1)[0] + ".lax"), "rb").read())
+    committed = cpylaz.SpatialIndex(committed_index(name))
 
     ours = cpylaz.SpatialIndex(built_index(name))
 

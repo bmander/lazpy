@@ -308,3 +308,17 @@ def awkward_records(count, length):
             r[offset] = rand.randrange(256)
         records.append(bytes(r))
     return records
+
+
+# What a malformed file is allowed to do, which is raise. LazError is the
+# intended answer and is what the named tests in test_malformed.py pin; the
+# rest are what the header parser raises before the point reader is reached,
+# or what a nonsensical count does to an ordinary Python expression.
+#
+# Here rather than in either place that wants it: tools/fuzz.py decides what
+# is worth reporting by this list and test_malformed.py decides what is worth
+# passing by it, so the two disagreeing would mean the fuzzer finding things
+# the suite accepts, or the other way about.
+SURVIVABLE = (lazpy.LazError, ValueError, struct.error, EOFError, OSError,
+              MemoryError, IndexError, OverflowError, TypeError, KeyError,
+              RecursionError)

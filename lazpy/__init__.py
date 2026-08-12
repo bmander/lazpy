@@ -35,7 +35,8 @@ LAS file specification
 # docs/container.rst gives them a page of their own for the same reason.
 from ._cpylaz import (PointReader, PointWriter, Point,  # noqa: F401
                       SpatialIndex, LazError)
-from .formats import (LASZIP_VLR_RECORD_ID, LASZIP_VLR_USER_ID,  # noqa: F401
+from .formats import (ADAPTIVE_CHUNK_SIZE,  # noqa: F401
+                      LASZIP_VLR_RECORD_ID, LASZIP_VLR_USER_ID,  # noqa: F401
                       LASZIP_VLR_KEY, LASCOMPATIBLE_VLR_KEY,
                       EXTRA_BYTES_VLR_KEY, LASINDEX_EVLR_KEY,
                       UnsupportedFileError, Compressor, Coder, Chunking,
