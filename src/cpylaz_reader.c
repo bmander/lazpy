@@ -510,8 +510,13 @@ static PyObject *Reader_checksum(ReaderObject *self, PyObject *args)
     }
     Py_END_ALLOW_THREADS
 
-    if (!ok) return reader_error(self);
+    /* As in read_into: the points that did decode stay decoded, so the index
+     * follows them whether or not the read that came after them failed.
+     * Leaving it behind would put the reader's own count out of step with
+     * where the stream actually is, and the next seek would work out its
+     * distance from the wrong place and quietly return the wrong points. */
     self->index += done;
+    if (!ok) return reader_error(self);
     return Py_BuildValue("(KK)", (unsigned long long)h, (unsigned long long)done);
 }
 

@@ -306,6 +306,30 @@ class TestErrors:
                 for _ in range(reader.num_points):
                     reader.read()
 
+    def test_a_failed_checksum_leaves_the_position_it_reached(self):
+        """The reader's own count of where it is has to follow the points
+        that decoded, not just the ones a successful call returned. A seek
+        works out how far to go from that count, so a reader that thinks it
+        is further back than the stream is does not fail -- it decodes from
+        the wrong place and hands back the wrong points.
+        """
+        whole = open(fixture("pt1_v2.laz"), "rb").read()
+        truncated = whole[:len(whole) // 2]
+
+        with Reader(io.BytesIO(whole)) as reader:
+            every_x = [p.X for p in reader]
+
+        with Reader(io.BytesIO(truncated)) as reader:
+            with pytest.raises(LazError):
+                reader.checksum()
+            reached = reader.index
+            assert 0 < reached < reader.num_points   # it did get part way
+
+            # and the position it reports is the one the stream is really at
+            reader.seek(0)
+            assert [p.X for p in reader.points(count=reached)] == \
+                every_x[:reached]
+
     def test_every_failure_is_one_catchable_category(self):
         """Header, setup and decode failures all raise LazError."""
         assert issubclass(UnsupportedFileError, LazError)
