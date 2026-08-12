@@ -28,6 +28,22 @@
 typedef struct LazReadItem LazReadItem;
 
 struct LazReadItem {
+    /*
+     * Decodes one item into *item*, which it must fill and must never read
+     * from. What makes that worth stating: a v3/v4 layer whose value holds
+     * still across a chunk is not written at all, and the obvious thing to do
+     * for one is to leave the caller's bytes alone -- which is right only
+     * while the caller keeps handing back the same buffer with the last
+     * point still in it. A seek does not, because it reads the points it
+     * skips into a buffer of its own, and neither does anyone decoding into a
+     * fresh point. Every reader either writes the whole item or copies
+     * last_item into the part it did not decode; point14 does the former for
+     * eight sub-layers at once.
+     *
+     * The one departure is alloc_failed below: a reader that cannot allocate
+     * abandons the point half-written, and laz_readpoint_read turns that into
+     * an error rather than letting it reach a caller.
+     */
     void (*read)(LazReadItem *self, U8 *item, U32 *context);
     /* compressed readers only: seed state from the chunk's first (raw) point */
     BOOL (*init)(LazReadItem *self, const U8 *item, U32 *context);
