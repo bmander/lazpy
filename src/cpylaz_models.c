@@ -6,6 +6,21 @@
 
 /* ==================================================== ArithmeticBitModel == */
 
+/*
+ * A bit model is told nothing, so it can be a usable model from the moment it
+ * exists rather than from __init__. That matters because __new__ without
+ * __init__ is reachable from ordinary Python -- pickle and copy both take
+ * that route -- and the zeroed model it used to hand back divided by its own
+ * zero total on the first update.
+ */
+static PyObject *BitModel_tp_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    BitModelObject *self = PyObject_New(BitModelObject, type);
+    (void)args; (void)kwds;
+    if (self) laz_bit_model_init(&self->m);
+    return (PyObject *)self;
+}
+
 static int BitModel_tp_init(BitModelObject *self, PyObject *args, PyObject *kwds)
 {
     (void)args; (void)kwds;
@@ -75,7 +90,7 @@ PyTypeObject BitModel_Type = {
     .tp_name = "lazpy._cpylaz.ArithmeticBitModel",
     .tp_basicsize = sizeof(BitModelObject),
     .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_new = PyType_GenericNew,
+    .tp_new = BitModel_tp_new,
     .tp_init = (initproc)BitModel_tp_init,
     .tp_methods = BitModel_methods,
     .tp_getset = BitModel_getset,
@@ -89,24 +104,50 @@ PyTypeObject BitModel_Type = {
  * Either owns its model (constructed from Python) or borrows one belonging to
  * an IntegerCompressor, in which case `owner` keeps that object alive.
  */
+/*
+ * Points the model at its own storage before anything else can, so that a
+ * model made by __new__ alone -- pickle's route, and copy's -- is an empty
+ * model rather than a NULL one. Every method here reaches through self->m to
+ * decide whether it has been initialised, so a NULL there turned all ten of
+ * them, the plain attributes included, into a segfault.
+ *
+ * The same shape as point_alloc, and for the same reason.
+ */
+static PyObject *SymbolModel_tp_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    SymbolModelObject *self = PyObject_New(SymbolModelObject, type);
+    (void)args; (void)kwds;
+    if (!self) return NULL;
+    memset(&self->storage, 0, sizeof(self->storage));
+    self->m = &self->storage;
+    self->owner = NULL;
+    return (PyObject *)self;
+}
+
 static int SymbolModel_tp_init(SymbolModelObject *self, PyObject *args, PyObject *kwds)
 {
     unsigned int num_symbols;
+    int compress;
     PyObject *compress_obj = NULL;
     static char *kwlist[] = {"num_symbols", "compress", NULL};
 
     if (!PyArg_ParseTupleAndKeywords(args, kwds, "I|O", kwlist, &num_symbols, &compress_obj))
         return -1;
 
+    compress = compress_obj ? PyObject_IsTrue(compress_obj) : 0;
+    if (compress < 0) return -1;
+
     /* __init__ can be called again on a live object, and setup zeroes the
      * struct over whatever the last one allocated. Only our own storage is
-     * ours to free -- a borrowed model belongs to the reader that owns it. */
+     * ours to free -- a borrowed model belongs to the reader that owns it,
+     * and that reader is what owner keeps alive, so letting go of the model
+     * means letting go of the reference too. */
     if (self->m == &self->storage) laz_symbol_model_free(self->m);
+    Py_CLEAR(self->owner);
 
     self->m = &self->storage;
-    self->owner = NULL;
     laz_symbol_model_setup(self->m, num_symbols,
-                           (compress_obj && PyObject_IsTrue(compress_obj)) ? LAZ_TRUE : LAZ_FALSE);
+                           compress ? LAZ_TRUE : LAZ_FALSE);
     return 0;
 }
 
@@ -199,7 +240,7 @@ static PyObject *SymbolModel_increment_symbol_count(SymbolModelObject *self, PyO
     {                                                                          \
         unsigned int idx;                                                      \
         if (self->m->array == NULL) {                                          \
-            PyErr_SetString(PyExc_Exception, "model not initialized");         \
+            PyErr_SetString(PyExc_ValueError, "model not initialized");        \
             return NULL;                                                       \
         }                                                                      \
         if (!PyArg_ParseTuple(args, "I", &idx)) return NULL;                   \
@@ -264,7 +305,7 @@ PyTypeObject SymbolModel_Type = {
     .tp_name = "lazpy._cpylaz.ArithmeticModel",
     .tp_basicsize = sizeof(SymbolModelObject),
     .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_new = PyType_GenericNew,
+    .tp_new = SymbolModel_tp_new,
     .tp_init = (initproc)SymbolModel_tp_init,
     .tp_dealloc = (destructor)SymbolModel_dealloc,
     .tp_methods = SymbolModel_methods,
@@ -278,6 +319,14 @@ static int Encoder_tp_init(EncoderObject *self, PyObject *args, PyObject *kwds)
     PyObject *fp;
     (void)kwds;
     if (!PyArg_ParseTuple(args, "O", &fp)) return -1;
+
+    /* __init__ is callable again on a live object, and what the last one
+     * built is ours to let go of first: otherwise a second call strands the
+     * models, the sink's buffer and a reference to the old file. */
+    laz_encoder_free(&self->e);
+    if (self->stream) laz_outstream_destroy(self->stream);
+    self->stream = NULL;
+    Py_CLEAR(self->fp);
 
     if (!laz_encoder_setup(&self->e)) { PyErr_NoMemory(); return -1; }
     self->stream = laz_outstream_new_file(fp);
@@ -316,6 +365,12 @@ static PyObject *encoder_error(void)
  */
 static int encoder_ready(EncoderObject *self)
 {
+    /* No stream at all means __init__ never ran, which is what __new__ on its
+     * own leaves behind; asking the stream how it is going comes after. */
+    if (self->stream == NULL) {
+        PyErr_SetString(PyExc_ValueError, "encoder has no file");
+        return -1;
+    }
     if (self->stream->failed) { encoder_error(); return -1; }
     if (self->e.stream == NULL) {
         PyErr_SetString(PyExc_ValueError, "encoder is not started");
@@ -427,8 +482,9 @@ static PyObject *Encoder_get_length(EncoderObject *self, void *c)
 static PyObject *Encoder_get_base(EncoderObject *self, void *c)
 { (void)c; return PyLong_FromUnsignedLong(self->e.base); }
 
+/* None before __init__ has given it one, rather than a borrowed NULL. */
 static PyObject *Encoder_get_fp(EncoderObject *self, void *c)
-{ (void)c; Py_INCREF(self->fp); return self->fp; }
+{ (void)c; Py_XINCREF(self->fp); return self->fp ? self->fp : Py_None; }
 
 static PyMethodDef Encoder_methods[] = {
     {"start", (PyCFunction)Encoder_start, METH_NOARGS, NULL},
@@ -469,6 +525,11 @@ static int Decoder_tp_init(DecoderObject *self, PyObject *args, PyObject *kwds)
     (void)kwds;
     if (!PyArg_ParseTuple(args, "O", &fp)) return -1;
 
+    /* as in Encoder_tp_init: let go of the last call's stream and file */
+    if (self->stream) laz_stream_destroy(self->stream);
+    self->stream = NULL;
+    Py_CLEAR(self->fp);
+
     self->stream = laz_stream_new_file(fp);
     if (!self->stream) { PyErr_NoMemory(); return -1; }
     Py_INCREF(fp);
@@ -484,8 +545,24 @@ static void Decoder_dealloc(DecoderObject *self)
     PyObject_Del(self);
 }
 
+/*
+ * The reading half of encoder_ready: a decoder with no stream was never given
+ * a file, which is what __new__ without __init__ leaves behind, and decoding
+ * from it would dereference NULL -- or, for the ones that divide by the
+ * coder's length, divide by zero.
+ */
+static int decoder_ready(DecoderObject *self)
+{
+    if (self->stream == NULL) {
+        PyErr_SetString(PyExc_ValueError, "decoder has no file");
+        return -1;
+    }
+    return 0;
+}
+
 static PyObject *Decoder_start(DecoderObject *self, PyObject *Py_UNUSED(i))
 {
+    if (decoder_ready(self) < 0) return NULL;
     laz_decoder_init(&self->d, self->stream, LAZ_TRUE);
     Py_RETURN_NONE;
 }
@@ -493,6 +570,7 @@ static PyObject *Decoder_start(DecoderObject *self, PyObject *Py_UNUSED(i))
 static PyObject *Decoder_decode_bit(DecoderObject *self, PyObject *args)
 {
     PyObject *m;
+    if (decoder_ready(self) < 0) return NULL;
     if (!PyArg_ParseTuple(args, "O!", &BitModel_Type, &m)) return NULL;
     return PyLong_FromUnsignedLong(laz_decode_bit(&self->d, &((BitModelObject *)m)->m));
 }
@@ -501,6 +579,7 @@ static PyObject *Decoder_decode_symbol(DecoderObject *self, PyObject *args)
 {
     PyObject *m;
     LazSymbolModel *sm;
+    if (decoder_ready(self) < 0) return NULL;
     if (!PyArg_ParseTuple(args, "O!", &SymbolModel_Type, &m)) return NULL;
     sm = ((SymbolModelObject *)m)->m;
     if (!sm->distribution) {
@@ -513,6 +592,7 @@ static PyObject *Decoder_decode_symbol(DecoderObject *self, PyObject *args)
 static PyObject *Decoder_read_bits(DecoderObject *self, PyObject *args)
 {
     unsigned int bits;
+    if (decoder_ready(self) < 0) return NULL;
     if (!PyArg_ParseTuple(args, "I", &bits)) return NULL;
     if (bits == 0 || bits > 32) {
         PyErr_SetString(PyExc_ValueError, "bits must be in 1..32");
@@ -523,6 +603,7 @@ static PyObject *Decoder_read_bits(DecoderObject *self, PyObject *args)
 
 static PyObject *Decoder_read_int(DecoderObject *self, PyObject *Py_UNUSED(i))
 {
+    if (decoder_ready(self) < 0) return NULL;
     return PyLong_FromUnsignedLong(laz_read_int(&self->d));
 }
 
@@ -545,7 +626,7 @@ static PyObject *Decoder_get_value(DecoderObject *self, void *c)
 { (void)c; return PyLong_FromUnsignedLong(self->d.value); }
 
 static PyObject *Decoder_get_fp(DecoderObject *self, void *c)
-{ (void)c; Py_INCREF(self->fp); return self->fp; }
+{ (void)c; Py_XINCREF(self->fp); return self->fp ? self->fp : Py_None; }
 
 static PyMethodDef Decoder_methods[] = {
     {"start", (PyCFunction)Decoder_start, METH_NOARGS, NULL},

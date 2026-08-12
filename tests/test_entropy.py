@@ -1,5 +1,6 @@
 import io
 import random
+import sys
 
 import pytest
 
@@ -840,3 +841,113 @@ class TestCIntegerCompressorDirection:
         enc.start()
         with pytest.raises(ValueError):
             ic.compress(0, 1)
+
+
+class TestUninitialised:
+    """
+    What every type does when it exists but has never been told anything.
+
+    ``__new__`` without ``__init__`` is not an exotic thing to do: pickle and
+    copy both build objects that way, and so does a subclass whose own
+    ``__init__`` forgets to call up. The extension types used to hand back a
+    zeroed struct there, and reaching into one crashed the interpreter --
+    a NULL model pointer dereferenced, a coder with no stream, or a division
+    by a total that was zero because nothing had set it.
+
+    Where a type can settle its own invariant it now does, from ``__new__``:
+    a bit model is told nothing at all, so it is a working model from the
+    moment it exists, and a symbol model points at its own storage so it is
+    an empty model rather than a NULL one. Where a type cannot -- a coder
+    needs a file and a reader needs a container -- the answer is an exception
+    naming what is missing.
+    """
+
+    TYPES = [cpylaz.ArithmeticBitModel, cpylaz.ArithmeticModel,
+             cpylaz.ArithmeticEncoder, cpylaz.ArithmeticDecoder,
+             cpylaz.IntegerCompressor, cpylaz.Point, cpylaz.PointReader,
+             cpylaz.PointWriter, cpylaz.SpatialIndex]
+
+    @staticmethod
+    def poke(obj, name):
+        """Read the attribute, and call it if it is callable, with as many
+        zeros as it will take."""
+        attribute = getattr(obj, name)
+        if not callable(attribute):
+            return
+        for args in ((), (0,), (0, 0)):
+            try:
+                attribute(*args)
+                return
+            except TypeError:
+                continue
+
+    @pytest.mark.parametrize("kind", TYPES, ids=[t.__name__ for t in TYPES])
+    def test_nothing_reachable_from_new_alone_crashes(self, kind):
+        """Every public member of an object built by __new__, poked. The
+        interpreter surviving is the whole assertion -- what each one raises
+        is its own business, and several answer perfectly sensibly."""
+        obj = kind.__new__(kind)
+        for name in dir(kind):
+            if name.startswith("__"):
+                continue
+            try:
+                self.poke(obj, name)
+            except Exception:
+                pass          # an exception is a fine answer; a crash is not
+
+    def test_a_bit_model_is_usable_before_init(self):
+        """It is told nothing, so there is nothing to wait for: one built by
+        __new__ alone is the same model as one built the ordinary way, and
+        goes on behaving like it."""
+        fresh = cpylaz.ArithmeticBitModel.__new__(cpylaz.ArithmeticBitModel)
+        ordinary = cpylaz.ArithmeticBitModel()
+        assert fresh.bit_0_prob == ordinary.bit_0_prob
+        assert fresh.bit_0_count == ordinary.bit_0_count
+
+        fresh.update()                       # divided by zero before
+        ordinary.update()
+        assert fresh.bit_0_prob == ordinary.bit_0_prob
+
+    def test_a_symbol_model_is_empty_before_init(self):
+        model = cpylaz.ArithmeticModel.__new__(cpylaz.ArithmeticModel)
+        assert model.num_symbols == 0
+        with pytest.raises(ValueError):
+            model.distribution_lookup(0)
+
+    def test_a_coder_without_a_file_says_so(self):
+        for kind in (cpylaz.ArithmeticEncoder, cpylaz.ArithmeticDecoder):
+            coder = kind.__new__(kind)
+            assert coder.fp is None
+        with pytest.raises(ValueError):
+            cpylaz.ArithmeticDecoder.__new__(cpylaz.ArithmeticDecoder).start()
+        with pytest.raises(ValueError):
+            cpylaz.ArithmeticEncoder.__new__(cpylaz.ArithmeticEncoder).done()
+
+
+class TestReinitialisation:
+    """__init__ is callable again on a live object, and what the last call
+    built has to be let go of rather than stranded."""
+
+    def test_a_coder_does_not_strand_its_last_file(self):
+        for kind, payload in ((cpylaz.ArithmeticEncoder, b""),
+                              (cpylaz.ArithmeticDecoder, bytes(100))):
+            fp = io.BytesIO(payload)
+            coder = kind(fp)
+            before = sys.getrefcount(fp)
+            for _ in range(5):
+                coder.__init__(fp)
+            assert sys.getrefcount(fp) == before, kind.__name__
+
+    def test_a_borrowed_model_lets_go_of_its_owner(self):
+        """A model handed out by an IntegerCompressor keeps that compressor
+        alive; re-initialising it makes the model its own again, which has to
+        release the compressor too or nothing ever frees it."""
+        decoder = cpylaz.ArithmeticDecoder(io.BytesIO(bytes(1000)))
+        compressor = cpylaz.IntegerCompressor(decoder, 8)
+        compressor.init_decompressor()
+        before = sys.getrefcount(compressor)
+
+        borrowed = compressor.get_m_bits(0)
+        borrowed.__init__(8)
+        del borrowed
+        assert sys.getrefcount(compressor) == before
