@@ -1188,7 +1188,10 @@ static void wave14_read(LazReadItem *self, U8 *item, U32 *context)
     }
     c = &r->contexts[r->current_context];
 
-    if (!r->wavepacket.changed) return;
+    if (!r->wavepacket.changed) {
+        memcpy(item, last_item, 29);
+        return;
+    }
 
     item[0] = (U8)laz_decode_symbol(&r->wavepacket.dec, &c->m_packet_index);
 

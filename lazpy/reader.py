@@ -5,7 +5,7 @@ from collections.abc import Mapping
 import io
 import os
 
-from ._cpylaz import PointReader, SpatialIndex, LazError
+from ._cpylaz import PointReader, SpatialIndex, LazError, POINT_LAYOUT
 from .formats import (LASZIP_VLR_KEY, LASINDEX_EVLR_KEY, Compressor, Coder,
                       Chunking, Selective, UnsupportedFileError,
                       items_for_point_format, _POINT_FORMATS)
@@ -25,53 +25,98 @@ from .compat import _compatibility_layout, _upgrade_to_las_14
 # their containing byte, which is cheaper than teaching the decode loop about
 # bit layouts -- and the ones sharing a byte share one read of it.
 #
-# Offsets are into LazPoint (src/laz_types.h), which mirrors LASzip's own
-# point struct; -1 means the extra bytes instead. Types are spelled in native
-# order ('='), because read_into copies the decoded point's bytes straight
-# through and a decoded point is in host order -- see the byte-order note on
-# LazPoint. The sub-byte shifts are host-independent: LazPoint packs those
-# bytes by hand rather than leaving them to the compiler, for exactly this
-# reason.
+# Where each one sits comes from C, through POINT_LAYOUT: the extension takes
+# it from LazPoint with offsetof, so the offsets are stated once, in the file
+# that decides them. Restating them here used to mean that reordering the
+# struct made every array silently wrong, with only a test between that and a
+# released version.
 #
-# This restates a layout that C owns, so it is pinned from the outside:
-# test_arrays_match_reading_point_by_point compares every column of every
-# fixture against Point's own getters, which are themselves pinned to laszip.
+# What stays is what C has no opinion about: the numpy type a field lands in,
+# and how the ones packed into part of a byte come out of it. Types are
+# spelled in native order ('='), because read_into copies the decoded point's
+# bytes straight through and a decoded point is in host order -- see the
+# byte-order note on LazPoint. The sub-byte shifts are host-independent:
+# LazPoint packs those bytes by hand rather than leaving them to the compiler,
+# for exactly this reason.
+#
+# A field's offset is a member's plus how far into it the field starts, which
+# is only ever non-zero for the four colours sharing `rgb`. -1 means the extra
+# bytes instead, which are not part of the struct at all.
 # ---------------------------------------------------------------------------
+
+# the one width C states rather than a numpy dtype implying it
+_WAVEPACKET_WIDTH = POINT_LAYOUT['wave_packet'][1]
 
 _Field = namedtuple("_Field", "offset dtype width shift mask",
                     defaults=(1, 0, None))
 
-_ARRAY_FIELDS = {
-    'X': _Field(0, '=i4'),
-    'Y': _Field(4, '=i4'),
-    'Z': _Field(8, '=i4'),
-    'intensity': _Field(12, '=u2'),
-    'return_number': _Field(14, 'u1', mask=0x07),
-    'number_of_returns': _Field(14, 'u1', shift=3, mask=0x07),
-    'scan_direction_flag': _Field(14, 'u1', shift=6, mask=0x01),
-    'edge_of_flight_line': _Field(14, 'u1', shift=7, mask=0x01),
-    'classification': _Field(15, 'u1', mask=0x1F),
-    'synthetic_flag': _Field(15, 'u1', shift=5, mask=0x01),
-    'keypoint_flag': _Field(15, 'u1', shift=6, mask=0x01),
-    'withheld_flag': _Field(15, 'u1', shift=7, mask=0x01),
-    'scan_angle_rank': _Field(16, 'i1'),
-    'user_data': _Field(17, 'u1'),
-    'point_source_ID': _Field(18, '=u2'),
-    'extended_scan_angle': _Field(20, '=i2'),
-    'extended_point_type': _Field(22, 'u1', mask=0x03),
-    'extended_scanner_channel': _Field(22, 'u1', shift=2, mask=0x03),
-    'extended_classification_flags': _Field(22, 'u1', shift=4, mask=0x0F),
-    'extended_classification': _Field(23, 'u1'),
-    'extended_return_number': _Field(24, 'u1', mask=0x0F),
-    'extended_number_of_returns': _Field(24, 'u1', shift=4, mask=0x0F),
-    'gps_time': _Field(32, '=f8'),
-    'red': _Field(40, '=u2'),
-    'green': _Field(42, '=u2'),
-    'blue': _Field(44, '=u2'),
-    'nir': _Field(46, '=u2'),
+# Each field as its own column: the member of LazPoint it comes out of, how
+# far into that member it starts, and the rest. `within` is for the two
+# members that hold more than one field end to end -- the three colours and
+# the near infrared share `rgb`, as they do on disk.
+_Column = namedtuple("_Column", "member dtype within width shift mask",
+                     defaults=(0, 1, 0, None))
+
+_ARRAY_COLUMNS = {
+    'X': _Column('X', '=i4'),
+    'Y': _Column('Y', '=i4'),
+    'Z': _Column('Z', '=i4'),
+    'intensity': _Column('intensity', '=u2'),
+    'return_number': _Column('returns_and_flags', 'u1', mask=0x07),
+    'number_of_returns': _Column('returns_and_flags', 'u1', shift=3,
+                                 mask=0x07),
+    'scan_direction_flag': _Column('returns_and_flags', 'u1', shift=6,
+                                   mask=0x01),
+    'edge_of_flight_line': _Column('returns_and_flags', 'u1', shift=7,
+                                   mask=0x01),
+    'classification': _Column('classification_bits', 'u1', mask=0x1F),
+    'synthetic_flag': _Column('classification_bits', 'u1', shift=5, mask=0x01),
+    'keypoint_flag': _Column('classification_bits', 'u1', shift=6, mask=0x01),
+    'withheld_flag': _Column('classification_bits', 'u1', shift=7, mask=0x01),
+    'scan_angle_rank': _Column('scan_angle_rank', 'i1'),
+    'user_data': _Column('user_data', 'u1'),
+    'point_source_ID': _Column('point_source_ID', '=u2'),
+    'extended_scan_angle': _Column('extended_scan_angle', '=i2'),
+    'extended_point_type': _Column('extended_flags', 'u1', mask=0x03),
+    'extended_scanner_channel': _Column('extended_flags', 'u1', shift=2,
+                                        mask=0x03),
+    'extended_classification_flags': _Column('extended_flags', 'u1', shift=4,
+                                             mask=0x0F),
+    'extended_classification': _Column('extended_classification', 'u1'),
+    'extended_return_number': _Column('extended_returns', 'u1', mask=0x0F),
+    'extended_number_of_returns': _Column('extended_returns', 'u1', shift=4,
+                                          mask=0x0F),
+    'gps_time': _Column('gps_time', '=f8'),
+    'red': _Column('rgb', '=u2'),
+    'green': _Column('rgb', '=u2', within=2),
+    'blue': _Column('rgb', '=u2', within=4),
+    'nir': _Column('rgb', '=u2', within=6),
     # a wavepacket keeps its on-disk order in the point, so it is bytes here
-    'wave_packet': _Field(48, 'u1', width=29),
+    'wave_packet': _Column('wave_packet', 'u1', width=_WAVEPACKET_WIDTH),
 }
+
+
+def _array_fields():
+    """The columns above, placed where the C struct really keeps them.
+
+    Only the placing comes from C; which numpy type a field lands in, and how
+    the ones sharing a byte are unpacked out of it, are numpy's business and
+    stay here. The width of a blob is checked against what C says rather than
+    restated, so a wavepacket that grew would be a failure to import rather
+    than a column reading 29 bytes of a longer field.
+    """
+    fields = {}
+    for name, column in _ARRAY_COLUMNS.items():
+        offset, size = POINT_LAYOUT[column.member]
+        if column.within + column.width > size:
+            raise RuntimeError(
+                f"{name} does not fit in LazPoint.{column.member}")
+        fields[name] = _Field(offset + column.within, column.dtype,
+                              column.width, column.shift, column.mask)
+    return fields
+
+
+_ARRAY_FIELDS = _array_fields()
 
 # The fields every point format carries, in the order LAS lists them.
 _CORE_FIELDS = ('X', 'Y', 'Z', 'intensity', 'return_number',
@@ -110,6 +155,20 @@ def _fields_for_point_format(point_format, num_extra_bytes):
     if num_extra_bytes:
         names.append('extra_bytes')
     return names
+
+
+def _array_field(name, num_extra_bytes):
+    """Where *name* lives in a decoded point, for a file with this many extra
+    bytes. Both directions of the array API ask: a column is read out of the
+    same place it is written into."""
+    if name == 'extra_bytes':
+        if not num_extra_bytes:
+            raise ValueError("this file has no extra bytes")
+        return _Field(-1, 'u1', width=num_extra_bytes)
+    try:
+        return _ARRAY_FIELDS[name]
+    except KeyError:
+        raise ValueError(f"unknown point field {name!r}") from None
 
 
 # How far apart two points of a cell may be before the second starts a run of
@@ -223,7 +282,11 @@ class Reader:
         self.fp = None
         self.header = None
         self.laz_header = None
+        self.items = None
+        self.num_extra_bytes = None
+        self._scale_offset = None
         self._reader = None
+        self._was_opened = False
         self._owns_fp = False
         self._evlr_warning = None
         self._path = None
@@ -238,7 +301,12 @@ class Reader:
     # -- construction ----------------------------------------------------
 
     def open(self, filename):
-        """Open a file by path. Also accepts an already-open binary file."""
+        """Open a file by path. Also accepts an already-open binary file.
+
+        A reader that was already open is closed first, so opening a second
+        file through the same object does not strand the first one's handle.
+        """
+        self.close()
         self._path = None
         self._index = None
         self._index_looked_for = False
@@ -257,6 +325,7 @@ class Reader:
         except Exception:
             self.close()
             raise
+        self._was_opened = True
         return self
 
     def _setup(self):
@@ -518,6 +587,27 @@ class Reader:
 
     # -- properties ------------------------------------------------------
 
+    def _points(self):
+        """The point reader, or a refusal saying why there is not one.
+
+        Everything that touches the points goes through here, so that a
+        reader with no file behind it says so in one recognisable way rather
+        than letting an internal None surface as whatever the next line
+        happens to do with it. ValueError, and closed-means-closed, are what
+        :class:`Writer` already answers in the same situation.
+        """
+        if self._reader is None:
+            raise ValueError("reader is closed" if self._was_opened
+                             else "reader is not open")
+        return self._reader
+
+    def _fields(self):
+        """The header, or the same refusal. Kept after close, since it was
+        read once and describes a file that has not changed."""
+        if self.header is None:
+            raise ValueError("reader is not open")
+        return self.header
+
     @property
     def num_points(self):
         """How many points the file holds, which is also ``len(reader)``.
@@ -525,7 +615,7 @@ class Reader:
         The LAS 1.4 count where the header has one, since the legacy field
         is only 32 bits and saturates.
         """
-        return self.header['number_of_point_records']
+        return self._fields()['number_of_point_records']
 
     @property
     def chunking(self):
@@ -563,7 +653,7 @@ class Reader:
         the 1.4 format a compatibility-mode file stands in for rather than
         the legacy one it is written as.
         """
-        return self.header['point_data_format_id']
+        return self._fields()['point_data_format_id']
 
     @property
     def is_compressed(self):
@@ -578,19 +668,19 @@ class Reader:
         :attr:`offsets` gives the georeferenced coordinate. :meth:`scale`
         does this.
         """
-        h = self.header
+        h = self._fields()
         return (h['x_scale_factor'], h['y_scale_factor'], h['z_scale_factor'])
 
     @property
     def offsets(self):
         """``(x, y, z)`` offsets, added to the scaled coordinates."""
-        return (self.header['x_offset'], self.header['y_offset'],
-                self.header['z_offset'])
+        h = self._fields()
+        return (h['x_offset'], h['y_offset'], h['z_offset'])
 
     @property
     def index(self):
         """Index of the next point to be read."""
-        return self._reader.index
+        return self._points().index
 
     @property
     def warnings(self):
@@ -627,7 +717,7 @@ class Reader:
         The returned :class:`Point` is the reader's own buffer and is
         overwritten by the next ``read()``; call ``point.copy()`` to keep it.
         """
-        return self._reader.read()
+        return self._points().read()
 
     def checksum(self, count=None):
         """Decode *count* points and return ``(fnv1a_hash, points_read)``.
@@ -639,13 +729,13 @@ class Reader:
         """
         if count is None:
             count = self.num_points - self.index
-        return self._reader.checksum(max(0, count))
+        return self._points().checksum(max(0, count))
 
     def seek(self, index):
         """Position the reader so the next ``read()`` returns point *index*."""
         if index < 0 or index > self.num_points:
             raise IndexError(f"point index {index} out of range")
-        self._reader.seek(index)
+        self._points().seek(index)
 
     def scale(self, point):
         """Return the georeferenced (x, y, z) of *point* as floats."""
@@ -653,19 +743,29 @@ class Reader:
         return (point.X * sx + ox, point.Y * sy + oy, point.Z * sz + oz)
 
     def points(self, start=0, count=None):
-        """Yield points, one at a time, without copying.
+        """Yield *count* points from point *start*, without copying.
 
         Each iteration yields the same object with new contents, so store
         ``point.copy()`` if points need to outlive the loop.
+
+        *start* is a position to go to, not a number of points to skip, so
+        the default reads the file from the beginning however much of it has
+        been read already. Being a generator, it goes there when the first
+        point is asked for rather than when it is called.
+
+        Note that :meth:`arrays` and :meth:`xyz` spell the same argument
+        ``start`` but default it to where the reader already is; only this
+        one rewinds.
         """
-        if start:
-            self.seek(start)
+        self.seek(start)
         remaining = self.num_points - start if count is None else count
-        read = self._reader.read      # hoisted: this loop runs per point
+        read = self._points().read      # hoisted: this loop runs per point
         for _ in range(remaining):
             yield read()
 
     def __iter__(self):
+        """Yield the points from here on, so that iterating a reader something
+        has already read from carries on rather than starting again."""
         return self.points(self.index)
 
     def __len__(self):
@@ -765,7 +865,7 @@ class Reader:
         self.seek(0)
         bounds = self._point_bounds()
         self.seek(0)
-        return self._reader.build_index(
+        return self._points().build_index(
             self.num_points, bounds, self.scales[:2], self.offsets[:2],
             float(cell_size), int(minimum_points), int(maximum_intervals),
             _RUN_GAP)
@@ -778,7 +878,7 @@ class Reader:
         would get a tree with everything in one cell. laszip's own index
         creation goes by the points too.
         """
-        stored = self._reader.bounds(self.num_points)
+        stored = self._points().bounds(self.num_points)
         scales, offsets = self.scales, self.offsets
         return tuple(value * scales[i % 2] + offsets[i % 2]
                      for i, value in enumerate(stored))
@@ -946,7 +1046,7 @@ class Reader:
 
     def _points_in(self, region, spans):
         """Yield the points a query selects, interval by interval."""
-        read_within = self._reader.read_within
+        read_within = self._points().read_within
         for start, stop in spans:
             self.seek(start)
             while True:
@@ -959,14 +1059,7 @@ class Reader:
 
     def _array_field(self, name):
         """Where *name* lives in a decoded point, sized for this file."""
-        if name == 'extra_bytes':
-            if not self.num_extra_bytes:
-                raise ValueError("this file has no extra bytes")
-            return _Field(-1, 'u1', width=self.num_extra_bytes)
-        try:
-            return _ARRAY_FIELDS[name]
-        except KeyError:
-            raise ValueError(f"unknown point field {name!r}") from None
+        return _array_field(name, self.num_extra_bytes)
 
     def arrays(self, *names, start=None, count=None):
         """Decode points into numpy arrays, one per field.
@@ -1004,7 +1097,7 @@ class Reader:
                                              self.num_extra_bytes)
 
         out, targets, packed = self._array_columns(names, count)
-        self._reader.read_into(targets, count)
+        self._points().read_into(targets, count)
         return self._finish_columns(out, packed, count)
 
     def _array_columns(self, names, count):
@@ -1102,7 +1195,7 @@ class Reader:
         """The points of one run that are inside the region, as columns."""
         out, targets, packed = self._array_columns(names, stop - start)
         self.seek(start)
-        found = self._reader.read_into_within(targets, stop, region)
+        found = self._points().read_into_within(targets, stop, region)
         return self._finish_columns(out, packed, found)
 
     def _joined(self, names, blocks):

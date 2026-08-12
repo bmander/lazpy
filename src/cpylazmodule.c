@@ -39,6 +39,64 @@ static PyMethodDef cpylaz_methods[] = {
 
 PyDoc_STRVAR(module_doc, "C backend for lazpy: LAZ entropy coding and point decoding.");
 
+/*
+ * POINT_LAYOUT: where every member of a decoded point lives, as
+ * {name: (offset, size)}.
+ *
+ * The array API has to know these to copy a field straight out of the point,
+ * and the offsets are this struct's to state -- taken with offsetof here
+ * rather than written out again in Python, where getting one wrong would be
+ * silently wrong data rather than a build failure. What is left on the Python
+ * side is what C has no opinion about: which numpy type a field lands in, and
+ * how the ones that share a byte are unpacked out of it.
+ *
+ * Named for the struct member, not for the field: several point fields come
+ * out of returns_and_flags, and saying so is the caller's job.
+ */
+static int add_point_layout(PyObject *m)
+{
+    static const struct { const char *name; size_t offset, size; } members[] = {
+#define MEMBER(field) {#field, offsetof(LazPoint, field), sizeof(((LazPoint *)0)->field)}
+        MEMBER(X), MEMBER(Y), MEMBER(Z),
+        MEMBER(intensity),
+        MEMBER(returns_and_flags),
+        MEMBER(classification_bits),
+        MEMBER(scan_angle_rank),
+        MEMBER(user_data),
+        MEMBER(point_source_ID),
+        MEMBER(extended_scan_angle),
+        MEMBER(extended_flags),
+        MEMBER(extended_classification),
+        MEMBER(extended_returns),
+        MEMBER(gps_time),
+        MEMBER(rgb),
+        MEMBER(wave_packet),
+#undef MEMBER
+    };
+    PyObject *layout = PyDict_New();
+    size_t i;
+
+    if (!layout) return -1;
+    for (i = 0; i < sizeof(members) / sizeof(members[0]); i++) {
+        PyObject *pair = Py_BuildValue("(nn)", (Py_ssize_t)members[i].offset,
+                                       (Py_ssize_t)members[i].size);
+        if (!pair || PyDict_SetItemString(layout, members[i].name, pair) < 0) {
+            Py_XDECREF(pair);
+            Py_DECREF(layout);
+            return -1;
+        }
+        Py_DECREF(pair);
+    }
+    /* how far into a point a fixed field can reach, which is what bounds a
+     * read_into target: everything past it is the extra bytes */
+    if (PyDict_SetItemString(layout, "__extent__",
+                             PyLong_FromLong(POINT_FIXED_EXTENT)) < 0) {
+        Py_DECREF(layout);
+        return -1;
+    }
+    return PyModule_AddObject(m, "POINT_LAYOUT", layout);
+}
+
 static int cpylaz_exec(PyObject *m)
 {
     /* The point layout is enforced at compile time by static assertions in
@@ -83,9 +141,15 @@ static int cpylaz_exec(PyObject *m)
         return -1;
     }
 
-    PyModule_AddIntConstant(m, "DM_LENGTH_SHIFT", DM_LENGTH_SHIFT);
-    PyModule_AddIntConstant(m, "BM_LENGTH_SHIFT", BM_LENGTH_SHIFT);
-    PyModule_AddIntConstant(m, "DECOMPRESS_SELECTIVE_ALL", (long)LAZ_DECOMPRESS_SELECTIVE_ALL);
+    if (PyModule_AddIntConstant(m, "DM_LENGTH_SHIFT", DM_LENGTH_SHIFT) < 0)
+        return -1;
+    if (PyModule_AddIntConstant(m, "BM_LENGTH_SHIFT", BM_LENGTH_SHIFT) < 0)
+        return -1;
+    if (PyModule_AddIntConstant(m, "DECOMPRESS_SELECTIVE_ALL",
+                                (long)LAZ_DECOMPRESS_SELECTIVE_ALL) < 0)
+        return -1;
+
+    if (add_point_layout(m) < 0) return -1;
     return 0;
 }
 
