@@ -832,6 +832,22 @@ def test_the_attributes_describe_what_they_were_given():
     assert struct.unpack_from("<3d", first, 4 + 32 + 4 + 4 * 24) == (2.0, 0, 0)
 
 
+def test_a_descriptor_is_found_whatever_its_user_id_was_spelled_as():
+    """A record is keyed by what a reader will look for, not by what the
+    caller wrote.
+
+    The user id arrives as whatever the caller had -- text here, where the
+    field is bytes -- and the writer settles that once, as it takes the
+    records in. Everything that asks for one afterwards asks by the key a
+    reader would use, so the descriptor below has to size the points despite
+    never having been spelled the way the key is. Sizing them is the whole
+    assertion: a lookup that missed it would leave the points 6 bytes short.
+    """
+    record = dict(extra_bytes_record(SIX_BYTES), user_id="LASF_Spec")
+    with Reader(io.BytesIO(one_point_file(vlrs=[record]))) as reader:
+        assert reader.num_extra_bytes == 6
+
+
 def test_a_descriptor_that_contradicts_the_record_length_is_refused():
     with pytest.raises(ValueError, match="describes 6 bytes per point"):
         one_point_file(vlrs=[extra_bytes_record(SIX_BYTES)],
