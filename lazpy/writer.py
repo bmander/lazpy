@@ -142,15 +142,23 @@ def _user_id(value):
 # ---------------------------------------------------------------------------
 
 
-def _records(vlrs):
-    """`vlrs` ready to write: a list of records, in file order.
+def _keyed(vlrs):
+    """`vlrs` ready to write: records under ``(user_id, record_id)``.
 
-    Accepts a mapping keyed by ``(user_id, record_id)``, as
-    ``header["variable_length_records"]`` is, or any iterable of records --
-    so copying a file's records is handing them over as they came. Records
-    this has already been over pass through it unchanged, which is what lets
-    the extended ones be checked when they are given and again when they are
-    written.
+    Accepts a mapping keyed that way, as ``header["variable_length_records"]``
+    is, or any iterable of records -- so copying a file's records is handing
+    them over as they came. Records this has already been over pass through it
+    unchanged, which is what lets the extended ones be checked when they are
+    given and again when they are written.
+
+    The key is built here, through ``_user_id``, because here is where a name
+    given as text or padded becomes the bytes a reader will look for. Holding
+    the records under it rather than beside it is what lets everything
+    downstream ask for one by key and get the same answer a reader would:
+    there is no second spelling to keep in step.
+
+    File order is insertion order, which is what a dict gives and what the
+    records are written in.
 
     A LASzip record among them is dropped rather than refused, which is what
     laszip does with one too: it describes how the file it came from was
@@ -159,20 +167,29 @@ def _records(vlrs):
     if hasattr(vlrs, 'values'):
         vlrs = vlrs.values()
 
-    records = []
-    keys = set()
+    records = {}
     for vlr in vlrs:
         key = (_user_id(vlr['user_id']), vlr['record_id'])
         if key == LASZIP_VLR_KEY:
             continue
-        if key in keys:
+        if key in records:
             raise ValueError(f"two records claim {key[0]!r} {key[1]}, and a "
                              "reader can only find one of them")
-        records.append(_record(key, bytes(vlr['data']),
+        records[key] = _record(key, bytes(vlr['data']),
                                vlr.get('description', b''),
-                               vlr.get('reserved', 0)))
-        keys.add(key)
+                               vlr.get('reserved', 0))
     return records
+
+
+def _records(vlrs):
+    """The same, as a list in file order.
+
+    What the extended records are held as: ``writer.evlrs`` is documented as
+    a list a caller appends to up to the last moment, and appending is the
+    one thing a mapping asks them to spell differently. The ordinary records
+    never leave the constructor, so they keep their keys.
+    """
+    return list(_keyed(vlrs).values())
 
 
 def _add_crs(records, crs, wkt, description):
@@ -183,12 +200,11 @@ def _add_crs(records, crs, wkt, description):
     two answers to one question, and which of them a reader found would be a
     matter of record order.
     """
-    if any((record['user_id'], record['record_id']) in PROJECTION_VLR_KEYS
-           for record in records):
+    if any(key in records for key in PROJECTION_VLR_KEYS):
         raise ValueError("crs= and a projection record in vlrs are two "
                          "answers to where the points are; give one")
-    return records + _records([crs_record(crs, wkt=wkt,
-                                          description=description)])
+    return {**records, **_keyed([crs_record(crs, wkt=wkt,
+                                            description=description)])}
 
 
 def _record(key, data, description, reserved=0):
@@ -228,9 +244,7 @@ def _extra_bytes_width(records, declared):
     descriptor and record length disagree is one nothing can read, and it is
     cheaper to refuse it here than to explain it later.
     """
-    descriptor = next((record for record in records
-                       if (record['user_id'],
-                           record['record_id']) == EXTRA_BYTES_VLR_KEY), None)
+    descriptor = records.get(EXTRA_BYTES_VLR_KEY)
     if descriptor is None:
         return 0 if declared is None else declared
 
@@ -364,7 +378,7 @@ class Writer:
         self._owns_fp = False
         self._compatibility_at = None
 
-        records = _records(vlrs)
+        records = _keyed(vlrs)
         num_extra_bytes = _extra_bytes_width(records, num_extra_bytes)
         if num_extra_bytes < 0:
             raise ValueError("num_extra_bytes cannot be negative")
@@ -425,10 +439,10 @@ class Writer:
         # the LASzip record goes last, where laszip puts its own: it appends
         # to the records it was given
         if self.compressed:
-            records.append(self._laszip_record(vlr_description))
+            records[LASZIP_VLR_KEY] = self._laszip_record(vlr_description)
         # packed before the header, because the header records how far past
         # itself the points begin
-        block = b''.join(_pack_vlr(record) for record in records)
+        block = b''.join(_pack_vlr(record) for record in records.values())
         block += bytes(user_data_after_header)
 
         self._open(filename)
@@ -497,22 +511,21 @@ class Writer:
         # what the caller's own extra bytes are already described as, if they
         # are: the hidden fields go behind them, and can only be placed by a
         # record that accounts for everything in front of them
-        described = next((record['data'] for record in records
-                          if (record['user_id'],
-                              record['record_id']) == EXTRA_BYTES_VLR_KEY),
-                         None)
+        rest = dict(records)
+        described = rest.pop(EXTRA_BYTES_VLR_KEY, None)
         descriptor, self.compat_layout, num_extra_bytes = _disguise(
-            self.point_format, num_extra_bytes, described)
+            self.point_format, num_extra_bytes,
+            described['data'] if described else None)
 
         # the two that describe the disguise lead, as laszip writes them, and
         # the descriptor that was among the caller's own is now one of them
-        disguise = [_record(LASCOMPATIBLE_VLR_KEY, _compatibility_payload(),
-                            description),
-                    _record(EXTRA_BYTES_VLR_KEY, descriptor, description)]
-        rest = [record for record in records
-                if (record['user_id'],
-                    record['record_id']) != EXTRA_BYTES_VLR_KEY]
-        return disguise + rest, num_extra_bytes
+        disguise = {
+            LASCOMPATIBLE_VLR_KEY: _record(
+                LASCOMPATIBLE_VLR_KEY, _compatibility_payload(), description),
+            EXTRA_BYTES_VLR_KEY: _record(
+                EXTRA_BYTES_VLR_KEY, descriptor, description),
+        }
+        return {**disguise, **rest}, num_extra_bytes
 
     @staticmethod
     def _check_version(point_format, version_minor):
