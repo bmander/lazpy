@@ -113,9 +113,14 @@ class TestChunking:
         wrong -- which is worth an error rather than an answer."""
         data = self.with_no_chunks_declared(
             self.written(records, -1, breaks=(1, 2, 199, 200)))
-        with pytest.raises(LazError):
-            with Reader(io.BytesIO(data)) as reader:
-                list(reader)
+        # every way in, since a seek opens the first chunk itself and a read
+        # that follows one takes a different path through the chunk logic
+        for reach in (lambda r: list(r),
+                      lambda r: [r.read() for _ in range(len(records))],
+                      lambda r: (r.seek(50), r.read())):
+            with pytest.raises(LazError):
+                with Reader(io.BytesIO(data)) as reader:
+                    reach(reader)
 
     def test_reading_past_the_last_adaptive_chunk_raises(self, records):
         """The running totals end at the last chunk, so the chunk after it has

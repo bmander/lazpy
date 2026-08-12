@@ -379,6 +379,26 @@ BOOL laz_readpoint_read(LazReadPoint *rp, LazPoint *point, U8 *extra_bytes)
     }
 
     if (rp->have_dec) {
+        /*
+         * A point about to be decoded out of an adaptive file whose table
+         * states no size for the chunk it falls in: either the table lied
+         * about how many chunks there are, or this is a read past the last
+         * point. Carrying on would leave chunk_size at U32_MAX, so no later
+         * read would take a chunk transition and the decoder would never
+         * restart at the boundaries the file really has -- every point from
+         * the first of them on comes back wrong, with nothing raised.
+         *
+         * Asked here rather than where a chunk is opened, because a seek
+         * opens one itself and then reading takes neither branch. Where the
+         * boundaries are fixed the table is rebuilt while reading instead,
+         * which recovers such a file completely; adaptive boundaries are not
+         * recoverable, which is why the file was asked to state them.
+         */
+        if (rp->chunk_totals && !chunk_is_tabled(rp, rp->current_chunk)) {
+            set_error(rp, "chunk table gives no size for chunk %u",
+                      rp->current_chunk);
+            return LAZ_FALSE;
+        }
         if (rp->chunk_count == rp->chunk_size) {
             if (rp->point_start != 0) {
                 laz_decoder_done(&rp->dec);
@@ -410,23 +430,6 @@ BOOL laz_readpoint_read(LazReadPoint *rp, LazPoint *point, U8 *extra_bytes)
             } else if (chunk_is_tabled(rp, rp->current_chunk)) {
                 rp->chunk_size = (U32)(rp->chunk_totals[rp->current_chunk + 1] -
                                        rp->chunk_totals[rp->current_chunk]);
-            } else if (rp->chunk_size == U32_MAX) {
-                /*
-                 * Adaptive chunking with no size for the chunk about to be
-                 * decoded, which means either the table lied about how many
-                 * there are or the caller has read past the last point.
-                 * Carrying on would leave chunk_size at U32_MAX, so no later
-                 * read would ever take a chunk transition and the decoder
-                 * would never restart at the boundaries the file really has:
-                 * every point from the first of them on comes back wrong,
-                 * with nothing raised. Where the boundaries are fixed the
-                 * branch above rebuilds the table instead, which recovers
-                 * such a file completely; adaptive boundaries are not
-                 * recoverable, which is why the file was asked to state them.
-                 */
-                set_error(rp, "chunk table gives no size for chunk %u",
-                          rp->current_chunk);
-                return LAZ_FALSE;
             }
             rp->chunk_count = 0;
         }
