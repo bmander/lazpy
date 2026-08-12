@@ -862,15 +862,19 @@ class TestUninitialised:
     naming what is missing.
     """
 
-    TYPES = [cpylaz.ArithmeticBitModel, cpylaz.ArithmeticModel,
-             cpylaz.ArithmeticEncoder, cpylaz.ArithmeticDecoder,
-             cpylaz.IntegerCompressor, cpylaz.Point, cpylaz.PointReader,
-             cpylaz.PointWriter, cpylaz.SpatialIndex]
+    # taken from the module rather than listed, so the next type added to
+    # the extension is covered by having been added
+    TYPES = [t for t in vars(cpylaz).values()
+             if isinstance(t, type) and not issubclass(t, BaseException)]
 
     @staticmethod
     def poke(obj, name):
-        """Read the attribute, and call it if it is callable, with as many
-        zeros as it will take."""
+        """Read the attribute, and call it if it is callable, with the fewest
+        zeros it will accept.
+
+        A TypeError is taken as the wrong arity and retried wider, which also
+        swallows one raised by the body -- acceptable here, where the only
+        thing being asserted is that the process is still running."""
         attribute = getattr(obj, name)
         if not callable(attribute):
             return
@@ -887,13 +891,18 @@ class TestUninitialised:
         interpreter surviving is the whole assertion -- what each one raises
         is its own business, and several answer perfectly sensibly."""
         obj = kind.__new__(kind)
+        poked = 0
         for name in dir(kind):
             if name.startswith("__"):
                 continue
+            poked += 1
             try:
                 self.poke(obj, name)
             except Exception:
                 pass          # an exception is a fine answer; a crash is not
+        # otherwise a type that stopped exposing anything would pass by
+        # exercising nothing; the smallest of these has six members
+        assert poked >= 5, kind.__name__
 
     def test_a_bit_model_is_usable_before_init(self):
         """It is told nothing, so there is nothing to wait for: one built by
@@ -913,6 +922,20 @@ class TestUninitialised:
         assert model.num_symbols == 0
         with pytest.raises(ValueError):
             model.distribution_lookup(0)
+
+    def test_an_unready_coder_cannot_be_built_on(self):
+        """The pair, which poking one object at a time cannot reach.
+
+        An IntegerCompressor reaches into its coder's struct and codes
+        through it without going near the guards on the coder's own methods,
+        so a coder with no file taken here is a crash later rather than a
+        refusal now -- a division by an interval length of zero on the way
+        in, a write through an output byte that was never allocated on the
+        way out. It is the state __new__ leaves behind, one step removed.
+        """
+        for kind in (cpylaz.ArithmeticDecoder, cpylaz.ArithmeticEncoder):
+            with pytest.raises(ValueError, match="has no file"):
+                cpylaz.IntegerCompressor(kind.__new__(kind), 8)
 
     def test_a_coder_without_a_file_says_so(self):
         for kind in (cpylaz.ArithmeticEncoder, cpylaz.ArithmeticDecoder):
@@ -937,6 +960,15 @@ class TestReinitialisation:
             for _ in range(5):
                 coder.__init__(fp)
             assert sys.getrefcount(fp) == before, kind.__name__
+
+    def test_an_integer_compressor_does_not_strand_its_coder(self):
+        """The third of the same shape, after the two coders."""
+        decoder = cpylaz.ArithmeticDecoder(io.BytesIO(bytes(1000)))
+        compressor = cpylaz.IntegerCompressor(decoder, 8)
+        before = sys.getrefcount(decoder)
+        for _ in range(5):
+            compressor.__init__(decoder, 8)
+        assert sys.getrefcount(decoder) == before
 
     def test_a_borrowed_model_lets_go_of_its_owner(self):
         """A model handed out by an IntegerCompressor keeps that compressor

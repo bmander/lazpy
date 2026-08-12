@@ -101,10 +101,6 @@ PyTypeObject BitModel_Type = {
 /* ======================================================= ArithmeticModel == */
 
 /*
- * Either owns its model (constructed from Python) or borrows one belonging to
- * an IntegerCompressor, in which case `owner` keeps that object alive.
- */
-/*
  * Points the model at its own storage before anything else can, so that a
  * model made by __new__ alone -- pickle's route, and copy's -- is an empty
  * model rather than a NULL one. Every method here reaches through self->m to
@@ -388,6 +384,12 @@ PyObject *encoder_result(EncoderObject *self)
 
 static PyObject *Encoder_start(EncoderObject *self, PyObject *Py_UNUSED(i))
 {
+    /* the same question Decoder_start asks, rather than starting onto a NULL
+     * stream and leaving encoder_ready to refuse the next call instead */
+    if (self->stream == NULL) {
+        PyErr_SetString(PyExc_ValueError, "encoder has no file");
+        return NULL;
+    }
     laz_encoder_init(&self->e, self->stream);
     Py_RETURN_NONE;
 }
@@ -546,10 +548,14 @@ static void Decoder_dealloc(DecoderObject *self)
 }
 
 /*
- * The reading half of encoder_ready: a decoder with no stream was never given
- * a file, which is what __new__ without __init__ leaves behind, and decoding
- * from it would dereference NULL -- or, for the ones that divide by the
- * coder's length, divide by zero.
+ * Whether the decoder was given a file, which __new__ without __init__ does
+ * not. Decoding from one that was not dereferences NULL.
+ *
+ * Not the whole of encoder_ready: there is no "not started" case to check,
+ * because laz_decoder_setup leaves the interval length at AC_MAX_LENGTH so
+ * that decoding before start() runs out of stream rather than dividing by
+ * zero. An encoder has no such resting state, which is why its guard asks
+ * one more question than this one.
  */
 static int decoder_ready(DecoderObject *self)
 {

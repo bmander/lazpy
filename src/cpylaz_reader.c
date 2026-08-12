@@ -119,10 +119,13 @@ static BOOL reader_stream_ok(ReaderObject *self)
 }
 
 /*
- * Whether __init__ ran. Everything below reaches into the point reader, the
- * decoded point or the view onto it, none of which exist until then, so the
- * one thing every entry point has to establish first is that it is looking at
- * a reader and not at the zeroed object __new__ hands back on its own.
+ * Whether __init__ ran, raising if it did not.
+ *
+ * Everything that touches the point reader, the decoded point or the view
+ * onto it has to ask, since none of those exist until then and __new__ hands
+ * back the zeroed object regardless. The getters below that only read a
+ * scalar out of that struct do not: zero is a truthful answer for a reader
+ * that has read nothing, and guarding them would buy nothing.
  */
 static BOOL reader_ready(ReaderObject *self)
 {

@@ -23,10 +23,29 @@ static int IntComp_tp_init(IntCompObject *self, PyObject *args, PyObject *kwds)
                                      &dec_or_enc, &bits, &contexts, &bits_high, &range))
         return -1;
 
+    /*
+     * The coder has to have a file as well as the right type. Everything
+     * below reaches into its struct and codes through it without going near
+     * the guards on the coder's own methods, so an unstarted one taken here
+     * is a crash later rather than a refusal now: the decoder divides by an
+     * interval length of zero, and the encoder writes through the output
+     * byte laz_encoder_setup never allocated.
+     *
+     * Which is the same thing __new__ without __init__ leaves behind. One
+     * object on its own is safe now; this is the pair.
+     */
     if (PyObject_TypeCheck(dec_or_enc, &Decoder_Type)) {
+        if (((DecoderObject *)dec_or_enc)->stream == NULL) {
+            PyErr_SetString(PyExc_ValueError, "decoder has no file");
+            return -1;
+        }
         laz_ic_setup_dec(&self->ic, &((DecoderObject *)dec_or_enc)->d,
                          bits, contexts, bits_high, range);
     } else if (PyObject_TypeCheck(dec_or_enc, &Encoder_Type)) {
+        if (((EncoderObject *)dec_or_enc)->stream == NULL) {
+            PyErr_SetString(PyExc_ValueError, "encoder has no file");
+            return -1;
+        }
         laz_ic_setup_enc(&self->ic, &((EncoderObject *)dec_or_enc)->e,
                          bits, contexts, bits_high, range);
     } else {
@@ -34,8 +53,11 @@ static int IntComp_tp_init(IntCompObject *self, PyObject *args, PyObject *kwds)
                         "first argument must be an ArithmeticDecoder or ArithmeticEncoder");
         return -1;
     }
+    /* as the coders do: __init__ again lets go of the last call's coder,
+     * and laz_ic_setup_* has already zeroed whatever init_*compressor
+     * allocated over it */
     Py_INCREF(dec_or_enc);
-    self->coder = dec_or_enc;
+    Py_XSETREF(self->coder, dec_or_enc);
     return 0;
 }
 
