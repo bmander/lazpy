@@ -11,10 +11,19 @@ from lazpy import LazError
 from lazpy import _cpylaz as cpylaz
 
 
+# The two symbol models, run through one set of assertions. They are the
+# same table of probabilities either way, and the literals below are what
+# LASzip fills it with, so a difference between the two is a difference
+# from LASzip.
+implementations = pytest.mark.parametrize("impl", [models, cpylaz],
+                                          ids=["python", "c"])
+
+
+@implementations
 class TestArithmeticModel:
 
-    def test_create(self):
-        model = models.ArithmeticModel(256, False)
+    def test_create(self, impl):
+        model = impl.ArithmeticModel(256, False)
         assert model.num_symbols == 256
         assert model.compress is False
 
@@ -29,8 +38,8 @@ class TestArithmeticModel:
 
         assert model.has_decoder_table() is False
 
-    def test_init_4(self):
-        model = models.ArithmeticModel(4, False)
+    def test_init_4(self, impl):
+        model = impl.ArithmeticModel(4, False)
         model.init()
 
         assert model.num_symbols == 4
@@ -53,8 +62,8 @@ class TestArithmeticModel:
 
         assert model.has_decoder_table() is False
 
-    def test_init_256(self):
-        model = models.ArithmeticModel(256, False)
+    def test_init_256(self, impl):
+        model = impl.ArithmeticModel(256, False)
         model.init()
 
         assert model.num_symbols == 256
@@ -80,96 +89,8 @@ class TestArithmeticModel:
 
         assert model.has_decoder_table() is True
 
-    def test_table_init(self):
-        model = models.ArithmeticModel(8, False)
-        with pytest.raises(ValueError):
-            model.init([1, 1, 2, 3, 5, 8, 13, 21, 34])
-
-        model.init([1, 1, 2, 3, 5, 8, 13, 21])
-
-        assert model.symbol_count_lookup(0) == 1
-        assert model.symbol_count_lookup(7) == 21
-
-        assert model.has_decoder_table() is False
-
-        assert model.distribution_lookup(0) == 0
-        assert model.distribution_lookup(4) == 28672
-        assert model.distribution_lookup(5) == 49152
-        assert model.distribution_lookup(6) == 16384
-        assert model.distribution_lookup(7) == 4096
-
-
-class TestCArithmeticModel:
-
-    def test_create(self):
-        model = cpylaz.ArithmeticModel(256, False)
-        assert model.num_symbols == 256
-        assert model.compress is False
-
-        with pytest.raises(Exception):
-            model.decoder_table_lookup(0)
-
-        with pytest.raises(Exception):
-            model.distribution_lookup(0)
-
-        with pytest.raises(Exception):
-            model.symbol_count_lookup(0)
-
-        assert model.has_decoder_table() is False
-
-    def test_init_4(self):
-        model = cpylaz.ArithmeticModel(4, False)
-        model.init()
-
-        assert model.num_symbols == 4
-        assert model.compress is False
-
-        with pytest.raises(Exception):
-            model.decoder_table_lookup(0)
-
-        assert model.symbol_count_lookup(0) == 1
-        assert model.symbol_count_lookup(2) == 1
-        assert model.symbol_count_lookup(3) == 1
-        with pytest.raises(Exception):
-            model.symbol_count_lookup(4)
-
-        assert model.distribution_lookup(0) == 0
-        assert model.distribution_lookup(2) == 16384
-        assert model.distribution_lookup(3) == 24576
-        with pytest.raises(Exception):
-            model.distribution_lookup(4)
-
-        assert model.has_decoder_table() is False
-
-    def test_init_256(self):
-        model = cpylaz.ArithmeticModel(256, False)
-        model.init()
-
-        assert model.num_symbols == 256
-        assert model.compress is False
-
-        assert model.decoder_table_lookup(0) == 0
-        assert model.decoder_table_lookup(32) == 127
-        assert model.decoder_table_lookup(65) == 255
-        with pytest.raises(Exception):
-            model.decoder_table_lookup(66)
-
-        assert model.symbol_count_lookup(0) == 1
-        assert model.symbol_count_lookup(32) == 1
-        assert model.symbol_count_lookup(255) == 1
-        with pytest.raises(Exception):
-            model.symbol_count_lookup(256)
-
-        assert model.distribution_lookup(0) == 0
-        assert model.distribution_lookup(32) == 4096
-        assert model.distribution_lookup(255) == 32640
-        with pytest.raises(Exception):
-            model.distribution_lookup(256)
-
-        assert model.has_decoder_table() is True
-
-    def test_table_init(self):
-        model = cpylaz.ArithmeticModel(8, False)
+    def test_table_init(self, impl):
+        model = impl.ArithmeticModel(8, False)
         with pytest.raises(ValueError):
             model.init([1, 1, 2, 3, 5, 8, 13, 21, 34])
 
@@ -384,7 +305,7 @@ class TestCArithmeticDecoder:
 
     def test_read_bits(self):
         fp = io.BytesIO(file_contents)
-        decoder = encoder.ArithmeticDecoder(fp)
+        decoder = cpylaz.ArithmeticDecoder(fp)
         decoder.start()
 
         assert decoder.read_bits(32) == 3142626653
@@ -532,6 +453,13 @@ class TestCIntegerCompressor:
 # Both implementations are run through the same tests, and one test asserts
 # that they emit the same bytes, so a desync in either shows up as a
 # disagreement rather than as two implementations wrong in the same way.
+#
+# That only holds while the two are separate all the way down, which is why
+# the Python coder builds Python models and never reaches for cpylaz. It also
+# rests on that one byte-comparing test rather than on the round trips: a
+# round trip encodes and decodes through the same model, so it agrees with
+# itself whatever the model does, and a model both sides share is a model
+# nothing here can check at all.
 # ---------------------------------------------------------------------------
 
 # (encoder, decoder, integer compressor) for each implementation
@@ -558,6 +486,18 @@ def decoder_for(coder, data):
     dec = coder[1](io.BytesIO(data))
     dec.start()
     return dec
+
+
+def bit_model_for(coder):
+    """The bit model belonging to this implementation.
+
+    A symbol model comes from the coder itself, through create_symbol_model,
+    so it is always the right one; a bit model has no such hook, and taking
+    the C one for both would put the same model under both coders and leave
+    nothing for them to disagree about.
+    """
+    return (cpylaz.ArithmeticBitModel if coder is C_CODER
+            else models.ArithmeticBitModel)()
 
 
 def pseudorandom(count, modulus, seed=1):
@@ -607,14 +547,14 @@ class TestArithmeticEncoder:
         bits = pseudorandom(5000, 2)
 
         def encode_into(enc):
-            m = cpylaz.ArithmeticBitModel()
+            m = bit_model_for(coder)
             for b in bits:
                 enc.encode_bit(m, b)
 
         data = encode(coder, encode_into)
 
         dec = decoder_for(coder, data)
-        m = cpylaz.ArithmeticBitModel()
+        m = bit_model_for(coder)
         assert [int(dec.decode_bit(m)) for _ in bits] == bits
 
     # 16 symbols or fewer needs no decoder table on the decode side; more does,
@@ -624,6 +564,18 @@ class TestArithmeticEncoder:
     def test_symbols_round_trip(self, coder, num_symbols):
         symbols = pseudorandom(4000, num_symbols, seed=num_symbols)
         assert symbols_round_trip(coder, num_symbols, symbols)[0] == symbols
+
+    def test_symbols_round_trip_past_the_rescaling(self, coder):
+        """Long enough that the model halves its counts.
+
+        A symbol model rescales once they total DM_MAX_COUNT, which takes
+        about 33,000 symbols -- more than any other test here encodes. So the
+        branch that does it was reached by neither implementation, and getting
+        it wrong in one of them was something both this and the test that
+        compares their output would have passed over.
+        """
+        symbols = pseudorandom(40_000, 8, seed=11)
+        assert symbols_round_trip(coder, 8, symbols)[0] == symbols
 
     def test_raw_bits_round_trip(self, coder):
         rand = random.Random(7)
@@ -725,19 +677,29 @@ def test_a_failing_write_is_not_swallowed():
 
 
 def test_the_two_encoders_emit_the_same_bytes():
-    symbols = pseudorandom(4000, 256, seed=17)
-    bits = pseudorandom(4000, 2, seed=19)
+    """The differential proper, and the only test here that can catch a model
+    the two implementations disagree about: a round trip cannot, since encode
+    and decode share whichever model is wrong and stay in step with it.
 
-    def encode_into(enc):
-        m = enc.create_symbol_model(256)
-        m.init()
-        bit_model = cpylaz.ArithmeticBitModel()
-        for symbol, bit in zip(symbols, bits):
-            enc.encode_symbol(m, symbol)
-            enc.encode_bit(bit_model, bit)
-            enc.write_bits(11, symbol * 8 + bit)
+    Long enough for the symbol model to halve its counts, which takes about
+    33,000 symbols. Below that the rescaling branch is never reached, and an
+    error in one implementation's copy of it went unnoticed.
+    """
+    symbols = pseudorandom(40_000, 256, seed=17)
+    bits = pseudorandom(40_000, 2, seed=19)
 
-    assert encode(PY_CODER, encode_into) == encode(C_CODER, encode_into)
+    def encoded_by(coder):
+        def encode_into(enc):
+            m = enc.create_symbol_model(256)
+            m.init()
+            bit_model = bit_model_for(coder)
+            for symbol, bit in zip(symbols, bits):
+                enc.encode_symbol(m, symbol)
+                enc.encode_bit(bit_model, bit)
+                enc.write_bits(11, symbol * 8 + bit)
+        return encode(coder, encode_into)
+
+    assert encoded_by(PY_CODER) == encoded_by(C_CODER)
 
 
 @coders

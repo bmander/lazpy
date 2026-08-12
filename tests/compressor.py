@@ -1,5 +1,13 @@
 import encoder
+import models
 from lazpy import _cpylaz as cpylaz
+
+# Which coder this is driving decides which models go inside it. Neither coder
+# offers a create_ hook for the bit model the way it does for symbol models,
+# so this is the one place the choice has to be made by hand -- and it has to
+# be made, or the pure-Python side would be running the C models and the two
+# could not disagree about them.
+C_CODERS = (cpylaz.ArithmeticDecoder, cpylaz.ArithmeticEncoder)
 
 
 def i32(x):
@@ -24,6 +32,10 @@ class IntegerCompressor:
             self.enc = dec_or_enc
         else:
             raise ValueError("First argument must be an encoder or decoder")
+
+        self.bit_model = (cpylaz.ArithmeticBitModel
+                          if type(dec_or_enc) in C_CODERS
+                          else models.ArithmeticBitModel)
 
         self.bits = bits
         self.contexts = contexts
@@ -65,7 +77,7 @@ class IntegerCompressor:
                 model = coder.create_symbol_model(self.corr_bits+1)
                 self.m_bits.append(model)
 
-            self.m_corrector = [cpylaz.ArithmeticBitModel()]
+            self.m_corrector = [self.bit_model()]
             for i in range(1, self.corr_bits+1):
                 if i <= self.bits_high:
                     self.m_corrector.append(
