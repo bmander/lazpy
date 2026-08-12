@@ -109,6 +109,14 @@ for point in reader.points_within_circle(x, y, radius=30.0):
     ...
 ```
 
+Every query takes the area the same way, so one keeps its shape when it moves
+between the point form and the array form:
+
+```python
+reader.points_within(rect=(x0, y0, x1, y1))
+reader.points_within(circle=(x, y, 30.0))
+```
+
 The array API has the same form, which is how to read a region and read it
 fast at once:
 
