@@ -12,7 +12,7 @@ from helpers import (FIXTURES, REFERENCE_HASH, assert_is_the_file_laszip_wrote,
 from lazpy.compat import (_compatibility_layout,
                           _extra_bytes_attributes)
 from lazpy.formats import _POINT_FORMATS
-from lazpy.headers import _header_size
+from lazpy.headers import _header_size, _find_laz_header, _read_las_header
 
 
 # ---------------------------------------------------------------------------
@@ -145,11 +145,11 @@ def test_the_laszip_record_survives_sharing_an_id_with_the_other_one():
     a compatibility-mode LAZ file would not decode at all."""
     name = "pt6_compat_v2.laz"
     with open(fixture(name), "rb") as fh:
-        header = Reader._read_las_header(fh)
+        header = _read_las_header(fh)
 
     ids = [record_id for _, record_id in header["variable_length_records"]]
     assert ids.count(LASZIP_VLR_RECORD_ID) == 2
-    assert Reader._find_laz_header(header) is not None
+    assert _find_laz_header(header) is not None
     assert lazpy.LASCOMPATIBLE_VLR_KEY in header["variable_length_records"]
 
 

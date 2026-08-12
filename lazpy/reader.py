@@ -6,13 +6,11 @@ import io
 import os
 
 from ._cpylaz import PointReader, SpatialIndex, LazError, POINT_LAYOUT
-from .formats import (LASZIP_VLR_KEY, LASINDEX_EVLR_KEY, Compressor, Coder,
+from .formats import (LASINDEX_EVLR_KEY, Compressor, Coder,
                       Chunking, Selective, UnsupportedFileError,
                       items_for_point_format, _POINT_FORMATS)
-from .headers import (HEADER_FORMAT_12, VLR_HEADER_FORMAT, VLR_HEADER_SIZE,
-                      EVLR_HEADER_FORMAT, EVLR_HEADER_SIZE,
-                      LASZIP_RECORD_FORMAT, LASZIP_ITEM_FORMAT,
-                      header_formats, format_size, unpack_format, _can_seek)
+from .headers import (EVLR_HEADER_FORMAT, EVLR_HEADER_SIZE, unpack_format,
+                      _can_seek, _read_las_header, _find_laz_header)
 from .compat import _compatibility_layout, _upgrade_to_las_14
 
 # ---------------------------------------------------------------------------
@@ -329,12 +327,12 @@ class Reader:
         return self
 
     def _setup(self):
-        self.header = self._read_las_header(self.fp)
+        self.header = _read_las_header(self.fp)
         # before the point reader takes the file over, since this seeks past
         # the point data and back
         records, self._evlr_warning = self._read_evlrs(self.fp, self.header)
         self.header['extended_variable_length_records'] = records
-        self.laz_header = self._find_laz_header(self.header)
+        self.laz_header = _find_laz_header(self.header)
 
         if self.laz_header is None:
             # plain LAS: reconstruct the item layout from the point format
@@ -414,73 +412,6 @@ class Reader:
         return False
 
     # -- header parsing --------------------------------------------------
-
-    @staticmethod
-    def _read_variable_length_record(fp):
-        # Short reads are checked rather than left to unpack_format, which
-        # slices and so would turn the end of the file into a record of
-        # zeros. A header that declares 4 billion records -- the count is a
-        # u32, and a corrupt one reads as 0xFFFFFFFF -- would otherwise be
-        # four billion of those before the loop ended.
-        data = fp.read(VLR_HEADER_SIZE)
-        if len(data) < VLR_HEADER_SIZE:
-            raise LazError("file ends inside a variable length record")
-        record, _ = unpack_format(VLR_HEADER_FORMAT, data)
-        record['data'] = fp.read(record['record_length_after_header'])
-        if len(record['data']) < record['record_length_after_header']:
-            raise LazError("file ends inside a variable length record")
-        return record
-
-    @classmethod
-    def _read_las_header(cls, fp):
-        def read_into(header, fmt):
-            fields, _ = unpack_format(fmt, fp.read(format_size(fmt)))
-            header.update(fields)
-            return format_size(fmt)
-
-        header = {}
-        bytes_read = read_into(header, HEADER_FORMAT_12)
-
-        if header['file_signature'] != b'LASF':
-            raise LazError("not a LAS file (bad file signature)")
-
-        major, minor = header['version_major'], header['version_minor']
-        # which further tables the file has, by its own account
-        for fmt in (header_formats(minor)[1:] if major == 1 else ()):
-            bytes_read += read_into(header, fmt)
-        if major == 1 and minor >= 4:
-            # LAS 1.4 zeroes the legacy count for the extended point formats
-            if header['number_of_point_records'] == 0:
-                header['number_of_point_records'] = \
-                    header['extended_number_of_point_records']
-
-        # anything between the known fields and header_size is user data
-        user_data_size = header['header_size'] - bytes_read
-        if user_data_size < 0:
-            raise LazError(f"header_size {header['header_size']} is too small")
-        header['user_data'] = fp.read(user_data_size)
-
-        # keyed by (user_id, record_id), as the extended records are; see
-        # LASZIP_VLR_KEY for why the id alone is not a key
-        header['variable_length_records'] = {}
-        consumed = header['header_size']
-        for _ in range(header['number_of_variable_length_records']):
-            vlr = cls._read_variable_length_record(fp)
-            # where its payload begins, for anything that has to go back to
-            # it: the LASzip record is patched in place by an appended index
-            vlr['offset_to_data'] = consumed + VLR_HEADER_SIZE
-            header['variable_length_records'][
-                (vlr['user_id'], vlr['record_id'])] = vlr
-            consumed += VLR_HEADER_SIZE + len(vlr['data'])
-
-        # Whatever lies between the last record and the point data is the
-        # file's own too, as the bytes inside the header are. Counted rather
-        # than measured with tell(), which a stream need not answer, and read
-        # here because the points begin where it ends.
-        padding = header['offset_to_point_data'] - consumed
-        header['user_data_after_header'] = fp.read(max(0, padding))
-
-        return header
 
     @staticmethod
     def _read_evlrs(fp, header):
@@ -564,26 +495,6 @@ class Reader:
                 > end_of_file):
             return None
         return ExtendedVariableLengthRecord(fields, fp)
-
-    @staticmethod
-    def _parse_laszip_record(data):
-        record, offset = unpack_format(LASZIP_RECORD_FORMAT, data)
-
-        record['items'] = []
-        for _ in range(record['number_of_items']):
-            item, offset = unpack_format(LASZIP_ITEM_FORMAT, data, offset)
-            record['items'].append(item)
-
-        record['user_data'] = data[offset:]
-        return record
-
-    @staticmethod
-    def _find_laz_header(header):
-        """Return the parsed LASzip VLR, or None for an uncompressed file."""
-        vlr = header['variable_length_records'].get(LASZIP_VLR_KEY)
-        if vlr is None:
-            return None
-        return Reader._parse_laszip_record(vlr['data'])
 
     # -- properties ------------------------------------------------------
 
