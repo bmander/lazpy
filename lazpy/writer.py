@@ -15,8 +15,8 @@ from .formats import (EXTRA_BYTES_VLR_KEY, LASCOMPATIBLE_VLR_KEY,
 from .headers import (EVLR_HEADER_FORMAT, LASZIP_SPECIAL_EVLRS_AT,
                       LASZIP_SPECIAL_EVLR_FORMAT, MAX_VLR_PAYLOAD,
                       VLR_HEADER_FORMAT, VLR_HEADER_SIZE,
-                      LASZIP_RECORD_FORMAT, LASZIP_ITEM_FORMAT,
-                      header_formats, pack_format, _header_size, _can_seek)
+                      header_formats, pack_format, _header_size, _can_seek,
+                      _read_las_header, _pack_laszip_record)
 
 
 # What a point's X, Y and Z can hold: they are signed 32-bit, and a coordinate
@@ -92,10 +92,8 @@ def append_spatial_index(path, data):
     :class:`Reader` prefers an index found this way over one in a ``.lax``
     beside the file, since this one cannot be stale.
     """
-    from .reader import Reader        # its header parsing, not its reading
-
     with open(path, 'r+b') as fp:
-        header = Reader._read_las_header(fp)
+        header = _read_las_header(fp)
         laszip = header['variable_length_records'].get(LASZIP_VLR_KEY)
         if laszip is None:
             raise LazError("only a compressed file can carry an index inside "
@@ -614,9 +612,12 @@ class Writer:
                         for fmt in header_formats(version_minor)) + user_data
 
     def _laszip_record(self, description):
-        """The LASzip record, the inverse of Reader._parse_laszip_record."""
+        """This file's LASzip record: what it says, wrapped as a record.
+
+        Saying it is headers._pack_laszip_record, beside the parse it is the
+        inverse of."""
         major, minor, revision = self.LASZIP_VERSION
-        payload = pack_format(LASZIP_RECORD_FORMAT, {
+        payload = _pack_laszip_record({
             'compressor': self.compressor,
             'coder': Coder.ARITHMETIC,
             'version_major': major,
@@ -631,12 +632,7 @@ class Writer:
             'chunk_size': _as_i32(self.chunk_size),
             'number_of_special_evlrs': -1,      # none, as laszip writes it
             'offset_to_special_evlrs': -1,
-            'number_of_items': len(self.items),
-        })
-        for item_type, size, version in self.items:
-            payload += pack_format(LASZIP_ITEM_FORMAT,
-                                   {'type': item_type, 'size': size,
-                                    'version': version})
+        }, self.items)
 
         return _record(LASZIP_VLR_KEY, payload, description)
 
