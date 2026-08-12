@@ -203,6 +203,9 @@ def test_the_projection_record_carries_the_writers_description(tmp_path):
 def test_summarising_a_file_without_a_projection_skips_pyproj(tmp_path):
     # pyproj costs more to import than the rest of a summary put together,
     # and a file with no projection record has nothing to spend it on
+    # the answer goes in a line of its own rather than on a stream of its
+    # own: a free-threaded build writes its own notice to stderr, and an
+    # interpreter is entitled to say things on either of them
     script = (
         "import sys;"
         "from lazpy.__main__ import summarize;"
@@ -210,11 +213,11 @@ def test_summarising_a_file_without_a_projection_skips_pyproj(tmp_path):
         f"reader = Reader({fixture('pt1_v1_pointwise.laz')!r});"
         "summarize(reader);"
         "reader.close();"
-        "sys.stderr.write(repr('pyproj' in sys.modules))"
+        "print('imported pyproj:', 'pyproj' in sys.modules)"
     )
     out = subprocess.run([sys.executable, "-c", script],
                          capture_output=True, text=True, check=True)
-    assert out.stderr == "False"
+    assert "imported pyproj: False" in out.stdout
 
 
 @needs_pyproj
