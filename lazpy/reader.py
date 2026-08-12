@@ -112,6 +112,20 @@ def _fields_for_point_format(point_format, num_extra_bytes):
     return names
 
 
+def _array_field(name, num_extra_bytes):
+    """Where *name* lives in a decoded point, for a file with this many extra
+    bytes. Both directions of the array API ask: a column is read out of the
+    same place it is written into."""
+    if name == 'extra_bytes':
+        if not num_extra_bytes:
+            raise ValueError("this file has no extra bytes")
+        return _Field(-1, 'u1', width=num_extra_bytes)
+    try:
+        return _ARRAY_FIELDS[name]
+    except KeyError:
+        raise ValueError(f"unknown point field {name!r}") from None
+
+
 # How far apart two points of a cell may be before the second starts a run of
 # its own. LASinterval's own default, and the same number laz_index.c merges a
 # query's runs by: a gap that small costs a reader the points inside it and
@@ -935,14 +949,7 @@ class Reader:
 
     def _array_field(self, name):
         """Where *name* lives in a decoded point, sized for this file."""
-        if name == 'extra_bytes':
-            if not self.num_extra_bytes:
-                raise ValueError("this file has no extra bytes")
-            return _Field(-1, 'u1', width=self.num_extra_bytes)
-        try:
-            return _ARRAY_FIELDS[name]
-        except KeyError:
-            raise ValueError(f"unknown point field {name!r}") from None
+        return _array_field(name, self.num_extra_bytes)
 
     def arrays(self, *names, start=None, count=None):
         """Decode points into numpy arrays, one per field.

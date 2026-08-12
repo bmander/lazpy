@@ -12,6 +12,7 @@ from .formats import (EXTRA_BYTES_VLR_KEY, LASCOMPATIBLE_VLR_KEY,
                       Coder, UnsupportedFileError, _POINT_FORMATS,
                       items_for_point_format, _versioned_items,
                       _default_version_minor, _min_version_minor)
+from .reader import _array_field, _numpy
 from .headers import (EVLR_HEADER_FORMAT, LASZIP_SPECIAL_EVLRS_AT,
                       LASZIP_SPECIAL_EVLR_FORMAT, MAX_VLR_PAYLOAD,
                       VLR_HEADER_FORMAT, VLR_HEADER_SIZE,
@@ -648,6 +649,58 @@ class Writer:
         Raises ValueError once the writer is closed.
         """
         self._writer.write(point)
+
+    def write_arrays(self, columns, count=None):
+        """Append points from numpy arrays, one per field.
+
+        The inverse of :meth:`Reader.arrays`, and takes what that returns:
+        ``{name: array}``, keyed by the same field names::
+
+            with Reader("in.laz") as reader, Writer("out.laz", 1) as writer:
+                while reader.index < reader.num_points:
+                    writer.write_arrays(reader.arrays(count=1_000_000))
+
+        Which is what it is for. Reading in bulk has never had a counterpart
+        here, so a conversion ran at the speed of ``write()`` -- a Python
+        call, a type check and a point object each time -- however fast the
+        reading side went.
+
+        Fields no column names are written as zero, so a caller who reads
+        four fields and writes them back gets a file whose other fields are
+        empty rather than one that repeats the last point. Names are those of
+        :meth:`Reader.arrays`, ``extra_bytes`` included.
+
+        Needs numpy, as the array side of reading does.
+        """
+        np = _numpy()
+        if count is None:
+            count = min((len(column) for column in columns.values()),
+                        default=0)
+        if not count:
+            return
+
+        # The fields packed several to a byte are given back unpacked, so they
+        # are put back together here: one byte per group, or'd from whichever
+        # of its fields the caller named.
+        targets, bytes_by_offset = [], {}
+        for name, column in columns.items():
+            field = _array_field(name, self.num_extra_bytes)
+            column = np.ascontiguousarray(column[:count])
+            if field.mask is None:
+                if column.dtype != np.dtype(field.dtype):
+                    column = column.astype(field.dtype)
+                targets.append((column, field.offset,
+                                column.itemsize * field.width))
+                continue
+            packed = bytes_by_offset.get(field.offset)
+            if packed is None:
+                packed = bytes_by_offset[field.offset] = np.zeros(
+                    count, dtype=field.dtype)
+                targets.append((packed, field.offset, 1))
+            packed |= ((column.astype(field.dtype) & field.mask)
+                       << field.shift)
+
+        self._writer.write_from(targets, count)
 
     def unscale(self, x, y, z):
         """The integer coordinates a point standing at ``(x, y, z)`` holds.

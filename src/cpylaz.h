@@ -86,6 +86,12 @@ PyObject *coder_create_symbol_model(PyObject *args, PyObject *compress);
 /* None, or NULL with the exception set, per how the encoder's stream is. */
 PyObject *encoder_result(EncoderObject *self);
 
+/* The part of LazPoint the item readers fill; everything past it is
+ * bookkeeping (the extra-bytes count and pointer), not decoded data. It
+ * bounds a read_into target and a write_from source alike, which is why it
+ * is here rather than in either one's file. */
+#define POINT_FIXED_EXTENT (LAZ_POINT_OFFSET_WAVEPACKET + 29)
+
 PointObject *point_alloc(PyTypeObject *type);
 
 /* A view onto memory owned by `reader`, valid until the reader detaches it. */
