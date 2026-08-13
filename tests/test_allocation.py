@@ -205,3 +205,38 @@ def test_a_dropped_colour_layer_builds_no_models(name, failing_allocator):
     mask = Selective.ALL & ~(Selective.RGB | Selective.NIR)
     everything = model_allocations(failing_allocator, name, Selective.ALL)
     assert survives_with(failing_allocator, name, mask, everything - 1)
+
+
+# POINT14's layers that model up front, with the flag that drops each.
+# classification, flags and user_data are not here: their models are banks
+# created on demand, so a layer that never decodes never reaches laz_bank_get
+# and dropping one saved its models before #101's guard existed. What is left
+# is the integer compressors and the two gps-time symbol models, which
+# p14_create_and_init built for every layer whether or not it decoded.
+POINT14_MODELLED_LAYERS = {
+    "Z": Selective.Z,
+    "intensity": Selective.INTENSITY,
+    "scan_angle": Selective.SCAN_ANGLE,
+    "point_source": Selective.POINT_SOURCE,
+    "gps_time": Selective.GPS_TIME,
+}
+
+
+@pytest.mark.parametrize("layer", sorted(POINT14_MODELLED_LAYERS))
+def test_a_dropped_point14_layer_builds_no_models(layer, failing_allocator):
+    """Skipping a POINT14 layer skips its models too, one layer at a time.
+
+    The same omission as the colour one above, at eight times the scale
+    (issue #101): p14_create_and_init initialised every layer's models at the
+    head of every chunk, and a seek pays that again at every jump. Asserted
+    per layer rather than for a mask that drops all of them, so that a guard
+    lost from one section is a failure that names it.
+
+    Stated as "one model short of the full read is enough" rather than as a
+    count, so a model added to Point14Context does not fail this test. Today
+    the five together are worth 640 models on pt6_v3.laz, out of 1659.
+    """
+    mask = Selective.ALL & ~POINT14_MODELLED_LAYERS[layer]
+    everything = model_allocations(failing_allocator, "pt6_v3.laz",
+                                   Selective.ALL)
+    assert survives_with(failing_allocator, "pt6_v3.laz", mask, everything - 1)
