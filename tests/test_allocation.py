@@ -3,8 +3,8 @@ import io
 import pytest
 
 from lazpy import _cpylaz as cpylaz
-from lazpy import Reader, LazError
-from helpers import compress, las_records, load, packed_records
+from lazpy import Reader, LazError, Selective
+from helpers import compress, fixture, las_records, load, packed_records
 
 
 # ---------------------------------------------------------------------------
@@ -140,3 +140,68 @@ def test_writing_survives_every_allocation_failure(name, failing_allocator):
     # tail of the sweep fails in done(), with every record written but the
     # last chunk unclosed -- an error there is still an error.
     assert max(partials) > 1, "no failure landed mid-chunk"
+
+
+# ---------------------------------------------------------------------------
+# Not allocating in the first place.
+#
+# The sweep above uses the armed allocator to reach failure paths. The same
+# counter answers a different question: how many models a read builds at all.
+# The smallest budget a read survives on is that number, and bisecting for it
+# costs a dozen reads where the sweep's linear walk would cost seventeen
+# hundred.
+# ---------------------------------------------------------------------------
+
+def survives_with(arm, name, mask, budget):
+    """Whether decoding `name` under `mask` completes on `budget` models.
+
+    The armed allocator fails the allocation after `budget` of them, so this
+    is "the read needs no more than `budget`" -- and it is monotonic in
+    `budget`, which is what makes the bisection below sound.
+    """
+    arm(budget)
+    try:
+        with Reader(fixture(name), decompress_selective=mask) as reader:
+            reader.checksum()
+        return True
+    except (LazError, MemoryError):
+        return False
+    finally:
+        arm(-1)
+
+
+def model_allocations(arm, name, mask):
+    """How many models decoding `name` under `mask` allocates.
+
+    The smallest budget it survives on, found by bisection -- walking it takes
+    as many whole reads as there are models, and there are hundreds.
+    """
+    low, high = 0, 1
+    while not survives_with(arm, name, mask, high):
+        high *= 2
+    while low < high:
+        middle = (low + high) // 2
+        if survives_with(arm, name, mask, middle):
+            high = middle
+        else:
+            low = middle + 1
+    return low
+
+
+@pytest.mark.parametrize("name", ["pt7_v3.laz", "pt8_v4.laz"])
+def test_a_dropped_colour_layer_builds_no_models(name, failing_allocator):
+    """Skipping colour skips its models, not just its bytes.
+
+    A layer nobody asked for is stepped over in layer_load, so its models are
+    never decoded with -- but they were still being built, once per context,
+    for RGB14 (issue #99). Its two neighbours in laz_readitem_v3.c had always
+    guarded that on `requested`; this pins the third.
+
+    Stated as "one model short of the full read is enough" rather than as a
+    count, so that a model added to Rgb14Context does not fail this test. The
+    saving is 7 models per context over 4 contexts today; what a lost guard
+    looks like is no saving at all.
+    """
+    mask = Selective.ALL & ~(Selective.RGB | Selective.NIR)
+    everything = model_allocations(failing_allocator, name, Selective.ALL)
+    assert survives_with(failing_allocator, name, mask, everything - 1)
