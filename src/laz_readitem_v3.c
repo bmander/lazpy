@@ -90,6 +90,12 @@ const U8 laz_number_return_level_8ctx[16][16] = {
  * `requested` is fixed at construction from the selective-decompression mask;
  * `changed` says whether this layer actually carries data in this chunk, which
  * is what the read path tests.
+ *
+ * A layer that is not requested is stepped over in layer_load rather than
+ * copied, so `changed` stays clear and nothing ever decodes from it. Its models
+ * are therefore dead weight, and each reader's create_and_init leaves them
+ * unbuilt -- the setup is what a chunk pays for whether or not it decodes, and
+ * a seek pays it again at every jump.
  */
 typedef struct {
     LazStream *stream;
@@ -746,15 +752,20 @@ static BOOL rgb14_create_and_init(Rgb14v3 *r, U32 context, const U8 *item)
 {
     Rgb14Context *c = &r->contexts[context];
     U32 i;
-    if (!c->created) {
-        laz_symbol_model_setup(&c->m_byte_used, 128, LAZ_FALSE);
-        for (i = 0; i < 6; i++) laz_symbol_model_setup(&c->m_rgb_diff[i], 256, LAZ_FALSE);
-        c->created = LAZ_TRUE;
+
+    if (r->rgb.requested) {
+        if (!c->created) {
+            laz_symbol_model_setup(&c->m_byte_used, 128, LAZ_FALSE);
+            for (i = 0; i < 6; i++) laz_symbol_model_setup(&c->m_rgb_diff[i], 256, LAZ_FALSE);
+            c->created = LAZ_TRUE;
+        }
+        if (!laz_symbol_model_init(&c->m_byte_used, NULL)) return LAZ_FALSE;
+        for (i = 0; i < 6; i++) {
+            if (!laz_symbol_model_init(&c->m_rgb_diff[i], NULL)) return LAZ_FALSE;
+        }
     }
-    if (!laz_symbol_model_init(&c->m_byte_used, NULL)) return LAZ_FALSE;
-    for (i = 0; i < 6; i++) {
-        if (!laz_symbol_model_init(&c->m_rgb_diff[i], NULL)) return LAZ_FALSE;
-    }
+
+    /* outside the guard: a dropped layer is what rgb14_read hands back */
     memcpy(c->last_item, item, 6);
     c->unused = LAZ_FALSE;
     return LAZ_TRUE;

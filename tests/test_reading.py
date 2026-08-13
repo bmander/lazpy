@@ -428,6 +428,30 @@ class TestSelectiveDecompression:
         # Z never decodes, so it keeps the chunk's first point's value
         assert len(zs) < 10
 
+    @pytest.mark.parametrize("name", ["pt7_v3.laz", "pt8_v4.laz"])
+    def test_dropping_colour_leaves_everything_else_alone(self, name):
+        """Colour is skippable, and skipping it costs only colour.
+
+        Both colour items are covered because they build their models
+        differently: RGBNIR14 has always kept its setup behind
+        `requested`, and RGB14 did not until #99. A guard that skipped the
+        last_item copy along with the models would show up here as the
+        non-colour fields moving, since the two share a context.
+        """
+        mask = Selective.ALL & ~(Selective.RGB | Selective.NIR)
+        with Reader(fixture(name)) as full:
+            want = [(p.X, p.Y, p.Z, p.gps_time) for p in full]
+        # one pass: iterating a reader resumes where it is, so a second
+        # comprehension here would read an exhausted one and assert nothing
+        got, colours = [], set()
+        with Reader(fixture(name), decompress_selective=mask) as partial:
+            for point in partial:
+                got.append((point.X, point.Y, point.Z, point.gps_time))
+                colours.add(tuple(point.rgb))
+        assert got == want
+        # never decoded, so each context keeps its chunk's first point's colour
+        assert len(colours) < 10
+
     def test_full_mask_is_the_default(self):
         with Reader(fixture("pt8_v4.laz")) as a:
             default = a.checksum()
