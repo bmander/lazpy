@@ -1,6 +1,9 @@
-"""LAS 1.4 compatibility mode, both directions: recognising a legacy file
-that is a LAS 1.4 file in disguise and rewriting its header as the file it
-stands in for, and building the records that put a file in the disguise."""
+"""LAS 1.4 compatibility mode, in both directions.
+
+Reading: recognise a legacy file that is a disguised LAS 1.4 file, and
+rewrite its header as the file it stands in for. Writing: build the records
+that put a file into the disguise.
+"""
 
 from collections import namedtuple
 
@@ -28,14 +31,15 @@ from .headers import (HEADER_FORMAT_13, HEADER_FORMAT_14, format_size,
 # LAS 1.4 file it stands in for. laszip does this only when asked -- see
 # laszip_request_compatibility_mode() -- and lazpy always does, because the
 # alternative is handing back points whose 1.4 fields are zero when the file
-# does carry them. Writing one is asked for, as it is in laszip: a file that
-# need not be disguised should not be. The building of the two records is at
-# the foot of this file; the folding of each point is the C writer's.
+# does carry them. Writing such a file happens only when the caller asks for
+# it, as in laszip: a file that need not be disguised should not be. This file
+# builds the two records at its foot; the C writer folds each point.
 # ---------------------------------------------------------------------------
 
 # The compatibility record: two version numbers and a spare, then the LAS 1.4
-# header tail a 1.2 or 1.3 header has nowhere to put -- which is exactly the
-# tables that describe it, so it is those rather than a second copy of them.
+# header tail a 1.2 or 1.3 header has nowhere to put. HEADER_FORMAT_13 and
+# HEADER_FORMAT_14 already describe exactly those fields, so this format reuses
+# those tables rather than restating them.
 # laszip also writes a form 18 bytes longer, for LAS 1.5.
 COMPATIBILITY_RECORD_FORMAT = (
     ('laszip_version', 2, unsigned_int),
@@ -51,15 +55,16 @@ COMPATIBILITY_RECORD_SIZE = format_size(COMPATIBILITY_RECORD_FORMAT)
 _COMPATIBLE_VERSION_14 = 3
 
 # What laszip puts in the record's other version field: its own build date,
-# truncated to the sixteen bits there are for it. Nothing reads it -- the
-# field above is what decides anything -- but a file lazpy writes carries the
-# date of the LASzip release its output matches -- the release
-# Writer.LASZIP_VERSION names, which is the same one.
+# truncated to the sixteen bits there are for it. Nothing reads it;
+# compatible_version above decides everything. Still, a file lazpy writes
+# carries the build date of the LASzip release its output matches, the release
+# named by Writer.LASZIP_VERSION.
 _LASZIP_BUILD_DATE = 260810
 
 # The four fields every compatibility-mode file hides, in the order laszip
 # appends them, and the fifth it hides only for a point format with a
-# near-infrared band. Names are what an "extra bytes" descriptor calls them.
+# near-infrared band. These are the names an "extra bytes" descriptor gives
+# them.
 _COMPATIBILITY_ATTRIBUTES = (b"LAS 1.4 scan angle",
                              b"LAS 1.4 extended returns",
                              b"LAS 1.4 classification",
@@ -76,20 +81,21 @@ CompatibilityLayout = namedtuple(
 # What a legacy point format becomes once the hidden fields are folded back in,
 # by whether the file hid a near-infrared band too. This is laszip's own
 # branching, including for formats 4 and 5, which it treats as one case -- in a
-# file laszip wrote, only the one that had RGB to begin with can have a NIR
-# band, so the unreachable halves never come up.
+# file laszip wrote, only format 5, the one with RGB to begin with, can have a
+# NIR band, so the unreachable halves never come up.
 _UPGRADED_FORMAT = {1: (6, 6), 3: (7, 8), 4: (9, 10), 5: (9, 10)}
 
 # The other direction: what an extended format is written as when it is
-# disguised. Stated rather than read out of the table above, which cannot be
-# turned around -- two legacy formats lead to one extended one, and the
-# ambiguity is only resolved by which of them had RGB to begin with.
+# disguised. Written out here rather than derived by inverting the table above,
+# which does not invert: legacy formats 4 and 5 both lead to extended format 9
+# or 10, and only knowing which of the two carried RGB resolves the ambiguity.
 _DISGUISED_FORMAT = {6: 1, 7: 3, 8: 3, 9: 4, 10: 5}
 
 
 def _layout_of(data):
     """The :class:`CompatibilityLayout` an "extra bytes" record describes, or
-    None if it does not name all four of the fields one has to name.
+    None if the record does not name all four fields in
+    `_COMPATIBILITY_ATTRIBUTES`.
 
     ``nir`` is -1 for a file that hid no near-infrared band.
     """
@@ -110,8 +116,8 @@ def _compatibility_layout(header):
     The test is laszip's: a LAS 1.2 or 1.3 file, a point format that could
     have been an extended one, a compatibility record long enough to hold what
     it should, and an "extra bytes" record naming all four of the hidden
-    fields. Anything less is a file laszip reads as the legacy file it says it
-    is, and so does this.
+    fields. Anything less is a file laszip reads as the legacy file it claims
+    to be, and this function does the same.
     """
     if header['version_major'] != 1 or header['version_minor'] >= 4:
         return None
@@ -136,20 +142,21 @@ def _upgrade_to_las_14(header, layout, num_extra_bytes):
     """Rewrite a compatibility-mode header as the LAS 1.4 one it stands in for.
 
     `layout` is what :func:`_compatibility_layout` returned and
-    `num_extra_bytes` how many extra bytes a point has left once the hidden
-    fields are taken out of them, which is what the new record length is built
-    from. The two records that made the file a compatibility-mode file go away,
+    `num_extra_bytes` is how many extra bytes a point has left once the hidden
+    fields are removed; this function builds the new record length from it.
+    The two records that made the file a compatibility-mode file go away,
     since after this there is nothing left for them to describe.
     """
     record = header['variable_length_records'].pop(LASCOMPATIBLE_VLR_KEY)
     header['number_of_variable_length_records'] -= 1
     fields, _ = unpack_format(COMPATIBILITY_RECORD_FORMAT, record['data'])
 
-    # The LAS 1.4 header fields, out of the record that carried them -- which
-    # holds them under the names the header itself uses, since it is described
-    # by the header's own tables. The two that address extended records are
-    # read as zero however they were written, as laszip reads them:
-    # compatibility mode cannot carry any.
+    # The LAS 1.4 header fields, out of the record that carried them -- the
+    # record stores them under the names the header itself uses, because it is
+    # laid out by the header's own tables. This zeroes
+    # start_of_waveform_data_packet_record and the two extended-record fields
+    # however they were written, matching laszip: compatibility mode can carry
+    # neither waveform data nor extended records.
     for name, _, _ in HEADER_FORMAT_13 + HEADER_FORMAT_14:
         header[name] = fields[name]
     header['start_of_waveform_data_packet_record'] = 0
@@ -202,16 +209,17 @@ def _drop_compatibility_attributes(header):
 #
 # The inverse of everything above: given LAS 1.4 points, build the two records
 # that describe the disguise and say where in the extra bytes each hidden
-# field goes. Folding the points themselves is the C writer's, from the same
-# layout this returns -- see writer_recode_compat.
+# field goes. The C writer folds the points themselves, using the layout
+# _disguise returns -- see writer_recode_compat.
 #
 # laszip does this only when asked, in laszip_request_compatibility_mode(),
 # and so does lazpy: a file that need not be disguised should not be.
 # ---------------------------------------------------------------------------
 
 # What the descriptor says about each hidden field: its LAS data type, and for
-# the scan angle the scale that says what its numbers stand for. The names are
-# the ones the read side looks for, so the two cannot drift apart.
+# the scan angle the scale that says what its numbers stand for. The names come
+# from _COMPATIBILITY_ATTRIBUTES, the same tuple the read side looks up, so the
+# read and write sides cannot drift apart.
 _HIDDEN_DESCRIPTION = b"additional attributes"
 _HIDDEN_TYPES_AND_SCALES = ((4, 0.006), (1, None), (1, None), (1, None))
 _HIDDEN_ATTRIBUTES = tuple(
@@ -236,16 +244,19 @@ def _unknown_attributes(count):
 
 
 def _disguise(point_format, num_extra_bytes, described):
-    """What writing `point_format` as a legacy file takes.
+    """Build the "extra bytes" descriptor and layout that writing
+    `point_format` as a disguised legacy file takes.
 
-    `described` is the "extra bytes" record the caller's own extra bytes
-    already have, as its payload, or None where there is none -- in which case
-    they are described here, since the hidden fields can only be placed by
-    accounting for everything in front of them.
+    `described` is the payload of the "extra bytes" record describing the
+    caller's own extra bytes, or None if the caller has no such record. When
+    it is None, this function describes them with placeholder descriptors,
+    because the hidden fields can only be placed by accounting for every byte
+    in front of them.
 
-    Returns the payload of the record that now describes a point's extra bytes
-    whole, the :class:`CompatibilityLayout` saying where the hidden fields sit
-    in them, and how many of them there are.
+    Returns three things: the payload of the record that now describes a
+    point's extra bytes in full, the :class:`CompatibilityLayout` locating the
+    hidden fields within them, and how many extra bytes a disguised point
+    carries in total -- the caller's own plus the hidden fields.
     """
     if described is None:
         described = b''.join(_pack_attribute(a) for a in
@@ -263,11 +274,11 @@ def _compatibility_payload(count=0, by_return=(0,) * 15):
     """The "lascompatible" record's payload: the LAS 1.4 header fields a
     legacy header has nowhere to keep.
 
-    Built once before the points, where the record has to be, and again once
-    they have all been written and the counts are known -- it is a fixed
-    number of bytes at a fixed place, so the second one goes over the first.
-    laszip instead makes the caller state the counts up front, which is what
-    its own compatibility mode asks for.
+    The writer builds this twice: once before the points, since the record
+    must sit ahead of them, and again once every point is written and the
+    counts are known. The payload is a fixed number of bytes at a fixed place,
+    so the second write goes over the first. laszip instead makes the caller
+    state the counts up front.
     """
     fields = {'laszip_version': _LASZIP_BUILD_DATE & 0xFFFF,
               'compatible_version': _COMPATIBLE_VERSION_14,

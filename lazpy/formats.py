@@ -10,18 +10,20 @@ LASZIP_VLR_USER_ID = b"laszip encoded"
 
 # How a record is looked up: variable_length_records is keyed by
 # (user_id, record_id), since LAS namespaces records by user id and a bare id
-# collides. LASZIP_VLR_KEY and LASCOMPATIBLE_VLR_KEY are where that stops being
-# hypothetical -- both records claim id 22204 and sit in the same file.
+# collides. LASZIP_VLR_KEY and LASCOMPATIBLE_VLR_KEY are a real collision, not
+# a hypothetical one: both records claim id 22204 and can sit in the same file.
 LASZIP_VLR_KEY = (LASZIP_VLR_USER_ID, LASZIP_VLR_RECORD_ID)
 
 # The two records a LAS 1.4 compatibility-mode file carries beside the LASzip
-# one. The "extra bytes" record is the ordinary LAS one; it is only special
-# here because compatibility mode describes the fields it hides in it there.
+# one. The "extra bytes" record is the ordinary LAS one; it matters here
+# because a compatibility-mode file describes its hidden LAS 1.4 fields as
+# entries in that record.
 LASCOMPATIBLE_VLR_KEY = (b"lascompatible", 22204)
 EXTRA_BYTES_VLR_KEY = (b"LASF_Spec", 4)
 
-# The extended record an index appended to the file itself travels in. Nothing
-# in the LAS header points at it; the LASzip record's "special EVLR" fields do.
+# The extended record that carries a spatial index appended to the end of the
+# file. Nothing in the LAS header points at it; the LASzip record's "special
+# EVLR" fields do.
 LASINDEX_EVLR_KEY = (b"LAStools", 30)
 
 # Where a file states its coordinate reference system: the GeoTIFF
@@ -74,7 +76,8 @@ class Chunking(Enum):
 
     Not a field of any record: POINTWISE and POINTWISE_CHUNKED carry the same
     chunk size in the LASzip VLR, and the adaptive case declares it as -1, so
-    this is read off the compressor and that field together.
+    :attr:`Reader.chunking` derives a file's grouping from the compressor and
+    that field together.
     """
     NONE = 'none'          # one stream of points; seeking decodes forward
     FIXED = 'fixed'        # chunks of Reader.chunk_size points each
@@ -82,9 +85,10 @@ class Chunking(Enum):
 
 
 #: The ``chunk_size`` that asks :class:`Writer` for adaptive chunking, where
-#: the caller ends each chunk itself with ``chunk()``. Reading names that
-#: state -- ``Chunking.ADAPTIVE`` -- and writing had only the number, so a
-#: caller wanting it had to know a magic constant from a docstring.
+#: the caller ends each chunk itself with ``chunk()``. The reading side gives
+#: this state a name, ``Chunking.ADAPTIVE``; the writing side had only the raw
+#: number, so a caller who wanted adaptive chunking had to copy a magic
+#: constant out of a docstring.
 ADAPTIVE_CHUNK_SIZE = 0xFFFFFFFF
 
 
@@ -210,9 +214,10 @@ def _min_version_minor(point_format):
     """The oldest LAS 1.x that can describe *point_format*.
 
     Colour arrived in LAS 1.2, wavepackets in 1.3 and the extended point types
-    in 1.4; formats 0 and 1 are as old as the format itself. This is what a
-    writer checks a caller's version against -- what it defaults to is
-    something else, since nobody wants a LAS 1.0 file by accident.
+    in 1.4; formats 0 and 1 are as old as the format itself. A writer checks a
+    caller's requested version against this. The default when the caller gives
+    none is a different question -- see :func:`_default_version_minor` -- since
+    nobody wants a LAS 1.0 file by accident.
     """
     _, _, rgb, _, wavepacket, point14 = _POINT_FORMATS[point_format]
     return 4 if point14 else 3 if wavepacket else 2 if rgb else 0

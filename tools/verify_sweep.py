@@ -3,15 +3,16 @@
 
 The test suite checks lazpy against `testdata/reference_hashes.txt` and
 `testdata/reference_inside.txt`. Nothing checks those two files themselves --
-they hold what whatever laszip was around when the fixtures were generated
-said, and a suite that agrees with a stale reference is agreeing with nothing.
-This re-runs `lazdump` over every fixture and every reference rectangle and
-names any line that no longer reproduces.
+they hold what laszip said at the time the fixtures were generated, whichever
+version that happened to be, and a suite that agrees with a stale reference is
+agreeing with nothing. This re-runs `lazdump` over every fixture and every
+reference rectangle and names any line that no longer reproduces.
 
     python tools/verify_sweep.py path/to/lazdump [testdata_dir]
 
-Needs a `lazdump` built against liblaszip; tools/README.md says how. Exits
-non-zero on the first disagreement, listing all of them.
+Needs a `lazdump` built against liblaszip; tools/README.md says how. It checks
+every reference, prints each disagreement, and exits non-zero if there were
+any.
 """
 import os
 import subprocess
@@ -49,9 +50,9 @@ def check_hashes(binary, testdata):
 def check_queries(binary, testdata):
     """Every rectangle query in reference_inside.txt, re-run.
 
-    The reference line is `file minx miny maxx maxy count hash`; lazdump
-    prints the hash first, which is why the two are unpacked rather than
-    compared as lists.
+    The reference line is `file minx miny maxx maxy count hash`, but
+    lazdump prints the hash before the count, so this unpacks both values
+    by name rather than comparing the two orderings as lists.
     """
     failures = []
     with open(os.path.join(testdata, "reference_inside.txt")) as fh:

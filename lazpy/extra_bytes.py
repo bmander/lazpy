@@ -40,8 +40,8 @@ def _extra_bytes_attributes(data):
     """The attributes an "extra bytes" record describes, in file order.
 
     Each is an :class:`_Attribute`. The descriptors are a running layout --
-    every attribute begins where the one before it ended -- which is what
-    makes `start` derivable rather than stated.
+    every attribute begins where the one before it ended -- which is why
+    `start` can be derived rather than stated.
     """
     start = 0
     for offset in range(0, len(data) - EXTRA_BYTES_ATTRIBUTE_SIZE + 1,
@@ -61,8 +61,8 @@ def _described_width(data):
 # Building one.
 #
 # laszip builds a record an attribute at a time, in laszip_add_attribute();
-# this builds the whole record from the attributes, since it has to be
-# complete before the header that counts it is written.
+# extra_bytes_record builds the whole record from the attributes, since it has
+# to be complete before the header that counts it is written.
 # ---------------------------------------------------------------------------
 
 ExtraBytesAttribute = namedtuple(
@@ -72,8 +72,8 @@ ExtraBytesAttribute.__doc__ = """One attribute of a point's extra bytes.
 
     `data_type` is the LAS data type: 1 to 10 for the scalar types, in the
     order the specification lists them, and the deprecated array types above
-    that. `scale` and `offset` are what turn the stored number into the
-    quantity it stands for; leaving them out says the number is the quantity.
+    that. `scale` and `offset` turn the stored number into the quantity it
+    stands for; leaving them out says the number is the quantity.
     """
 
 # The option bits that say a descriptor's scale and offset were set at all;
@@ -82,8 +82,8 @@ _SCALE_GIVEN = 0x08
 _OFFSET_GIVEN = 0x10
 
 # What the descriptor holds where those bits are clear, which is laszip's
-# doing: an attribute it was told nothing about still gets a scale of one and
-# an offset of nothing written into it, meaning the same as no scale at all.
+# doing: laszip writes a scale of one and an offset of zero even for an
+# attribute it was told nothing about, which means the same as no scale at all.
 _NO_SCALE, _NO_OFFSET = 1.0, 0.0
 
 

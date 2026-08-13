@@ -30,8 +30,9 @@ LAS file specification
 # Point, PointReader, PointWriter and SpatialIndex are re-exported: they are
 # the API for driving the container directly, without a Reader or Writer over
 # it. Only Point is in __all__ below, because only Point is part of reading a
-# file the ordinary way; the other three are for the caller who has a point
-# block and no LAS header to describe it, who can name them to import them.
+# file the ordinary way; the other three serve the caller who has a point
+# block and no LAS header describing it, and such a caller imports them
+# explicitly by name.
 # docs/container.rst gives them a page of their own for the same reason.
 from ._cpylaz import (PointReader, PointWriter, Point,  # noqa: F401
                       SpatialIndex, LazError)

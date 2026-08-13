@@ -23,8 +23,8 @@ from .headers import (EVLR_HEADER_FORMAT, LASZIP_SPECIAL_EVLRS_AT,
                       _read_las_header, _pack_laszip_record)
 
 
-# What a point's X, Y and Z can hold: they are signed 32-bit, and a coordinate
-# that does not fit is the one thing scaling and offsetting have to prevent.
+# What a point's X, Y and Z can hold: they are signed 32-bit, and scaling and
+# offsetting exist to keep a coordinate from overflowing them.
 _I32_MIN, _I32_MAX = -0x80000000, 0x7FFFFFFF
 
 #: The scales a file is written to unless the caller says otherwise, in the
@@ -44,7 +44,7 @@ def _quantize(value):
     I32_QUANTIZE in LASzip's mydefs.hpp: a half goes away from zero, where
     Python's own round() would send it to the nearer even number. The two
     disagree on exactly the coordinates that land on a half scale unit, which
-    a grid of points does constantly.
+    is where the points of a regular grid land constantly.
     """
     return int(value + 0.5) if value >= 0 else int(value - 0.5)
 
@@ -61,10 +61,10 @@ def auto_offsets(mins, maxs, scales=DEFAULT_SCALES):
 
     ``mins`` and ``maxs`` are the ``(x, y, z)`` extremes of the points to be
     written and ``scales`` what they will be stored to. The offsets returned
-    put the middle of that box near zero, which is what makes projected
-    coordinates fit in the signed 32-bit integer a point holds: a UTM
-    northing of six and a half million metres, stored to the millimetre, is
-    six times what that integer reaches from an offset of zero.
+    put the middle of that box near zero, which is how projected coordinates
+    come to fit in the signed 32-bit integer a point holds: a UTM northing of
+    six and a half million metres, stored to the millimetre, is six times what
+    that integer reaches from an offset of zero.
 
     This is ``laszip_auto_offset()``, including its rounding of each offset
     down to a multiple of ten million scale units.
@@ -87,11 +87,12 @@ def append_spatial_index(path, data):
     """Put a spatial index inside the file it indexes, and say where it went.
 
     ``lasindex -append``'s doing, and what :func:`Reader.build_spatial_index`
-    makes the bytes for: the index goes on the end of the file as an extended
-    record, and the LASzip record is made to point at it. Nothing in the LAS
-    header mentions it, so those two fields are the only way back to it --
-    which is why the file has to be a compressed one, a plain LAS file having
-    no LASzip record to carry them.
+    makes the bytes for: this function writes the index at the end of the file
+    as an extended record and patches the LASzip record's
+    ``number_of_special_evlrs`` and ``offset_to_special_evlrs`` to point at
+    it. Nothing in the LAS header mentions the index, so those two fields are
+    the only way back to it -- which is why the file has to be a compressed
+    one, a plain LAS file having no LASzip record to carry them.
 
     :class:`Reader` prefers an index found this way over one in a ``.lax``
     beside the file, since this one cannot be stale.
@@ -120,9 +121,9 @@ def append_spatial_index(path, data):
 def _user_id(value):
     """A record's user id as a reader will key it by.
 
-    Through the pair that writes the field and reads it back, so that a name
-    given padded, or as text, is the one thing it can be on the way out --
-    and one given too long is refused here rather than deeper down.
+    Runs the value through `pack_cstr` and back through `cstr`, so a name
+    given padded or given as text becomes the same bytes a reader will key by
+    -- and a name too long to fit is refused here rather than deeper down.
     """
     return cstr(pack_cstr(value, 16))
 
@@ -132,9 +133,9 @@ def _user_id(value):
 #
 # A record is a mapping -- the shape Reader hands back -- with `user_id`,
 # `record_id` and `data`, and optionally `description` and `reserved`. The
-# payload length is taken from the payload rather than from the field that
-# states it, so a record copied from a file whose length field lies is written
-# as the bytes it really has.
+# writer takes the payload length from the payload rather than from
+# `record_length_after_header`, so a record copied from a file whose length
+# field lies goes out as the bytes it really has.
 #
 # They are written in the order given, and the LASzip record last, which is
 # where laszip puts its own: it appends to the header's records rather than
@@ -147,22 +148,23 @@ def _keyed(vlrs):
 
     Accepts a mapping keyed that way, as ``header["variable_length_records"]``
     is, or any iterable of records -- so copying a file's records is handing
-    them over as they came. Records this has already been over pass through it
-    unchanged, which is what lets the extended ones be checked when they are
-    given and again when they are written.
+    them over as they came. Records ``_keyed`` has already normalized pass
+    through unchanged, so the writer can check the extended records both when
+    the caller gives them and again when it writes them.
 
     The key is built here, through ``_user_id``, because here is where a name
-    given as text or padded becomes the bytes a reader will look for. Holding
-    the records under it rather than beside it is what lets everything
-    downstream ask for one by key and get the same answer a reader would:
-    there is no second spelling to keep in step.
+    given as text or padded becomes the bytes a reader will look for. Keying
+    the records by that normalized name, rather than storing it alongside
+    them, lets everything downstream ask for a record by key and get the same
+    answer a reader would: there is no second spelling to keep in step.
 
     File order is insertion order, which is what a dict gives and what the
     records are written in.
 
-    A LASzip record among them is dropped rather than refused, which is what
-    laszip does with one too: it describes how the file it came from was
-    compressed, and the file being written has its own answer to that.
+    ``_keyed`` drops a LASzip record among them rather than refusing it, as
+    laszip does with one too: such a record describes how the file it came
+    from was compressed, and the file being written has its own answer to
+    that.
     """
     if hasattr(vlrs, 'values'):
         vlrs = vlrs.values()
@@ -184,10 +186,11 @@ def _keyed(vlrs):
 def _records(vlrs):
     """The same, as a list in file order.
 
-    What the extended records are held as: ``writer.evlrs`` is documented as
-    a list a caller appends to up to the last moment, and appending is the
-    one thing a mapping asks them to spell differently. The ordinary records
-    never leave the constructor, so they keep their keys.
+    The writer holds the extended records this way because ``writer.evlrs``
+    is documented as a list a caller appends to up to the last moment, and
+    appending is the one operation a mapping would make the caller spell
+    differently. The ordinary records never leave the constructor, so they
+    keep their keys.
     """
     return list(_keyed(vlrs).values())
 
@@ -195,10 +198,10 @@ def _records(vlrs):
 def _add_crs(records, crs, wkt, description):
     """`records` with a projection record for `crs` on the end.
 
-    A caller either hands over a CRS and lets this build the record, or builds
-    it themselves and passes it among ``vlrs``. Doing both is refused: it is
-    two answers to one question, and which of them a reader found would be a
-    matter of record order.
+    A caller either hands over a CRS and lets ``_add_crs`` build the record,
+    or builds it themselves and passes it among ``vlrs``. Doing both is
+    refused: it is two answers to one question, and which of them a reader
+    found would be a matter of record order.
     """
     if any(key in records for key in PROJECTION_VLR_KEYS):
         raise ValueError("crs= and a projection record in vlrs are two "
@@ -222,9 +225,9 @@ def _record(key, data, description, reserved=0):
 def _pack_vlr(record):
     """One record on disk: its 54-byte header, then its payload.
 
-    The ceiling on the payload is checked here, because it is this header
-    that imposes it: the length field is two bytes wide. An extended record,
-    whose field is eight, is what carries a payload larger than that.
+    This function checks the ceiling on the payload, because this header is
+    what imposes it: the length field is two bytes wide. An extended record,
+    whose field is eight, carries anything larger.
     """
     length = record['record_length_after_header']
     if length > MAX_VLR_PAYLOAD:
@@ -239,10 +242,10 @@ def _extra_bytes_width(records, declared):
     """How many extra bytes a point carries, given the records and what the
     caller said.
 
-    The "extra bytes" record is the file's own account of them, so it decides
-    when it is there, and `declared` is only checked against it: a file whose
-    descriptor and record length disagree is one nothing can read, and it is
-    cheaper to refuse it here than to explain it later.
+    The "extra bytes" record is the file's own account of them, so when the
+    file has one it decides the width and `declared` is only checked against
+    it: a file whose descriptor and record length disagree is one nothing can
+    read, and refusing it here is cheaper than explaining it later.
     """
     descriptor = records.get(EXTRA_BYTES_VLR_KEY)
     if descriptor is None:
@@ -277,8 +280,8 @@ class Writer:
     overlap, but a decoded point splits them. When writing a record, the
     writer takes those three from ``synthetic_flag``, ``keypoint_flag`` and
     ``withheld_flag``, and only the overlap bit from
-    ``extended_classification_flags`` -- LASzip's rule, matched so these are
-    byte for byte the files laszip would have written.
+    ``extended_classification_flags`` -- LASzip's rule, which lazpy matches so
+    the files it writes are byte for byte the ones laszip would have written.
 
     Some header fields are not knowable until the last point has been written:
     the point count, the counts by return number, the bounding box, and where
@@ -315,8 +318,8 @@ class Writer:
         ``chunk_size`` is how many points share a chunk, which sets what
         random access costs on read-back. :data:`ADAPTIVE_CHUNK_SIZE` leaves
         the boundaries to the caller, who ends each chunk with ``chunk()``.
-        It is recorded in the VLR whatever the container, as laszip records
-        it, but POINTWISE has no chunks for it to describe.
+        The chunk size goes into the LASzip VLR whatever the container, as
+        laszip records it, but POINTWISE has no chunks for it to describe.
 
         ``scales`` and ``offsets`` are how the integer coordinates of a point
         become georeferenced ones; they are recorded in the header and applied
@@ -345,10 +348,10 @@ class Writer:
         point data and which may hold payloads no ordinary record can. They
         are written by ``close()``, so unlike ``vlrs`` they need not all be
         known here: ``writer.evlrs`` is the list, and appending to it up to
-        the last moment is as good as passing it in. What is passed in is
-        read now rather than at the end, so that records taken from a reader
-        -- whose payloads are read on demand -- do not depend on that reader
-        outliving this writer.
+        the last moment is as good as passing it in. The writer reads the
+        records passed in here rather than at the end, so records taken from
+        a reader -- whose payloads are read on demand -- do not depend on
+        that reader outliving this writer.
 
         ``num_extra_bytes`` is how many opaque bytes ride on the end of each
         point. It defaults to what the "extra bytes" record among ``vlrs``
@@ -486,16 +489,17 @@ class Writer:
         fields the legacy header cannot state, and the "extra bytes" one
         naming the hidden fields among a point's real extra bytes.
 
-        What it costs is what the legacy fields cannot hold. The scan angle
-        keeps a rank and the remainder rides in the extra bytes; the return
-        numbers and the classification keep as much as their narrower fields
-        can and the difference rides along too. A reader that puts them back
-        together -- lazpy's own, or laszip asked for the same mode -- gets the
-        LAS 1.4 points that went in. One that does not sees a legacy file
-        whose points are as nearly right as a legacy file can make them.
+        The disguise costs whatever the legacy fields are too narrow to hold.
+        The scan angle keeps a rank and the remainder rides in the extra
+        bytes; the return numbers and the classification keep as much as their
+        narrower fields can and the difference rides along too. A reader that
+        puts them back together -- lazpy's own, or laszip asked for the same
+        mode -- gets the LAS 1.4 points that went in. One that does not sees a
+        legacy file whose points are as nearly right as a legacy file can
+        make them.
 
-        Returns the records to write, the two that describe the disguise
-        leading them, and the extra bytes a record now holds.
+        Returns the records to write -- the two that describe the disguise
+        leading them -- and the number of extra bytes a record now holds.
         """
         if self.point_format not in _DISGUISED_FORMAT:
             raise UnsupportedFileError(
@@ -671,8 +675,8 @@ class Writer:
     def _laszip_record(self, description):
         """This file's LASzip record: what it says, wrapped as a record.
 
-        Saying it is headers._pack_laszip_record, beside the parse it is the
-        inverse of."""
+        ``headers._pack_laszip_record`` builds the payload, and lives beside
+        the parse it inverts."""
         major, minor, revision = self.LASZIP_VERSION
         payload = _pack_laszip_record({
             'compressor': self.compressor,
@@ -681,10 +685,10 @@ class Writer:
             'version_minor': minor,
             'version_revision': revision,
             # laszip sets the low bit for a file written in compatibility
-            # mode, and nothing else in the field. Reading one does not need
-            # it -- the two records say so themselves, which is how an
-            # uncompressed disguised file says it -- but a file lazpy writes
-            # says it the way laszip's does.
+            # mode, and nothing else in the field. A reader does not need the
+            # bit -- the two records declare the disguise themselves, which is
+            # the only way an uncompressed disguised file can declare it --
+            # but lazpy sets it anyway, as laszip does.
             'options': 1 if self.compatibility else 0,
             'chunk_size': _as_i32(self.chunk_size),
             'number_of_special_evlrs': -1,      # none, as laszip writes it
@@ -712,15 +716,15 @@ class Writer:
                 while reader.index < reader.num_points:
                     writer.write_arrays(reader.arrays(count=1_000_000))
 
-        Which is what it is for. Reading in bulk has never had a counterpart
-        here, so a conversion ran at the speed of ``write()`` -- a Python
-        call, a type check and a point object each time -- however fast the
-        reading side went.
+        That conversion loop is what the method is for. Reading in bulk has
+        never had a counterpart here, so a conversion ran at the speed of
+        ``write()`` -- a Python call, a type check and a point object each
+        time -- however fast the reading side went.
 
-        Fields no column names are written as zero, so a caller who reads
-        four fields and writes them back gets a file whose other fields are
-        empty rather than one that repeats the last point. Names are those of
-        :meth:`Reader.arrays`, ``extra_bytes`` included.
+        Fields that ``columns`` does not name are written as zero, so a caller
+        who reads four fields and writes them back gets a file whose other
+        fields are empty rather than one that repeats the last point. Names
+        are those of :meth:`Reader.arrays`, ``extra_bytes`` included.
 
         Needs numpy, as the array side of reading does.
         """
@@ -800,9 +804,10 @@ class Writer:
         """Finish the point block, write the extended records behind it, and
         fill in the header fields that needed every point to be known.
 
-        What the caller can still put right is asked about first, so a
-        mistake in the header or the extended records is something to correct
-        and close again rather than something that costs the file.
+        ``close()`` checks everything the caller can still put right before it
+        finishes the point block, so a mistake in the header or the extended
+        records is something to correct and close again rather than something
+        that costs the file.
 
         Idempotent once it has worked, and not over a failure: a close that
         raised leaves the file unfinished, and every later close says so
@@ -836,18 +841,20 @@ class Writer:
         """Everything close() needs from what the caller set, asked before the
         point block is finished rather than after.
 
-        All three are settled the moment the caller sets them, and all three
-        used to be found out only once done() had written the chunk table --
-        past the point where the file can still be saved, so a header field
-        edited to an impossible length cost every point written. Asked here,
-        nothing has happened yet and the writer is still closable.
+        The extended records, the LAS version that permits them, and the
+        header's declared length are all settled the moment the caller sets
+        them, but the writer used to discover a problem with any of them only
+        after done() had written the chunk table -- past the point where the
+        file can still be saved, so a header field edited to an impossible
+        length cost every point written. Asked here, nothing has happened yet
+        and the writer is still closable.
 
-        Repeating the work rather than remembering it is what _records is
-        built for: it says so, and passes records it has already been over
-        through unchanged, so that the extended ones can be checked when they
-        are given and again when they are written. The header is packed and
-        thrown away, which costs a few hundred bytes and is the only way to
-        ask whether it still fits the length the file has already declared.
+        _records is built to be run twice rather than to cache its result: it
+        passes records it has already normalized through unchanged, so the
+        writer can check the extended records when the caller gives them and
+        again when it writes them. The header is packed and thrown away, which
+        costs a few hundred bytes and is the only way to ask whether it still
+        fits the length the file has already declared.
         """
         records = _records(self.evlrs)
         if records:
@@ -863,9 +870,10 @@ class Writer:
         """Write the extended records behind the point block, and aim the
         header at them.
 
-        Behind the point block is what makes them cheap: everything in front
-        of them is already written and none of it moves, so the two header
-        fields that address them are two more for _patch_header to fill in.
+        They are cheap because they go behind the point block: everything in
+        front of them is already written and none of it moves, so the two
+        header fields that address them are two more for _patch_header to
+        fill in.
         """
         records = _records(self.evlrs)
         if not records:
@@ -907,8 +915,9 @@ class Writer:
             header['extended_number_of_points_by_return'] = \
                 list(by_return[1:16])
         elif self.compatibility:
-            # the counts are of LAS 1.4 return numbers, of which the legacy
-            # field states the five it has room for and the record the rest
+            # the counts are of LAS 1.4 return numbers: the legacy field
+            # states the five it has room for, and the "lascompatible" record
+            # states the rest
             self._patch_compatibility_record(count, by_return[1:16])
 
         # A file with no points keeps the zero bounds _build_header set, which
@@ -929,7 +938,7 @@ class Writer:
     def _patch_compatibility_record(self, count, by_return):
         """Rewrite the "lascompatible" record with the LAS 1.4 counts.
 
-        It went out before the first point with those fields zero, because
+        It went out before the first point with the count fields zero, because
         that is where a variable length record has to be; it is a fixed number
         of bytes, so the finished one goes over it.
         """
@@ -941,8 +950,8 @@ class Writer:
 
     @property
     def compatibility(self):
-        """Whether this file is a LAS 1.4 one in a legacy disguise, which is
-        to say whether the format it wears is the format it holds."""
+        """Whether this file is a LAS 1.4 one in a legacy disguise: the
+        format it wears is not the format it holds."""
         return self.written_format != self.point_format
 
     @property

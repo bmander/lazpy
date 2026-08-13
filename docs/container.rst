@@ -1,9 +1,9 @@
 The container layer
 ===================
 
-The point block alone, with no LAS header over it: what ``Reader`` and
-``Writer`` are built on. Use these directly only for a point block some
-other header describes.
+``Reader`` and ``Writer`` are built on the three classes below, which
+handle the point block alone, with no LAS header over it. Reach for them
+directly only when some other header already describes the point block.
 
 .. currentmodule:: lazpy
 

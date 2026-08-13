@@ -16,8 +16,10 @@ Coordinates
 Extra bytes
 -----------
 
-What a file says its extra bytes mean: a record built from the attributes
-they hold, which a :class:`Writer` takes among its ``vlrs``.
+A file declares what its extra bytes mean in a record that describes each
+extra attribute. Build that record from :class:`ExtraBytesAttribute` values
+with :func:`extra_bytes_record`, and pass it to :class:`Writer` among its
+``vlrs``.
 
 .. autoclass:: ExtraBytesAttribute
 

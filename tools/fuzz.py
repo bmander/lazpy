@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Mutate the fixtures and read the results, looking for what must not happen.
+"""Mutate the fixtures and read the results, looking for crashes, hangs,
+and dangling exceptions.
 
     python tools/fuzz.py [--seed N] [--count N] [--corpus DIR] [--quiet]
 
@@ -13,12 +14,12 @@ crasher is reproducible from the last line of output:
 
 Findings go in `testdata/malformed/` as regression cases;
 `tests/test_malformed.py` reads every file there and asserts only that
-opening it does not take the process down with it -- and then a named test
-is written beside it saying what that file should raise.
+opening it does not take the process down with it -- and then you add a
+named test beside it saying what that file should raise.
 
-This is a smoke test, not a coverage-guided fuzzer. It finds what random
-mutation finds, which is the shallow half; libFuzzer or Atheris over the same
-entry points would go deeper and would need a build of their own.
+This is a smoke test, not a coverage-guided fuzzer. It finds only the shallow
+bugs that random mutation reaches; libFuzzer or Atheris over the same entry
+points would go deeper and would need a build of their own.
 """
 import argparse
 import io
@@ -32,8 +33,9 @@ TESTDATA = os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "testdata")
 
 # What a malformed file is allowed to do, taken from the test suite so that
-# the fuzzer and the tests cannot come to disagree about it -- one reporting
-# findings the other accepts would be worse than either being wrong.
+# the fuzzer and the tests cannot come to disagree about it -- a fuzzer
+# reporting findings the tests accept would be worse than either being wrong
+# on its own.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "tests"))
 from helpers import SURVIVABLE as EXPECTED        # noqa: E402
@@ -138,8 +140,9 @@ def main():
         rng = random.Random(seed)
         name = rng.choice(list(seeds))
         data = mutate(seeds[name], rng)
-        # printed before the case runs, so that a crash -- which takes the
-        # process with it and prints nothing itself -- names the case
+        # printed before the case runs, so that a crash -- which kills the
+        # interpreter and prints nothing itself -- is still identified by
+        # the last line of output
         if not args.quiet:
             print(f"{seed} {name}", flush=True)
         try:
