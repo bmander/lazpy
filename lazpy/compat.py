@@ -12,7 +12,7 @@ from .extra_bytes import (EXTRA_BYTES_ATTRIBUTE_SIZE, ExtraBytesAttribute,
                           _described_width, _extra_bytes_attributes,
                           _pack_attribute)
 from .formats import (LASCOMPATIBLE_VLR_KEY, EXTRA_BYTES_VLR_KEY,
-                      WKT_VLR_KEY, WKT_GLOBAL_ENCODING_BIT, _POINT_FORMATS)
+                      WKT_VLR_KEY, WKT_GLOBAL_ENCODING_BIT, _point_format)
 from .headers import (HEADER_FORMAT_13, HEADER_FORMAT_14, format_size,
                       pack_format, unpack_format, _header_size)
 
@@ -180,7 +180,7 @@ def _upgrade_to_las_14(header, layout, num_extra_bytes):
     point_format = _UPGRADED_FORMAT[
         header['point_data_format_id']][layout.nir != -1]
     header['point_data_format_id'] = point_format
-    header['point_data_record_length'] = (_POINT_FORMATS[point_format][0]
+    header['point_data_record_length'] = (_point_format(point_format).size
                                           + num_extra_bytes)
 
 
@@ -263,7 +263,7 @@ def _disguise(point_format, num_extra_bytes, described):
                              _unknown_attributes(num_extra_bytes))
 
     hidden = list(_HIDDEN_ATTRIBUTES)
-    if _POINT_FORMATS[point_format][3]:         # a near-infrared band to hide
+    if _point_format(point_format).nir:         # a near-infrared band to hide
         hidden.append(_NIR_HIDDEN_ATTRIBUTE)
 
     data = described + b''.join(_pack_attribute(a) for a in hidden)

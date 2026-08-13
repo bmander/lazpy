@@ -51,6 +51,12 @@ typedef struct {
      * items taken from the caller's extra-bytes buffer. As on the read side,
      * resolved once at setup rather than per point. */
     I32 item_offsets[LAZ_MAX_ITEMS];
+    /* Where in the caller's extra-bytes buffer each BYTE/BYTE14 item begins,
+     * for the items above whose offset is -1. A layout may carry more than one
+     * such item -- num_extra_bytes is their total, which is what sizes the
+     * buffer -- and without a start each of them would be handed the same
+     * pointer and overwrite the last. */
+    U32 item_extra_offsets[LAZ_MAX_ITEMS];
     /* Total size of the BYTE/BYTE14 items, i.e. how large the caller's
      * extra-bytes buffer must be. */
     U32 num_extra_bytes;

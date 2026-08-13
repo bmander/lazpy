@@ -99,10 +99,6 @@ BOOL laz_readpoint_setup(LazReadPoint *rp, U32 num_items, const LazItem *items,
         return LAZ_FALSE;
     }
 
-    rp->items = (LazItem *)malloc(num_items * sizeof(LazItem));
-    if (!rp->items) { set_error(rp, "out of memory"); return LAZ_FALSE; }
-    memcpy(rp->items, items, num_items * sizeof(LazItem));
-
     rp->num_readers = num_items;
     rp->have_dec = LAZ_FALSE;
     rp->layered_las14_compression = LAZ_FALSE;
@@ -132,7 +128,10 @@ BOOL laz_readpoint_setup(LazReadPoint *rp, U32 num_items, const LazItem *items,
             set_error(rp, "item type %u is not supported", items[i].type);
             return LAZ_FALSE;
         }
-        if (rp->item_offsets[i] == -1) rp->num_extra_bytes += items[i].size;
+        if (rp->item_offsets[i] == -1) {
+            rp->item_extra_offsets[i] = rp->num_extra_bytes;
+            rp->num_extra_bytes += items[i].size;
+        }
         rp->readers_raw[i] = laz_readitem_new_raw(&items[i], NULL);
         if (!rp->readers_raw[i]) {
             set_error(rp, "item type %u is not supported", items[i].type);
@@ -375,7 +374,9 @@ BOOL laz_readpoint_read(LazReadPoint *rp, LazPoint *point, U8 *extra_bytes)
 
     /* offsets were resolved at setup; this is just the per-call rebase */
     for (i = 0; i < rp->num_readers; i++) {
-        dst[i] = (rp->item_offsets[i] < 0) ? extra_bytes : (base + rp->item_offsets[i]);
+        dst[i] = (rp->item_offsets[i] < 0)
+               ? extra_bytes + rp->item_extra_offsets[i]
+               : (base + rp->item_offsets[i]);
     }
 
     if (rp->have_dec) {
@@ -600,7 +601,6 @@ void laz_readpoint_destroy(LazReadPoint *rp)
         rp->readers_compressed = NULL;
     }
     rp->readers = NULL;
-    free(rp->items); rp->items = NULL;
     free(rp->chunk_totals); rp->chunk_totals = NULL;
     free(rp->chunk_starts); rp->chunk_starts = NULL;
     free(rp->seek_extra_bytes); rp->seek_extra_bytes = NULL;

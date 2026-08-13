@@ -8,9 +8,10 @@ import os
 from ._cpylaz import PointReader, SpatialIndex, LazError, POINT_LAYOUT
 from .formats import (LASINDEX_EVLR_KEY, Compressor, Coder,
                       Chunking, Selective, UnsupportedFileError,
-                      items_for_point_format, _POINT_FORMATS)
-from .headers import (EVLR_HEADER_FORMAT, EVLR_HEADER_SIZE, unpack_format,
-                      _can_seek, _read_las_header, _find_laz_header)
+                      items_for_point_format, _point_format)
+from .headers import (EVLR_HEADER_FORMAT, EVLR_HEADER_SIZE, keeping_position,
+                      unpack_format, _can_seek, _end_of_file,
+                      _read_las_header, _find_laz_header)
 from .compat import _compatibility_layout, _upgrade_to_las_14
 from .crs import read_crs
 
@@ -136,21 +137,18 @@ _EXTENDED_FIELDS = ('extended_return_number', 'extended_number_of_returns',
 
 def _fields_for_point_format(point_format, num_extra_bytes):
     """The field names a point of this format actually carries."""
-    try:
-        _, gps, rgb, nir, wave, point14 = _POINT_FORMATS[point_format]
-    except KeyError:
-        raise UnsupportedFileError(
-            f"unknown point data format {point_format}") from None
+    fmt = _point_format(point_format)
     names = list(_CORE_FIELDS)
-    if point14:
+    if fmt.point14:
         names += _EXTENDED_FIELDS
-    if gps or point14:            # POINT14 carries its gps time inside itself
+    # POINT14 carries its gps time inside itself
+    if fmt.gps_time or fmt.point14:
         names.append('gps_time')
-    if rgb:
+    if fmt.rgb:
         names += ['red', 'green', 'blue']
-    if nir:
+    if fmt.nir:
         names.append('nir')
-    if wave:
+    if fmt.wavepacket:
         names.append('wave_packet')
     if num_extra_bytes:
         names.append('extra_bytes')
@@ -246,12 +244,9 @@ class ExtendedVariableLengthRecord(Mapping):
         """
         length = self._fields['record_length_after_header']
         try:
-            resume = self._fp.tell()
-            try:
+            with keeping_position(self._fp):
                 self._fp.seek(self._fields['offset_to_data'])
                 data = self._fp.read(length)
-            finally:
-                self._fp.seek(resume)
         except (OSError, ValueError) as exc:
             # a closed file object is a ValueError, a dead one an OSError
             raise LazError(f"cannot read the payload of {self!r}: the file is "
@@ -459,10 +454,8 @@ class Reader:
         if not _can_seek(fp):
             return records, None
 
-        resume = fp.tell()
-        try:
-            fp.seek(0, io.SEEK_END)
-            end_of_file = fp.tell()
+        with keeping_position(fp):
+            end_of_file = _end_of_file(fp)
             fp.seek(start)
             # `declared` is a U32 out of the header and worth no more trust
             # than that, but it needs no cap of its own: every pass consumes at
@@ -478,8 +471,6 @@ class Reader:
                 found += 1
                 # past the payload, not through it
                 fp.seek(record['record_length_after_header'], io.SEEK_CUR)
-        finally:
-            fp.seek(resume)
 
         if found < declared:
             return records, (f"file declares {declared} extended variable "
@@ -745,14 +736,9 @@ class Reader:
 
         # read out from under the point reader and put the handle back, as
         # ExtendedVariableLengthRecord does; see its _read_data
-        resume = self.fp.tell()
-        try:
-            self.fp.seek(0, io.SEEK_END)
-            end_of_file = self.fp.tell()
+        with keeping_position(self.fp):
             self.fp.seek(offset)
-            record = Reader._evlr_at(self.fp, end_of_file)
-        finally:
-            self.fp.seek(resume)
+            record = Reader._evlr_at(self.fp, _end_of_file(self.fp))
 
         if record is None:
             # unlike a record the header merely counted, this one was pointed
@@ -1045,10 +1031,8 @@ class Reader:
         remaining = self.num_points - self.index
         count = remaining if count is None else min(count, remaining)
 
-        if not names:
-            names = _fields_for_point_format(self.point_format,
-                                             self.num_extra_bytes)
-
+        # no names at all means every field, which _array_columns settles --
+        # it has to, since arrays_within reaches it the same way
         out, targets, packed = self._array_columns(names, count)
         self._points().read_into(targets, count)
         return self._finish_columns(out, packed, count)

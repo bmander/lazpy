@@ -11,7 +11,7 @@ from .formats import (EXTRA_BYTES_VLR_KEY, LASCOMPATIBLE_VLR_KEY,
                       LASINDEX_EVLR_KEY, LASZIP_VLR_KEY,
                       PROJECTION_VLR_KEYS, WKT_GLOBAL_ENCODING_BIT,
                       Compressor,
-                      Coder, UnsupportedFileError, _POINT_FORMATS,
+                      Coder, UnsupportedFileError, _point_format,
                       items_for_point_format, _versioned_items,
                       _default_version_minor, _min_version_minor)
 from .crs import crs_record
@@ -19,8 +19,9 @@ from .reader import _array_field, _numpy
 from .headers import (EVLR_HEADER_FORMAT, LASZIP_SPECIAL_EVLRS_AT,
                       LASZIP_SPECIAL_EVLR_FORMAT, MAX_VLR_PAYLOAD,
                       VLR_HEADER_FORMAT, VLR_HEADER_SIZE,
-                      header_formats, pack_format, _header_size, _can_seek,
-                      _read_las_header, _pack_laszip_record)
+                      header_formats, keeping_position, pack_format,
+                      _header_size, _can_seek, _read_las_header,
+                      _pack_laszip_record)
 
 
 # What a point's X, Y and Z can hold: they are signed 32-bit, and scaling and
@@ -396,11 +397,11 @@ class Writer:
                 records, num_extra_bytes, version_minor, vlr_description)
 
         # raises for a point format there is no layout for, so everything
-        # below can look one up
-        record_length = (_POINT_FORMATS.get(self.written_format, (0,))[0]
-                         + num_extra_bytes)
+        # below can take one as given
+        written = _point_format(self.written_format)
+        record_length = written.size + num_extra_bytes
         self.items = items_for_point_format(self.written_format, record_length)
-        point14 = _POINT_FORMATS[self.written_format][5]
+        point14 = written.point14
 
         # after the disguise, so a LAS 1.4 file written as a legacy one states
         # its projection the way the version it claims to be would
@@ -930,10 +931,10 @@ class Writer:
                 header[f'min_{axis}'] = bounds[i] * scale + offset
                 header[f'max_{axis}'] = bounds[i + 3] * scale + offset
 
-        end = self.fp.tell()
-        self.fp.seek(0)
-        self.fp.write(self._pack_header(header))
-        self.fp.seek(end)          # a file object the caller lent us
+        # the restore matters: a file object the caller lent us
+        with keeping_position(self.fp):
+            self.fp.seek(0)
+            self.fp.write(self._pack_header(header))
 
     def _patch_compatibility_record(self, count, by_return):
         """Rewrite the "lascompatible" record with the LAS 1.4 counts.
@@ -943,10 +944,9 @@ class Writer:
         of bytes, so the finished one goes over it.
         """
         payload = _compatibility_payload(count, by_return)
-        end = self.fp.tell()
-        self.fp.seek(self._compatibility_at)
-        self.fp.write(payload)
-        self.fp.seek(end)
+        with keeping_position(self.fp):
+            self.fp.seek(self._compatibility_at)
+            self.fp.write(payload)
 
     @property
     def compatibility(self):

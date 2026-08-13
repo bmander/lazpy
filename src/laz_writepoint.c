@@ -72,7 +72,10 @@ BOOL laz_writepoint_setup(LazWritePoint *wp, U32 num_items, const LazItem *items
             set_error(wp, "item type %u is not supported", items[i].type);
             return LAZ_FALSE;
         }
-        if (wp->item_offsets[i] == -1) wp->num_extra_bytes += items[i].size;
+        if (wp->item_offsets[i] == -1) {
+            wp->item_extra_offsets[i] = wp->num_extra_bytes;
+            wp->num_extra_bytes += items[i].size;
+        }
         wp->writers_raw[i] = laz_writeitem_new_raw(&items[i], NULL);
         if (!wp->writers_raw[i]) {
             set_error(wp, "item type %u is not supported", items[i].type);
@@ -279,7 +282,9 @@ BOOL laz_writepoint_write(LazWritePoint *wp, const LazPoint *point,
 
     /* offsets were resolved at setup; this is just the per-call rebase */
     for (i = 0; i < wp->num_writers; i++) {
-        src[i] = (wp->item_offsets[i] < 0) ? extra_bytes : (base + wp->item_offsets[i]);
+        src[i] = (wp->item_offsets[i] < 0)
+               ? extra_bytes + wp->item_extra_offsets[i]
+               : (base + wp->item_offsets[i]);
     }
 
     /* Only a compressed stream is chunked, and only it counts points: an
