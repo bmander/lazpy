@@ -361,105 +361,11 @@ static PyObject *Writer_write(WriterObject *self, PyObject *arg)
  * back in front of every point, so a conversion ran at the speed of the half
  * that had no bulk path.
  */
-typedef struct {
-    const U8 *src;          /* walks the caller's column */
-    U8 *dst;                /* fixed: where in the point it lands */
-    Py_ssize_t size;
-} Source;
-
-typedef struct {
-    PyObject *seq;
-    Source *cols;
-    Py_buffer *views;
-    Py_ssize_t n, held;
-} Sources;
-
-static void sources_close(Sources *s)
-{
-    Py_ssize_t i;
-    for (i = 0; i < s->held; i++) PyBuffer_Release(&s->views[i]);
-    PyMem_Free(s->views);
-    PyMem_Free(s->cols);
-    Py_XDECREF(s->seq);
-}
-
-static BOOL sources_open(WriterObject *self, PyObject *targets,
-                         Py_ssize_t count, Sources *s)
-{
-    Py_ssize_t i;
-
-    s->seq = NULL; s->cols = NULL; s->views = NULL; s->n = 0; s->held = 0;
-
-    s->seq = PySequence_Fast(targets, "targets must be a sequence");
-    if (!s->seq) return LAZ_FALSE;
-    s->n = PySequence_Fast_GET_SIZE(s->seq);
-
-    s->cols = (Source *)PyMem_Malloc((size_t)s->n * sizeof(Source));
-    s->views = (Py_buffer *)PyMem_Malloc((size_t)s->n * sizeof(Py_buffer));
-    if (!s->cols || !s->views) { PyErr_NoMemory(); return LAZ_FALSE; }
-
-    for (i = 0; i < s->n; i++) {
-        PyObject *t = PySequence_Fast_GET_ITEM(s->seq, i);
-        PyObject *buf;
-        Py_ssize_t offset, size;
-
-        if (!PyArg_ParseTuple(t, "Onn", &buf, &offset, &size))
-            return LAZ_FALSE;
-        if (size <= 0) {
-            PyErr_SetString(PyExc_ValueError, "field width must be positive");
-            return LAZ_FALSE;
-        }
-        if (count > PY_SSIZE_T_MAX / size) {
-            PyErr_SetString(PyExc_OverflowError, "count is too large");
-            return LAZ_FALSE;
-        }
-        /* bounded by subtraction, as columns_open does it: offset and size
-         * are the caller's and adding them could overflow */
-        if (offset == -1) {
-            if (size > (Py_ssize_t)self->wp.num_extra_bytes) {
-                PyErr_SetString(PyExc_ValueError,
-                                "field lies outside the extra bytes");
-                return LAZ_FALSE;
-            }
-            s->cols[i].dst = self->extra_bytes;
-        } else {
-            if (offset < 0 || offset > POINT_FIXED_EXTENT - size) {
-                PyErr_SetString(PyExc_ValueError,
-                                "field lies outside the decoded point");
-                return LAZ_FALSE;
-            }
-            s->cols[i].dst = (U8 *)&self->point + offset;
-        }
-
-        if (PyObject_GetBuffer(buf, &s->views[i], PyBUF_C_CONTIGUOUS) < 0)
-            return LAZ_FALSE;
-        s->held = i + 1;
-        if (s->views[i].len < count * size) {
-            PyErr_SetString(PyExc_ValueError,
-                            "a column is shorter than the point count");
-            return LAZ_FALSE;
-        }
-        s->cols[i].src = (const U8 *)s->views[i].buf;
-        s->cols[i].size = size;
-    }
-    return LAZ_TRUE;
-}
-
-/* One point's worth out of every column, into the point. */
-static void sources_take(Sources *s)
-{
-    Py_ssize_t i;
-    for (i = 0; i < s->n; i++) {
-        memcpy(s->cols[i].dst, s->cols[i].src, (size_t)s->cols[i].size);
-        s->cols[i].src += s->cols[i].size;
-    }
-}
-
 static PyObject *Writer_write_from(WriterObject *self, PyObject *args)
 {
     PyObject *targets, *result = NULL;
     Py_ssize_t count, done = 0;
-    Sources s;
+    Columns c;
     BOOL ok = LAZ_TRUE;
 
     if (!PyArg_ParseTuple(args, "On", &targets, &count)) return NULL;
@@ -468,7 +374,13 @@ static PyObject *Writer_write_from(WriterObject *self, PyObject *args)
         PyErr_SetString(PyExc_ValueError, "count must not be negative");
         return NULL;
     }
-    if (!sources_open(self, targets, count, &s)) { sources_close(&s); return NULL; }
+    /* The count of extra bytes is the write point's here and the reader's own
+     * field there, which is why columns_open takes the value rather than the
+     * object holding it. */
+    if (!columns_open(&self->point, self->extra_bytes,
+                      self->wp.num_extra_bytes, targets, count,
+                      COLUMNS_INTO_POINT, &c))
+        return NULL;
 
     /* Everything a column does not fill keeps whatever the last point left,
      * so the point is cleared once and the extra bytes with it -- a caller
@@ -480,7 +392,7 @@ static PyObject *Writer_write_from(WriterObject *self, PyObject *args)
         memset(self->extra_bytes, 0, self->wp.num_extra_bytes);
 
     for (done = 0; done < count; done++) {
-        sources_take(&s);
+        columns_step(&c);
         laz_writepoint_init_point(&self->wp, &self->point);
         writer_tally(self);
         if (self->compat) writer_recode_compat(self);
@@ -496,7 +408,7 @@ static PyObject *Writer_write_from(WriterObject *self, PyObject *args)
 
     result = ok ? (Py_INCREF(Py_None), Py_None) : writer_error(self);
 
-    sources_close(&s);
+    columns_close(&c);
     return result;
 }
 

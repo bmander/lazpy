@@ -1,5 +1,6 @@
-/* PointReader: the decode side of the container, plus the region and column
- * machinery its bulk-read entry points share. */
+/* PointReader: the decode side of the container, plus the region machinery its
+ * queries share and the column machinery its bulk read shares with the
+ * writer's bulk write. */
 #include "cpylaz.h"
 
 /* =========================================================== PointReader == */
@@ -536,19 +537,6 @@ static PyObject *Reader_checksum(ReaderObject *self, PyObject *args)
     return Py_BuildValue("(KK)", (unsigned long long)h, (unsigned long long)done);
 }
 
-/*
- * One column of the array path: where a field sits in the decoded point, and
- * where each point's copy of it goes. Both source pointers are fixed for the
- * life of the reader -- the point and its extra-bytes buffer are reused, not
- * reallocated -- so they are resolved once and the loop below only advances
- * the destination.
- */
-typedef struct {
-    const U8 *src;
-    U8 *dst;
-    Py_ssize_t size;
-} Column;
-
 /* ----------------------------------------------------------- region queries */
 
 /*
@@ -660,35 +648,16 @@ static PyObject *Reader_read_within(ReaderObject *self, PyObject *args)
     return self->point_view;
 }
 
-/*
- * Decodes `count` points straight into caller-owned buffers, one per field.
- *
- * `targets` is a sequence of (buffer, offset, size) triples: a writable
- * C-contiguous buffer, the byte offset of the field inside the decoded point,
- * and the field's width. Offset -1 means the extra bytes, which are a blob
- * beside the point rather than a field in it.
- *
- * This is what makes the numpy API in lazpy/__init__.py worth having: whole
- * columns arrive with one Python call and no object per point, where
- * iterating read() costs an attribute lookup and a boxed int per field.
- * Nothing here knows what a field means -- names, types and the unpacking of
- * the sub-byte fields are Python's business.
- */
-/*
- * The columns of one read_into call, and the buffers they are writing into.
- *
- * Opened from the caller's `targets` and closed whatever happens after, since
- * every one of them is holding a buffer view.
- */
-typedef struct {
-    PyObject *seq;
-    Column *cols;
-    Py_buffer *views;
-    Py_ssize_t n;
-    Py_ssize_t held;        /* views actually acquired, which is what to release */
-} Columns;
+/* ------------------------------------------------ columns, both directions */
 
-static void columns_close(Columns *c)
+/*
+ * The buffer resolution behind read_into and write_from alike, declared in
+ * cpylaz.h as this file's other writer-facing helpers are. Both entry points
+ * keep their own loop and their own error handling -- only the buffers, and
+ * the copy through them, are shared.
+ */
+
+void columns_close(Columns *c)
 {
     Py_ssize_t i;
     for (i = 0; i < c->held; i++) PyBuffer_Release(&c->views[i]);
@@ -698,15 +667,21 @@ static void columns_close(Columns *c)
     c->seq = NULL; c->cols = NULL; c->views = NULL; c->n = 0; c->held = 0;
 }
 
-static BOOL columns_open_partial(ReaderObject *self, PyObject *targets,
-                                 Py_ssize_t capacity, Columns *c)
+/* columns_open's body. The wrapper below does the releasing, so every
+ * failure here can simply return. */
+static BOOL columns_open_partial(LazPoint *point, U8 *extra, U32 num_extra,
+                                 PyObject *targets, Py_ssize_t capacity,
+                                 ColumnsDirection dir, Columns *c)
 {
+    /* The write side only reads the caller's buffers, so it takes them as
+     * they come; the read side has to be able to write into them. */
+    int flags = (dir == COLUMNS_INTO_POINT)
+              ? PyBUF_C_CONTIGUOUS : (PyBUF_WRITABLE | PyBUF_C_CONTIGUOUS);
     Py_ssize_t i;
 
     c->seq = NULL; c->cols = NULL; c->views = NULL; c->n = 0; c->held = 0;
+    c->dir = dir;
 
-    /* Every failure below closes what it opened, so a caller that got FALSE
-     * has nothing left to release. */
     c->seq = PySequence_Fast(targets, "targets must be a sequence");
     if (!c->seq) return LAZ_FALSE;
     c->n = PySequence_Fast_GET_SIZE(c->seq);
@@ -732,57 +707,60 @@ static BOOL columns_open_partial(ReaderObject *self, PyObject *targets,
         /* Both bounds are checked by subtraction rather than by adding
          * offset and size, which are the caller's and could overflow. */
         if (offset == -1) {
-            if (size > (Py_ssize_t)self->num_extra_bytes) {
+            if (size > (Py_ssize_t)num_extra) {
                 PyErr_SetString(PyExc_ValueError,
                                 "field lies outside the extra bytes");
                 return LAZ_FALSE;
             }
-            c->cols[i].src = self->extra_bytes;
+            c->cols[i].field = extra;
         } else {
             if (offset < 0 || offset > POINT_FIXED_EXTENT - size) {
                 PyErr_SetString(PyExc_ValueError,
                                 "field lies outside the decoded point");
                 return LAZ_FALSE;
             }
-            c->cols[i].src = (const U8 *)&self->point + offset;
+            c->cols[i].field = (U8 *)point + offset;
         }
 
-        if (PyObject_GetBuffer(buf, &c->views[i],
-                               PyBUF_WRITABLE | PyBUF_C_CONTIGUOUS) < 0)
-            return LAZ_FALSE;
+        if (PyObject_GetBuffer(buf, &c->views[i], flags) < 0) return LAZ_FALSE;
         c->held = i + 1;
         if (c->views[i].len < capacity * size) {
-            PyErr_SetString(PyExc_ValueError, "output buffer is too small");
+            PyErr_SetString(PyExc_ValueError,
+                            "a column is shorter than the point count");
             return LAZ_FALSE;
         }
-        c->cols[i].dst = (U8 *)c->views[i].buf;
+        c->cols[i].column = (U8 *)c->views[i].buf;
         c->cols[i].size = size;
     }
     return LAZ_TRUE;
 }
 
-/* Resolves `targets` against this reader's point, checking that every buffer
- * has room for `capacity` points. Returns false with an exception set, having
- * released whatever it had already taken -- so only a successful open needs
- * closing. */
-static BOOL columns_open(ReaderObject *self, PyObject *targets,
-                         Py_ssize_t capacity, Columns *c)
+BOOL columns_open(LazPoint *point, U8 *extra, U32 num_extra, PyObject *targets,
+                  Py_ssize_t capacity, ColumnsDirection dir, Columns *c)
 {
-    if (columns_open_partial(self, targets, capacity, c)) return LAZ_TRUE;
+    if (columns_open_partial(point, extra, num_extra, targets, capacity,
+                             dir, c))
+        return LAZ_TRUE;
     columns_close(c);
     return LAZ_FALSE;
 }
 
-/* Copies the point just decoded into the columns, advancing each. */
-static void columns_append(Columns *c)
-{
-    Py_ssize_t i;
-    for (i = 0; i < c->n; i++) {
-        memcpy(c->cols[i].dst, c->cols[i].src, (size_t)c->cols[i].size);
-        c->cols[i].dst += c->cols[i].size;    /* on to this column's next */
-    }
-}
+/* columns_step is inline in cpylaz.h -- the one of the three run per point. */
 
+/*
+ * Decodes `count` points straight into caller-owned buffers, one per field.
+ *
+ * `targets` is a sequence of (buffer, offset, size) triples: a writable
+ * C-contiguous buffer, the byte offset of the field inside the decoded point,
+ * and the field's width. Offset -1 means the extra bytes, which are a blob
+ * beside the point rather than a field in it.
+ *
+ * This is what makes the numpy API in lazpy/__init__.py worth having: whole
+ * columns arrive with one Python call and no object per point, where
+ * iterating read() costs an attribute lookup and a boxed int per field.
+ * Nothing here knows what a field means -- names, types and the unpacking of
+ * the sub-byte fields are Python's business.
+ */
 static PyObject *Reader_read_into(ReaderObject *self, PyObject *args)
 {
     PyObject *targets, *result = NULL;
@@ -796,7 +774,9 @@ static PyObject *Reader_read_into(ReaderObject *self, PyObject *args)
         PyErr_SetString(PyExc_ValueError, "count must not be negative");
         return NULL;
     }
-    if (!columns_open(self, targets, count, &c)) return NULL;
+    if (!columns_open(&self->point, self->extra_bytes, self->num_extra_bytes,
+                      targets, count, COLUMNS_FROM_POINT, &c))
+        return NULL;
 
     Py_BEGIN_ALLOW_THREADS
     for (done = 0; done < count; done++) {
@@ -804,7 +784,7 @@ static PyObject *Reader_read_into(ReaderObject *self, PyObject *args)
             ok = LAZ_FALSE;
             break;
         }
-        columns_append(&c);
+        columns_step(&c);
     }
     Py_END_ALLOW_THREADS
 
@@ -848,13 +828,15 @@ static PyObject *Reader_read_into_within(ReaderObject *self, PyObject *args)
      * the buffers have to hold. */
     room = (stop > (unsigned long long)self->index)
          ? (Py_ssize_t)(stop - self->index) : 0;
-    if (!columns_open(self, targets, room, &c)) return NULL;
+    if (!columns_open(&self->point, self->extra_bytes, self->num_extra_bytes,
+                      targets, room, COLUMNS_FROM_POINT, &c))
+        return NULL;
 
     Py_BEGIN_ALLOW_THREADS
     while (written < room) {
         found = reader_next_within(self, (U64)stop, &region);
         if (found != 1) break;
-        columns_append(&c);
+        columns_step(&c);
         written++;
     }
     Py_END_ALLOW_THREADS

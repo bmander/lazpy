@@ -171,7 +171,7 @@ class TestReadInto:
 
     def test_rejects_a_short_buffer(self):
         with Reader(fixture("pt1_v2.laz")) as reader:
-            with pytest.raises(ValueError, match="too small"):
+            with pytest.raises(ValueError, match="shorter than the point"):
                 reader._reader.read_into(self.targets(4, 4), 5)
 
     def test_rejects_a_field_outside_the_point(self):
