@@ -471,7 +471,7 @@ class TestSelectiveDecompression:
         def witness(point):
             return (point.X, point.Y, point.return_number,
                     point.number_of_returns,
-                    tuple(v for f in others for v in f(point)))
+                    tuple(f(point) for f in others))
 
         with Reader(fixture(name)) as full:
             want = [witness(p) for p in full]
