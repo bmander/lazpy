@@ -1124,6 +1124,36 @@ class TestWriteArrays:
                 writer.write_arrays({"nonsense": [1, 2, 3]})
 
 
+class TestWriteFrom:
+    """The raw C entry point, which shares its columns with read_into.
+
+    One implementation resolves the caller's (buffer, offset, size) triples
+    for both directions, so what read_into's own tests pin is pinned here
+    too. What is left is the direction itself: this side reads the caller's
+    buffers where read_into writes them.
+    """
+
+    def test_the_columns_go_into_the_point(self):
+        """The direction, over a buffer read_into would refuse.
+
+        `bytes` is immutable, so the view over one is read-only: only the
+        side that reads its columns rather than filling them can take it.
+        """
+        buf = io.BytesIO()
+        with Writer(buf, 1) as writer:
+            writer._writer.write_from([(struct.pack("=3i", 10, 20, 30),
+                                        0, 4)], 3)
+
+        buf.seek(0)
+        with Reader(buf) as reader:
+            assert [point.X for point in reader] == [10, 20, 30]
+
+    def test_it_rejects_a_short_column(self):
+        with Writer(io.BytesIO(), 1) as writer:
+            with pytest.raises(ValueError, match="shorter than the point"):
+                writer._writer.write_from([(bytes(4 * 4), 0, 4)], 5)
+
+
 class TestKeepingPosition:
     """The save/seek/restore every out-of-band read and patch goes through.
 
