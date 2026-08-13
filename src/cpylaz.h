@@ -117,6 +117,9 @@ typedef enum {
  * One column: where the field sits in the point, and where the caller keeps
  * it. `field` is fixed for the life of the call -- the point and its
  * extra-bytes buffer are reused, not reallocated -- so only `column` moves.
+ *
+ * Spelled out here rather than kept private because columns_step below copies
+ * through it, and that has to be inline.
  */
 typedef struct {
     U8 *field;
@@ -159,8 +162,28 @@ BOOL columns_open(LazPoint *point, U8 *extra, U32 num_extra, PyObject *targets,
 /* Releases the views and the arrays, and leaves `c` as an unopened one. */
 void columns_close(Columns *c);
 
-/* One point's worth, whichever way the open said, advancing every column. */
-void columns_step(Columns *c);
+/*
+ * One point's worth, whichever way the open said, advancing every column.
+ *
+ * Inline where the other two are not, because this is the innermost statement
+ * of both bulk loops -- once per point, where they run once per call. Out of
+ * line it would be a call per point on whichever side did not hold the body,
+ * which is the one thing the two copies were buying. `dir` does not change
+ * for the life of the call, so a compiler that can see this lifts the test
+ * out of the loop.
+ */
+static inline void columns_step(Columns *c)
+{
+    Py_ssize_t i;
+    for (i = 0; i < c->n; i++) {
+        Column *col = &c->cols[i];
+        if (c->dir == COLUMNS_INTO_POINT)
+            memcpy(col->field, col->column, (size_t)col->size);
+        else
+            memcpy(col->column, col->field, (size_t)col->size);
+        col->column += col->size;             /* on to this column's next */
+    }
+}
 
 PointObject *point_alloc(PyTypeObject *type);
 

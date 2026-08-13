@@ -651,10 +651,10 @@ static PyObject *Reader_read_within(ReaderObject *self, PyObject *args)
 /* ------------------------------------------------ columns, both directions */
 
 /*
- * The resolution and the copy behind read_into and write_from alike; declared
- * in cpylaz.h, which is where this file's other writer-facing helpers are
- * announced too. Both entry points keep their own loop and their own error
- * handling -- only the buffers are shared.
+ * The buffer resolution behind read_into and write_from alike, declared in
+ * cpylaz.h as this file's other writer-facing helpers are. Both entry points
+ * keep their own loop and their own error handling -- only the buffers, and
+ * the copy through them, are shared.
  */
 
 void columns_close(Columns *c)
@@ -745,18 +745,7 @@ BOOL columns_open(LazPoint *point, U8 *extra, U32 num_extra, PyObject *targets,
     return LAZ_FALSE;
 }
 
-void columns_step(Columns *c)
-{
-    Py_ssize_t i;
-    for (i = 0; i < c->n; i++) {
-        Column *col = &c->cols[i];
-        if (c->dir == COLUMNS_INTO_POINT)
-            memcpy(col->field, col->column, (size_t)col->size);
-        else
-            memcpy(col->column, col->field, (size_t)col->size);
-        col->column += col->size;             /* on to this column's next */
-    }
-}
+/* columns_step is inline in cpylaz.h -- the one of the three run per point. */
 
 /*
  * Decodes `count` points straight into caller-owned buffers, one per field.
