@@ -428,6 +428,66 @@ class TestSelectiveDecompression:
         # Z never decodes, so it keeps the chunk's first point's value
         assert len(zs) < 10
 
+    # POINT14's eight skippable layers, with the flag that drops each and the
+    # fields it -- and only it -- decodes. The legacy copies travel with the
+    # extended ones: the same layer writes both.
+    POINT14_LAYERS = {
+        "Z": (Selective.Z, lambda p: (p.Z,)),
+        "classification": (Selective.CLASSIFICATION,
+                           lambda p: (p.classification,
+                                      p.extended_classification)),
+        "flags": (Selective.FLAGS,
+                  lambda p: (p.edge_of_flight_line, p.scan_direction_flag,
+                             p.extended_classification_flags,
+                             p.synthetic_flag, p.keypoint_flag,
+                             p.withheld_flag)),
+        "intensity": (Selective.INTENSITY, lambda p: (p.intensity,)),
+        "scan_angle": (Selective.SCAN_ANGLE,
+                       lambda p: (p.scan_angle_rank, p.extended_scan_angle)),
+        "user_data": (Selective.USER_DATA, lambda p: (p.user_data,)),
+        "point_source": (Selective.POINT_SOURCE,
+                         lambda p: (p.point_source_ID,)),
+        "gps_time": (Selective.GPS_TIME, lambda p: (p.gps_time,)),
+    }
+
+    @pytest.mark.parametrize("name", ["pt6_v3.laz", "pt6_v4.laz"])
+    @pytest.mark.parametrize("layer", sorted(POINT14_LAYERS))
+    def test_dropping_a_point14_layer_costs_only_that_layer(self, layer, name):
+        """Each POINT14 layer is skippable on its own, and skipping one
+        moves nothing else.
+
+        p14_create_and_init does two things: it builds each layer's models,
+        which #101 put behind `requested`, and it seeds last_item, which is
+        what p14_read hands back for every layer it never decodes. Only the
+        first may be skipped. A guard that took the seeding with it would
+        build no models either -- so the allocation test would still pass --
+        and would report the previous chunk's values for the dropped layer.
+        That is issue #73's bug, in this file.
+        """
+        flag, fields = self.POINT14_LAYERS[layer]
+        others = [f for other, (_, f) in self.POINT14_LAYERS.items()
+                  if other != layer]
+
+        def witness(point):
+            return (point.X, point.Y, point.return_number,
+                    point.number_of_returns,
+                    tuple(v for f in others for v in f(point)))
+
+        with Reader(fixture(name)) as full:
+            want = [witness(p) for p in full]
+        # one pass: iterating a reader resumes where it is, so a second
+        # comprehension here would read an exhausted one and assert nothing
+        got, dropped = [], set()
+        with Reader(fixture(name),
+                    decompress_selective=Selective.ALL & ~flag) as partial:
+            for point in partial:
+                got.append(witness(point))
+                dropped.add(fields(point))
+        assert got == want
+        # never decoded, so it keeps its chunk's first point's value -- per
+        # context, and POINT14 has four
+        assert len(dropped) < 10
+
     @pytest.mark.parametrize("name", ["pt7_v3.laz", "pt8_v4.laz"])
     def test_dropping_colour_leaves_everything_else_alone(self, name):
         """Colour is skippable, and skipping it costs only colour.

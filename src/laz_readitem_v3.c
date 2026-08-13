@@ -239,7 +239,21 @@ static void p14_read_gps_time(Point14v3 *r);
 
 /* Returns LAZ_FALSE if any of the models this context needs could not be
  * allocated. Callers on the read path record that on the item; see
- * LazReadItem.alloc_failed. */
+ * LazReadItem.alloc_failed.
+ *
+ * Each layer's init is behind its `requested` flag: a layer nobody asked for
+ * never decodes, so building its models is pure cost -- once per context, and
+ * again at the head of every chunk, which a seek pays at every jump. The setup
+ * calls stay unguarded because they allocate nothing (laz_symbol_model_setup
+ * only records a model's shape), and leaving every model shaped keeps the
+ * context uniform whether or not a layer is read.
+ *
+ * What the guards must not swallow is the last_item copy at the end: it is
+ * what p14_read hands back for every layer it never decodes, and a chunk that
+ * skipped it would report the previous chunk's values. The per-layer state
+ * beside each init -- last_Z, last_intensity, the gps-time sequence -- is read
+ * only by the decode path it belongs to, so it is outside the guards for
+ * uniformity rather than out of necessity. */
 static BOOL p14_create_and_init(Point14v3 *r, U32 context, const U8 *item)
 {
     Point14Context *c = &r->contexts[context];
@@ -289,28 +303,42 @@ static BOOL p14_create_and_init(Point14v3 *r, U32 context, const U8 *item)
     }
 
     /* Z layer */
-    if (!laz_ic_init_decompressor(&c->ic_Z)) return LAZ_FALSE;
+    if (r->Z.requested && !laz_ic_init_decompressor(&c->ic_Z)) return LAZ_FALSE;
     for (i = 0; i < 8; i++) c->last_Z[i] = P14_Z(item);
 
-    /* classification / flags / user_data layers */
-    if (!laz_bank_reinit(c->m_classification, c->created_cls, 64) ||
-        !laz_bank_reinit(c->m_flags, c->created_flg, 64) ||
+    /* classification / flags / user_data layers. These re-initialise only the
+     * bank entries that exist, and a layer that never decodes never creates
+     * one, so the guards save nothing here -- they are what keeps this one
+     * rule rather than one rule and three exceptions. */
+    if (r->classification.requested &&
+        !laz_bank_reinit(c->m_classification, c->created_cls, 64))
+        return LAZ_FALSE;
+    if (r->flags.requested && !laz_bank_reinit(c->m_flags, c->created_flg, 64))
+        return LAZ_FALSE;
+    if (r->user_data.requested &&
         !laz_bank_reinit(c->m_user_data, c->created_usr, 64))
         return LAZ_FALSE;
 
     /* intensity layer */
-    if (!laz_ic_init_decompressor(&c->ic_intensity)) return LAZ_FALSE;
+    if (r->intensity.requested && !laz_ic_init_decompressor(&c->ic_intensity))
+        return LAZ_FALSE;
     for (i = 0; i < 8; i++) c->last_intensity[i] = P14_INTENSITY(item);
 
-    if (!laz_ic_init_decompressor(&c->ic_scan_angle) ||
+    /* scan_angle and point_source layers, which carry no state of their own:
+     * p14_read predicts each from last_item, seeded below. */
+    if (r->scan_angle.requested && !laz_ic_init_decompressor(&c->ic_scan_angle))
+        return LAZ_FALSE;
+    if (r->point_source.requested &&
         !laz_ic_init_decompressor(&c->ic_point_source_ID))
         return LAZ_FALSE;
 
     /* gps_time layer */
-    if (!laz_symbol_model_init(&c->m_gpstime_multi, NULL) ||
-        !laz_symbol_model_init(&c->m_gpstime_0diff, NULL) ||
-        !laz_ic_init_decompressor(&c->ic_gpstime))
-        return LAZ_FALSE;
+    if (r->gps_time.requested) {
+        if (!laz_symbol_model_init(&c->m_gpstime_multi, NULL) ||
+            !laz_symbol_model_init(&c->m_gpstime_0diff, NULL) ||
+            !laz_ic_init_decompressor(&c->ic_gpstime))
+            return LAZ_FALSE;
+    }
     c->last = 0;
     c->next = 0;
     memset(c->last_gpstime_diff, 0, sizeof(c->last_gpstime_diff));
