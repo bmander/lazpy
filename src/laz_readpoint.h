@@ -39,11 +39,16 @@ typedef struct {
     BOOL layered_las14_compression;
 
     U32 point_size;
-    LazItem *items;             /* owned copy */
     /* Byte offset within a LazPoint that each item decodes into, or -1 for
      * items routed to the caller's extra-bytes buffer. Resolved once at setup
      * rather than per point. */
     I32 item_offsets[LAZ_MAX_ITEMS];
+    /* Where in the caller's extra-bytes buffer each BYTE/BYTE14 item begins,
+     * for the items above whose offset is -1. A layout may carry more than one
+     * such item -- num_extra_bytes is their total, which is what sizes the
+     * buffer -- and without a start each of them would be handed the same
+     * pointer and overwrite the last. */
+    U32 item_extra_offsets[LAZ_MAX_ITEMS];
     /* True for point formats 6-10; see laz_readpoint_init_point. */
     BOOL has_point14;
     /* Total size of the BYTE/BYTE14 items, i.e. how large the caller's

@@ -207,6 +207,20 @@ static int Writer_tp_init(WriterObject *self, PyObject *args, PyObject *kwds)
     return 0;
 }
 
+/*
+ * Whether this writer can still be written to, raising if it cannot.
+ *
+ * The mirror of reader_ready() in cpylaz_reader.c. Everything that reaches the
+ * point writer has to ask, because done() spends the writer and every call
+ * after it has to refuse rather than act -- see Writer_done for why.
+ */
+static BOOL writer_ready(WriterObject *self)
+{
+    if (self->ready) return LAZ_TRUE;
+    PyErr_SetString(PyExc_ValueError, "writer is closed");
+    return LAZ_FALSE;
+}
+
 /* As reader_error: the file object's own exception first, then the core's. */
 static PyObject *writer_error(WriterObject *self)
 {
@@ -309,10 +323,7 @@ static PyObject *Writer_write(WriterObject *self, PyObject *arg)
 {
     int taken;
 
-    if (!self->ready) {
-        PyErr_SetString(PyExc_ValueError, "writer is closed");
-        return NULL;
-    }
+    if (!writer_ready(self)) return NULL;
 
     if (PyObject_TypeCheck(arg, &Point_Type)) {
         taken = writer_take_point(self, (PointObject *)arg);
@@ -452,10 +463,7 @@ static PyObject *Writer_write_from(WriterObject *self, PyObject *args)
     BOOL ok = LAZ_TRUE;
 
     if (!PyArg_ParseTuple(args, "On", &targets, &count)) return NULL;
-    if (!self->ready) {
-        PyErr_SetString(PyExc_ValueError, "writer is closed");
-        return NULL;
-    }
+    if (!writer_ready(self)) return NULL;
     if (count < 0) {
         PyErr_SetString(PyExc_ValueError, "count must not be negative");
         return NULL;
@@ -494,20 +502,14 @@ static PyObject *Writer_write_from(WriterObject *self, PyObject *args)
 
 static PyObject *Writer_chunk(WriterObject *self, PyObject *Py_UNUSED(i))
 {
-    if (!self->ready) {
-        PyErr_SetString(PyExc_ValueError, "writer is closed");
-        return NULL;
-    }
+    if (!writer_ready(self)) return NULL;
     if (!laz_writepoint_chunk(&self->wp)) return writer_error(self);
     Py_RETURN_NONE;
 }
 
 static PyObject *Writer_done(WriterObject *self, PyObject *Py_UNUSED(i))
 {
-    if (!self->ready) {
-        PyErr_SetString(PyExc_ValueError, "writer is closed");
-        return NULL;
-    }
+    if (!writer_ready(self)) return NULL;
     /* whatever happens the writer is spent: a second chunk table would be
      * appended to a file that already has one */
     self->ready = LAZ_FALSE;

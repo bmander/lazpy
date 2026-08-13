@@ -67,9 +67,9 @@ def test_a_compatibility_file_reads_as_the_las_14_file_it_stands_in(name):
         assert reader.num_extra_bytes == f.extra
         # the hidden bytes are gone and the wider LAS 1.4 fields are there
         assert header_field(data, "point_data_record_length") == (
-            _POINT_FORMATS[f.legacy][0] + f.extra + f.hidden)
+            _POINT_FORMATS[f.legacy].size + f.extra + f.hidden)
         assert header["point_data_record_length"] == (
-            _POINT_FORMATS[f.upgraded][0] + f.extra)
+            _POINT_FORMATS[f.upgraded].size + f.extra)
         # the header grows by exactly the tables LAS 1.4 has and 1.2/1.3 do not
         grew = _header_size(4) - _header_size(f.minor)
         assert header["header_size"] == _header_size(4)
@@ -327,7 +327,7 @@ def test_the_header_is_the_legacy_one_the_file_wears(name):
     assert header_field(data, "version_minor") == f.minor
     assert header_field(data, "point_data_format_id") & 0x7F == f.legacy
     assert (header_field(data, "point_data_record_length", f.minor) ==
-            _POINT_FORMATS[f.legacy][0] + f.extra + f.hidden)
+            _POINT_FORMATS[f.legacy].size + f.extra + f.hidden)
 
     with Reader(io.BytesIO(data)) as reader:
         assert reader.point_format == f.upgraded

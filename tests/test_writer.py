@@ -11,7 +11,7 @@ from lazpy import (Chunking, Compressor, EXTRA_BYTES_VLR_KEY,
                    extra_bytes_record)
 from lazpy.compat import _extra_bytes_attributes
 from lazpy.headers import (EXTRA_BYTES_ATTRIBUTE_FORMAT, VLR_HEADER_SIZE,
-                           _header_size, unpack_format)
+                           keeping_position, _header_size, unpack_format)
 from helpers import (EXTENDED_POINT_COUNT_OFFSET, LAS14_FORMATS,
                      LEGACY_FORMATS, LEGACY_POINT_COUNT_OFFSET, REFERENCE_HASH,
                      a_record, assert_is_the_file_laszip_wrote, fixture,
@@ -1122,3 +1122,68 @@ class TestWriteArrays:
         with Writer(io.BytesIO(), 1) as writer:
             with pytest.raises(ValueError, match="unknown point field"):
                 writer.write_arrays({"nonsense": [1, 2, 3]})
+
+
+class TestKeepingPosition:
+    """The save/seek/restore every out-of-band read and patch goes through.
+
+    One helper rather than five hand-written copies -- three in Reader, two in
+    Writer -- and the writer's two used to leave out the `finally`, which is
+    the case below that matters: a header patch that raised part way left the
+    caller's file object sitting at offset 0.
+    """
+
+    def test_puts_the_handle_back(self):
+        fp = io.BytesIO(b"0123456789")
+        fp.seek(4)
+        with keeping_position(fp):
+            fp.seek(9)
+            assert fp.read(1) == b"9"
+        assert fp.tell() == 4
+
+    def test_puts_it_back_when_the_body_raises(self):
+        fp = io.BytesIO(b"0123456789")
+        fp.seek(4)
+        with pytest.raises(ZeroDivisionError):
+            with keeping_position(fp):
+                fp.seek(0)
+                1 / 0
+        assert fp.tell() == 4
+
+    def test_yields_where_it_started(self):
+        """So a caller that wants the old position need not tell() twice."""
+        fp = io.BytesIO(b"0123456789")
+        fp.seek(7)
+        with keeping_position(fp) as resume:
+            assert resume == 7
+
+    def test_a_failing_header_patch_leaves_the_file_where_it_was(self):
+        """The writer's own use of it, end to end.
+
+        Two writes land at offset 0: the header at construction, and the patch
+        close() goes back to make once the counts are known. Failing the
+        second is failing the patch and nothing else -- close() writes the
+        chunk table at the end first, and only then seeks back. Without the
+        restore the file object, which may be the caller's, is left at 0.
+        """
+        class RejectsTheSecondHeader(io.BytesIO):
+            seen = 0
+
+            def write(self, data):
+                if self.tell() == 0:
+                    self.seen += 1
+                    if self.seen == 2:
+                        raise OSError("disk full")
+                return super().write(data)
+
+        fp = RejectsTheSecondHeader()
+        writer = Writer(fp, 1)
+        writer.write(Point(X=1, Y=2, Z=3))
+
+        with pytest.raises(OSError):
+            writer.close()
+        # back at the end of everything written -- the chunk table close()
+        # laid down just before seeking to 0. Without the restore it is 0,
+        # since the write raised before moving the handle on.
+        assert fp.tell() == len(fp.getvalue())
+        assert fp.tell() != 0

@@ -1,6 +1,7 @@
 """The vocabulary of a LAS or LAZ file: enumerations, errors, and the
 point formats with the items each is made of."""
 
+from collections import namedtuple
 from enum import Enum, IntEnum
 
 from ._cpylaz import LazError
@@ -145,7 +146,15 @@ class ItemType(IntEnum):
 
 # Point data record sizes for formats 0-10, and which optional items each has.
 # Mirrors LASzip::setup(); anything beyond these sizes is extra bytes.
-_POINT_FORMATS = {
+#
+# Named rather than a bare tuple because the callers outside this module want
+# one field each -- the record size, or whether the format is an extended one
+# -- and reached for it by index, so a column inserted here would have gone
+# unnoticed until something read the wrong one.
+_PointFormat = namedtuple("_PointFormat",
+                          "size gps_time rgb nir wavepacket point14")
+
+_POINT_FORMATS = {n: _PointFormat(*row) for n, row in {
     #  (base_size, gps_time, rgb,   nir,   wavepacket, point14)
     0:  (20,       False,    False, False, False,      False),
     1:  (28,       True,     False, False, False,      False),
@@ -158,7 +167,22 @@ _POINT_FORMATS = {
     8:  (38,       False,    True,  True,  False,      True),
     9:  (59,       False,    False, False, True,       True),
     10: (67,       False,    True,  True,  True,       True),
-}
+}.items()}
+
+
+def _point_format(point_format):
+    """The layout of `point_format`, or the one refusal there is for one.
+
+    Every caller that looks a format up wants the same words for a format
+    there is no layout for, and used to spell them itself -- two copies of the
+    message, and a third caller that defaulted the lookup instead so that a
+    format it could not describe reached the next line as a size of zero.
+    """
+    try:
+        return _POINT_FORMATS[point_format]
+    except KeyError:
+        raise UnsupportedFileError(
+            f"unknown point data format {point_format}") from None
 
 
 def items_for_point_format(point_format, point_size):
@@ -170,13 +194,10 @@ def items_for_point_format(point_format, point_size):
 
     Returns a list of ``(type, size, version)`` triples with version 0.
     """
-    try:
-        base, gps, rgb, nir, wave, point14 = _POINT_FORMATS[point_format]
-    except KeyError:
-        raise UnsupportedFileError(
-            f"unknown point data format {point_format}") from None
+    fmt = _point_format(point_format)
+    point14 = fmt.point14
 
-    extra = point_size - base
+    extra = point_size - fmt.size
     if extra < 0:
         raise LazError(
             f"point size {point_size} is {-extra} bytes too small "
@@ -184,15 +205,15 @@ def items_for_point_format(point_format, point_size):
 
     items = [(ItemType.POINT14 if point14 else ItemType.POINT10,
               30 if point14 else 20, 0)]
-    if gps:
+    if fmt.gps_time:
         items.append((ItemType.GPSTIME11, 8, 0))
-    if rgb:
+    if fmt.rgb:
         if point14:
-            items.append((ItemType.RGBNIR14, 8, 0) if nir
+            items.append((ItemType.RGBNIR14, 8, 0) if fmt.nir
                          else (ItemType.RGB14, 6, 0))
         else:
             items.append((ItemType.RGB12, 6, 0))
-    if wave:
+    if fmt.wavepacket:
         items.append((ItemType.WAVEPACKET14 if point14
                       else ItemType.WAVEPACKET13, 29, 0))
     if extra:
@@ -219,8 +240,8 @@ def _min_version_minor(point_format):
     none is a different question -- see :func:`_default_version_minor` -- since
     nobody wants a LAS 1.0 file by accident.
     """
-    _, _, rgb, _, wavepacket, point14 = _POINT_FORMATS[point_format]
-    return 4 if point14 else 3 if wavepacket else 2 if rgb else 0
+    fmt = _point_format(point_format)
+    return (4 if fmt.point14 else 3 if fmt.wavepacket else 2 if fmt.rgb else 0)
 
 
 def _default_version_minor(point_format):

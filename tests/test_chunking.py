@@ -5,7 +5,7 @@ import struct
 import pytest
 
 from lazpy import _cpylaz as cpylaz
-from lazpy import Compressor, Reader, LazError
+from lazpy import Compressor, ItemType, Reader, LazError
 from helpers import compress, las_records, load, rebuilt_header
 
 
@@ -248,3 +248,52 @@ class TestPointWriterErrors:
         writer.write(las_records("pt1_v0.las")[0])
         with pytest.raises(OSError, match="disk is on fire"):
             writer.done()
+
+
+# ---------------------------------------------------------------------------
+# More than one BYTE item.
+#
+# lazpy's own layouts carry at most one -- items_for_point_format appends a
+# single trailing BYTE for whatever a record has past its point format -- but a
+# LASzip VLR is free to declare several, and a reader has to take the layout
+# the file gives it. Each one needs its own start within the caller's
+# extra-bytes buffer; they used to share offset 0 and overwrite each other, in
+# both directions, which decoded silently to the wrong bytes.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("compressor,version", [
+    (Compressor.NONE, 0),
+    (Compressor.POINTWISE, 1),
+    (Compressor.POINTWISE_CHUNKED, 2),
+])
+def test_two_byte_items_keep_their_own_bytes(compressor, version):
+    """Two BYTE items of different widths, round-tripped.
+
+    The widths differ so that aliasing shows up as wrong bytes rather than as
+    a coincidence: at a shared offset the wider item overwrites the narrower,
+    and what comes back is the tail of one padded with zeros.
+    """
+    items = [(int(ItemType.POINT10), 20, version),
+             (int(ItemType.BYTE), 3, version),
+             (int(ItemType.BYTE), 5, version)]
+    record = bytes(range(20)) + b"ABC" + b"VWXYZ"
+
+    fp = io.BytesIO()
+    writer = cpylaz.PointWriter(fp, items, int(compressor))
+    writer.write(record)
+    writer.write(record)
+    writer.done()
+
+    fp.seek(0)
+    reader = cpylaz.PointReader(fp, items, int(compressor))
+    for _ in range(2):
+        assert bytes(reader.read().extra_bytes) == b"ABCVWXYZ"
+
+
+def test_the_extra_bytes_buffer_is_the_sum_of_the_byte_items():
+    """Which is what gives each of them somewhere separate to go."""
+    items = [(int(ItemType.POINT10), 20, 0),
+             (int(ItemType.BYTE), 3, 0),
+             (int(ItemType.BYTE), 5, 0)]
+    reader = cpylaz.PointReader(io.BytesIO(), items, int(Compressor.NONE))
+    assert reader.num_extra_bytes == 8

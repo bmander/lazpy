@@ -1,6 +1,9 @@
 """The on-disk layout: header, VLR and LASzip-record format tables, and
 the functions that read and write anything those tables describe."""
 
+from contextlib import contextmanager
+import io
+
 from ._cpylaz import LazError
 from .formats import LASZIP_VLR_KEY
 from ._utils import (unsigned_int, signed_int, u32_array, u64_array,
@@ -219,6 +222,41 @@ def _can_seek(fp):
     assumed seekable.
     """
     return hasattr(fp, 'seek') and getattr(fp, 'seekable', lambda: True)()
+
+
+@contextmanager
+def keeping_position(fp):
+    """Put `fp` back where it was, whatever happens inside.
+
+    Everything that reads or patches a file away from where it is borrows the
+    handle from someone: the point reader has owned it since the reader was
+    constructed and keeps its own buffer over it, and a writer's file object
+    may be the caller's. Both believe the handle is where they left it, so a
+    read of a record behind the point data, or a rewrite of the header at the
+    end, has to leave it exactly there.
+
+    The restore is in a `finally` because a failure part way is when it
+    matters most: a header patch that raised without it would strand the file
+    at offset 0, and the exception would be reported against a handle in the
+    wrong place.
+    """
+    resume = fp.tell()
+    try:
+        yield resume
+    finally:
+        fp.seek(resume)
+
+
+def _end_of_file(fp):
+    """How long `fp` is, leaving it where it was found.
+
+    Records behind the point data are bounds-checked against this: a record
+    that declares a payload running past the end is truncated rather than
+    whole, and the check is cheaper than the read that would discover it.
+    """
+    with keeping_position(fp):
+        fp.seek(0, io.SEEK_END)
+        return fp.tell()
 
 
 # ---------------------------------------------------------------------------
