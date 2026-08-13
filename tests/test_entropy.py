@@ -11,12 +11,41 @@ from lazpy import LazError
 from lazpy import _cpylaz as cpylaz
 
 
-# The two symbol models, run through one set of assertions. They are the
-# same table of probabilities either way, and the literals below are what
-# LASzip fills it with, so a difference between the two is a difference
+# The two sets of models, run through one set of assertions. They are the
+# same tables of probabilities either way, and the literals below are what
+# LASzip fills them with, so a difference between the two is a difference
 # from LASzip.
 implementations = pytest.mark.parametrize("impl", [models, cpylaz],
                                           ids=["python", "c"])
+
+
+# (encoder, decoder, integer compressor) for each implementation, for the
+# tests that need a coder rather than a bare model. An implementation is
+# taken whole: the Python coder is only ever driven with Python models and
+# the C coder with C ones, which is what leaves the two able to disagree.
+PY_CODER = (encoder.ArithmeticEncoder, encoder.ArithmeticDecoder,
+            compressor.IntegerCompressor)
+C_CODER = (cpylaz.ArithmeticEncoder, cpylaz.ArithmeticDecoder,
+           cpylaz.IntegerCompressor)
+
+coders = pytest.mark.parametrize("coder", [PY_CODER, C_CODER],
+                                 ids=["python", "c"])
+
+
+def bit_model_type(coder):
+    """The bit model belonging to this implementation.
+
+    A symbol model comes from the coder itself, through create_symbol_model,
+    so it is always the right one; a bit model has no such hook, and taking
+    the C one for both would put the same model under both coders and leave
+    nothing for them to disagree about.
+    """
+    return (cpylaz.ArithmeticBitModel if coder is C_CODER
+            else models.ArithmeticBitModel)
+
+
+def bit_model_for(coder):
+    return bit_model_type(coder)()
 
 
 @implementations
@@ -108,25 +137,16 @@ class TestArithmeticModel:
         assert model.distribution_lookup(7) == 4096
 
 
+@implementations
 class TestArithmeticBitModel:
-    def test_create(self):
-        model = models.ArithmeticBitModel()
+    def test_create(self, impl):
+        model = impl.ArithmeticBitModel()
         assert model is not None
 
         assert model.bit_0_count == 1
         assert model.bit_count == 2
         assert model.bit_0_prob == 4096
         assert model.update_cycle == 4
-        assert model.bits_until_update == 4
-
-
-class TestCArithmeticBitModel:
-    def test_create(self):
-        model = cpylaz.ArithmeticBitModel()
-        assert model is not None
-
-        assert model.bit_0_count == 1
-        assert model.bit_0_prob == 4096
         assert model.bits_until_update == 4
 
 
@@ -146,134 +166,41 @@ file_contents = (
 )
 
 
+@coders
 class TestArithmeticDecoder:
-    def test_create(self):
-        fp = io.BytesIO(file_contents)
-        decoder = encoder.ArithmeticDecoder(fp)
-        assert decoder is not None
 
-        assert repr(decoder) == "ArithmeticDecoder(value=0, length=0)"
+    def test_create(self, coder):
+        """The interval before start(), which the two settle differently.
 
-    def test_start(self):
-        fp = io.BytesIO(file_contents)
-        decoder = encoder.ArithmeticDecoder(fp)
-        decoder.start()
-
-        assert decoder.fp == fp
-        assert decoder.length == 4294967295
-        assert decoder.value == 2908556787
-
-    def test_decode_bit(self):
-        fp = io.BytesIO(file_contents)
-        decoder = encoder.ArithmeticDecoder(fp)
-        m = models.ArithmeticBitModel()
-        decoder.start()
-
-        bits = [
-            1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 0,
-            0, 0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0,
-            0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0,
-            1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0]
-
-        testbits = [int(decoder.decode_bit(m)) for i in range(64)]
-
-        assert bits == testbits
-
-    def test_decode_symbol(self):
-        fp = io.BytesIO(file_contents)
-        decoder = encoder.ArithmeticDecoder(fp)
-        m = models.ArithmeticModel(8, compress=False)
-        m.init()
-        decoder.start()
-
-        symbols = [
-            5, 3, 2, 5, 6, 6, 7, 2, 6, 5, 1, 6, 5, 3, 5, 3,
-            4, 7, 7, 3, 6, 6, 5, 1, 6, 7, 3, 5, 6, 7, 7, 4,
-            6, 6, 5, 6, 7, 6, 1, 5, 7, 6, 5, 5, 6, 7, 7, 6,
-            5, 5, 7, 7, 0, 5, 7, 6, 6, 6, 6, 2, 5, 5, 5, 7]
-
-        test_symbols = [decoder.decode_symbol(m) for i in range(64)]
-
-        assert symbols == test_symbols
-
-    def test_read_bits(self):
-        fp = io.BytesIO(file_contents)
-        decoder = encoder.ArithmeticDecoder(fp)
-        decoder.start()
-
-        assert decoder.read_bits(32) == 3142626653
-
-        fp = io.BytesIO(file_contents)
-        decoder = encoder.ArithmeticDecoder(fp)
-        decoder.start()
-
-        assert decoder.read_bits(1) == 1
-        assert decoder.value == 761073140
-        assert decoder.length == 2147483647
-        assert decoder.read_bits(2) == 1
-        assert decoder.value == 224202229
-        assert decoder.length == 536870911
-        assert decoder.read_bits(3) == 3
-        assert decoder.value == 22875640
-        assert decoder.length == 67108863
-        assert decoder.read_bits(8) == 87
-        assert decoder.value == 17714989
-        assert decoder.length == 67108608
-        assert decoder.read_bits(16) == 17316
-        assert decoder.value == 47281706
-        assert decoder.length == 67043328
-        assert decoder.read_bits(18) == 185418
-        assert decoder.value == 1951836627
-        assert decoder.length == 4278190080
-        assert decoder.read_bits(4) == 7
-        assert decoder.read_bits(8) == 76
-        assert decoder.read_bits(16) == 46932
-        assert decoder.read_bits(32) == 3890320431
-
-    def test_read_int(self):
-        fp = io.BytesIO(file_contents)
-        decoder = encoder.ArithmeticDecoder(fp)
-        decoder.start()
-
-        assert decoder.read_int() == 3142626653
-
-    def test_create_symbol_model(self):
-        fp = io.BytesIO(file_contents)
-        decoder = encoder.ArithmeticDecoder(fp)
-
-        model = decoder.create_symbol_model(8)
-
-        assert model is not None
-        assert model.num_symbols == 8
-
-
-class TestCArithmeticDecoder:
-
-    def test_create(self):
-        """A fresh decoder has the interval start() would give it.
-
-        Not zero: decoding divides by the interval length, so a decoder read
+        The C decoder is born with the one start() would give it, and not
+        with zero: decoding divides by the interval length, so a decoder read
         before it is started -- which only a malformed file arranges -- must
         run out of stream rather than divide by zero. See laz_decoder_setup.
+        The Python decoder is born empty and answers the same question the
+        other way, by refusing to decode until start() has filled it.
         """
-        fp = io.BytesIO()
-        decoder = cpylaz.ArithmeticDecoder(fp)
-        assert decoder.length == 0xFFFFFFFF
-        assert decoder.value == 0
-
-        assert repr(decoder) == "ArithmeticDecoder(value=0, length=4294967295)"
-
-    def test_start(self):
         fp = io.BytesIO(file_contents)
-        decoder = cpylaz.ArithmeticDecoder(fp)
+        decoder = coder[1](fp)
+        assert decoder is not None
+
+        length = 0xFFFFFFFF if coder is C_CODER else 0
+        assert decoder.value == 0
+        assert decoder.length == length
+        assert repr(decoder) == f"ArithmeticDecoder(value=0, length={length})"
+
+    def test_start(self, coder):
+        fp = io.BytesIO(file_contents)
+        decoder = coder[1](fp)
         decoder.start()
+
+        assert decoder.fp is fp
         assert decoder.length == 4294967295
         assert decoder.value == 2908556787
 
-    def test_decode_bit(self):
+    def test_decode_bit(self, coder):
         fp = io.BytesIO(file_contents)
-        decoder = cpylaz.ArithmeticDecoder(fp)
-        m = cpylaz.ArithmeticBitModel()
+        decoder = coder[1](fp)
+        m = bit_model_for(coder)
         decoder.start()
 
         bits = [
@@ -286,10 +213,10 @@ class TestCArithmeticDecoder:
 
         assert bits == testbits
 
-    def test_decode_symbol(self):
+    def test_decode_symbol(self, coder):
         fp = io.BytesIO(file_contents)
-        decoder = cpylaz.ArithmeticDecoder(fp)
-        m = cpylaz.ArithmeticModel(8, False)
+        decoder = coder[1](fp)
+        m = decoder.create_symbol_model(8)
         m.init()
         decoder.start()
 
@@ -303,15 +230,15 @@ class TestCArithmeticDecoder:
 
         assert symbols == test_symbols
 
-    def test_read_bits(self):
+    def test_read_bits(self, coder):
         fp = io.BytesIO(file_contents)
-        decoder = cpylaz.ArithmeticDecoder(fp)
+        decoder = coder[1](fp)
         decoder.start()
 
         assert decoder.read_bits(32) == 3142626653
 
         fp = io.BytesIO(file_contents)
-        decoder = cpylaz.ArithmeticDecoder(fp)
+        decoder = coder[1](fp)
         decoder.start()
 
         assert decoder.read_bits(1) == 1
@@ -337,16 +264,16 @@ class TestCArithmeticDecoder:
         assert decoder.read_bits(16) == 46932
         assert decoder.read_bits(32) == 3890320431
 
-    def test_read_int(self):
+    def test_read_int(self, coder):
         fp = io.BytesIO(file_contents)
-        decoder = cpylaz.ArithmeticDecoder(fp)
+        decoder = coder[1](fp)
         decoder.start()
 
         assert decoder.read_int() == 3142626653
 
-    def test_create_symbol_model(self):
+    def test_create_symbol_model(self, coder):
         fp = io.BytesIO(file_contents)
-        decoder = cpylaz.ArithmeticDecoder(fp)
+        decoder = coder[1](fp)
 
         model = decoder.create_symbol_model(8)
 
@@ -354,11 +281,12 @@ class TestCArithmeticDecoder:
         assert model.num_symbols == 8
 
 
+@coders
 class TestIntegerCompressor:
-    def test_create(self):
+    def test_create(self, coder):
         fp = io.BytesIO()
-        dec = cpylaz.ArithmeticDecoder(fp)
-        ic = compressor.IntegerCompressor(dec)
+        dec = coder[1](fp)
+        ic = coder[2](dec)
         assert ic is not None
 
         assert ic.dec is dec
@@ -371,58 +299,14 @@ class TestIntegerCompressor:
         ic.init_decompressor()
 
         assert ic.get_m_bits(0).num_symbols == 17
-        assert type(ic.get_corrector(0)) == cpylaz.ArithmeticBitModel
+        assert type(ic.get_corrector(0)) is bit_model_type(coder)
         assert ic.get_corrector(1).num_symbols == 2
 
-    def test_decompress(self):
+    def test_decompress(self, coder):
         fp = io.BytesIO(file_contents)
-        dec = encoder.ArithmeticDecoder(fp)
+        dec = coder[1](fp)
         dec.start()
-        ic = compressor.IntegerCompressor(dec)
-
-        ic.init_decompressor()
-
-        assert ic.decompress(0) == 1051
-        assert ic.k == 11
-        assert ic.decompress(1051) == 998
-        assert ic.k == 6
-        assert ic.decompress(998) == 997
-        assert ic.k == 1
-        assert ic.decompress(997) == 865
-        assert ic.k == 8
-        assert ic.decompress(865) == 64006
-        assert ic.k == 12
-        assert ic.decompress(64006) == 64001
-        assert ic.k == 3
-        assert ic.decompress(64001) == 64027
-        assert ic.k == 5
-
-
-class TestCIntegerCompressor:
-    def test_create(self):
-        fp = io.BytesIO()
-        dec = cpylaz.ArithmeticDecoder(fp)
-        ic = cpylaz.IntegerCompressor(dec)
-        assert ic is not None
-
-        assert ic.dec is dec
-        assert ic.enc is None
-        assert ic.bits == 16
-        assert ic.contexts == 1
-        assert ic.bits_high == 8
-        assert ic.range == 0
-
-        ic.init_decompressor()
-
-        assert ic.get_m_bits(0).num_symbols == 17
-        assert type(ic.get_corrector(0)) == cpylaz.ArithmeticBitModel
-        assert ic.get_corrector(1).num_symbols == 2
-
-    def test_decompress(self):
-        fp = io.BytesIO(file_contents)
-        dec = cpylaz.ArithmeticDecoder(fp)
-        dec.start()
-        ic = cpylaz.IntegerCompressor(dec)
+        ic = coder[2](dec)
 
         ic.init_decompressor()
 
@@ -462,15 +346,6 @@ class TestCIntegerCompressor:
 # nothing here can check at all.
 # ---------------------------------------------------------------------------
 
-# (encoder, decoder, integer compressor) for each implementation
-PY_CODER = (encoder.ArithmeticEncoder, encoder.ArithmeticDecoder,
-            compressor.IntegerCompressor)
-C_CODER = (cpylaz.ArithmeticEncoder, cpylaz.ArithmeticDecoder,
-           cpylaz.IntegerCompressor)
-
-coders = pytest.mark.parametrize("coder", [PY_CODER, C_CODER],
-                                 ids=["python", "c"])
-
 
 def encode(coder, encode_into):
     """Run encode_into(enc) against a fresh encoder and return the bytes."""
@@ -486,18 +361,6 @@ def decoder_for(coder, data):
     dec = coder[1](io.BytesIO(data))
     dec.start()
     return dec
-
-
-def bit_model_for(coder):
-    """The bit model belonging to this implementation.
-
-    A symbol model comes from the coder itself, through create_symbol_model,
-    so it is always the right one; a bit model has no such hook, and taking
-    the C one for both would put the same model under both coders and leave
-    nothing for them to disagree about.
-    """
-    return (cpylaz.ArithmeticBitModel if coder is C_CODER
-            else models.ArithmeticBitModel)()
 
 
 def pseudorandom(count, modulus, seed=1):
@@ -624,7 +487,7 @@ class TestArithmeticEncoder:
         def encode_into(enc):
             m = enc.create_symbol_model(59)
             m.init()
-            bit_model = cpylaz.ArithmeticBitModel()
+            bit_model = bit_model_for(coder)
             for s in symbols:
                 enc.encode_symbol(m, s)
                 enc.encode_bit(bit_model, s & 1)
@@ -633,7 +496,7 @@ class TestArithmeticEncoder:
         dec = decoder_for(coder, encode(coder, encode_into))
         m = dec.create_symbol_model(59)
         m.init()
-        bit_model = cpylaz.ArithmeticBitModel()
+        bit_model = bit_model_for(coder)
         for s in symbols:
             assert dec.decode_symbol(m) == s
             assert dec.decode_bit(bit_model) == s & 1
