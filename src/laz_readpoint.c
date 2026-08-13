@@ -365,6 +365,116 @@ static BOOL init_dec(LazReadPoint *rp)
     return LAZ_TRUE;
 }
 
+/*
+ * Leave the chunk just finished and open the next, which is where the decoder
+ * restarts and the chunk table either checks out or grows.
+ *
+ * Once per chunk, where the read below is once per point -- and the first call
+ * of a file opens chunk zero without leaving anything, which is what
+ * point_start being 0 says.
+ */
+static BOOL open_next_chunk(LazReadPoint *rp)
+{
+    if (rp->point_start != 0) {
+        laz_decoder_done(&rp->dec);
+        rp->current_chunk++;
+        /* if the table says where this chunk starts, verify we are there */
+        if (rp->current_chunk < rp->tabled_chunks) {
+            I64 here = laz_stream_tell(rp->instream);
+            if (rp->chunk_starts[rp->current_chunk] != here) {
+                rp->current_chunk--;
+                set_error(rp, "chunk with index %u is corrupt", rp->current_chunk);
+                return LAZ_FALSE;
+            }
+        }
+    }
+    if (!init_dec(rp)) return LAZ_FALSE;
+
+    if (rp->current_chunk == rp->tabled_chunks) {
+        /* no or incomplete chunk table: build it as we go */
+        if (rp->current_chunk >= rp->number_chunks) {
+            I64 *grown;
+            rp->number_chunks += 256;
+            grown = (I64 *)realloc(rp->chunk_starts,
+                                   sizeof(I64) * ((U64)rp->number_chunks + 1));
+            if (!grown) { set_error(rp, "out of memory"); return LAZ_FALSE; }
+            rp->chunk_starts = grown;
+        }
+        rp->chunk_starts[rp->tabled_chunks] = rp->point_start;
+        rp->tabled_chunks++;
+    } else if (chunk_is_tabled(rp, rp->current_chunk)) {
+        rp->chunk_size = (U32)(rp->chunk_totals[rp->current_chunk + 1] -
+                               rp->chunk_totals[rp->current_chunk]);
+    }
+    rp->chunk_count = 0;
+    return LAZ_TRUE;
+}
+
+/*
+ * The first point of a chunk, which is stored raw and seeds the predictors the
+ * compressed readers go on to use. Reading it is what hands those readers
+ * their starting point, so it is also where they are initialised and where the
+ * decoder is started.
+ *
+ * Layered compression puts the layer sizes between the raw point and the
+ * layers themselves, and leaves the decoder carrying only the stream -- the
+ * layers have entropy coders of their own.
+ */
+static BOOL read_chunk_first_point(LazReadPoint *rp, U8 **dst, U32 *context)
+{
+    U32 i;
+
+    for (i = 0; i < rp->num_readers; i++) {
+        rp->readers_raw[i]->read(rp->readers_raw[i], dst[i], context);
+    }
+    if (rp->layered_las14_compression) {
+        laz_decoder_init(&rp->dec, rp->instream, LAZ_FALSE);
+        /* point count of this chunk, then every layer's byte count */
+        (void)laz_stream_get32(rp->instream);
+        for (i = 0; i < rp->num_readers; i++) {
+            if (!rp->readers_compressed[i]->chunk_sizes(rp->readers_compressed[i])) {
+                set_error(rp, "reading layer sizes of chunk %u failed", rp->current_chunk);
+                return LAZ_FALSE;
+            }
+        }
+    }
+    for (i = 0; i < rp->num_readers; i++) {
+        if (!rp->readers_compressed[i]->init(rp->readers_compressed[i], dst[i], context)) {
+            set_error(rp, "initialising chunk %u failed", rp->current_chunk);
+            return LAZ_FALSE;
+        }
+    }
+    if (!rp->layered_las14_compression)
+        laz_decoder_init(&rp->dec, rp->instream, LAZ_TRUE);
+
+    rp->readers = rp->readers_compressed;
+    return LAZ_TRUE;
+}
+
+/* Whether the point that just decoded came out of the stream the file has,
+ * rather than off the end of it. A layered reader that ran out of one of its
+ * layers means the chunk is corrupt, not that the point decoded to zeros. */
+static BOOL point_is_whole(LazReadPoint *rp)
+{
+    U32 i;
+
+    if (laz_stream_eof(rp->instream)) {
+        set_error(rp, "end-of-file during chunk with index %u", rp->current_chunk);
+        return LAZ_FALSE;
+    }
+    if (rp->layered_las14_compression && rp->readers == rp->readers_compressed) {
+        for (i = 0; i < rp->num_readers; i++) {
+            LazReadItem *rd = rp->readers_compressed[i];
+            if (rd->overran && rd->overran(rd)) {
+                set_error(rp, "chunk with index %u is corrupt (layer truncated)",
+                          rp->current_chunk);
+                return LAZ_FALSE;
+            }
+        }
+    }
+    return LAZ_TRUE;
+}
+
 BOOL laz_readpoint_read(LazReadPoint *rp, LazPoint *point, U8 *extra_bytes)
 {
     U32 i;
@@ -389,51 +499,19 @@ BOOL laz_readpoint_read(LazReadPoint *rp, LazPoint *point, U8 *extra_bytes)
          * restart at the boundaries the file really has -- every point from
          * the first of them on comes back wrong, with nothing raised.
          *
-         * Asked here rather than where a chunk is opened, because a seek
-         * opens one itself and then reading takes neither branch. Where the
-         * boundaries are fixed the table is rebuilt while reading instead,
-         * which recovers such a file completely; adaptive boundaries are not
-         * recoverable, which is why the file was asked to state them.
+         * Asked here rather than in open_next_chunk, because a seek opens one
+         * itself and then reading takes neither branch. Where the boundaries
+         * are fixed the table is rebuilt while reading instead, which recovers
+         * such a file completely; adaptive boundaries are not recoverable,
+         * which is why the file was asked to state them.
          */
         if (rp->chunk_totals && !chunk_is_tabled(rp, rp->current_chunk)) {
             set_error(rp, "chunk table gives no size for chunk %u",
                       rp->current_chunk);
             return LAZ_FALSE;
         }
-        if (rp->chunk_count == rp->chunk_size) {
-            if (rp->point_start != 0) {
-                laz_decoder_done(&rp->dec);
-                rp->current_chunk++;
-                /* if the table says where this chunk starts, verify we are there */
-                if (rp->current_chunk < rp->tabled_chunks) {
-                    I64 here = laz_stream_tell(rp->instream);
-                    if (rp->chunk_starts[rp->current_chunk] != here) {
-                        rp->current_chunk--;
-                        set_error(rp, "chunk with index %u is corrupt", rp->current_chunk);
-                        return LAZ_FALSE;
-                    }
-                }
-            }
-            if (!init_dec(rp)) return LAZ_FALSE;
-
-            if (rp->current_chunk == rp->tabled_chunks) {
-                /* no or incomplete chunk table: build it as we go */
-                if (rp->current_chunk >= rp->number_chunks) {
-                    I64 *grown;
-                    rp->number_chunks += 256;
-                    grown = (I64 *)realloc(rp->chunk_starts,
-                                           sizeof(I64) * ((U64)rp->number_chunks + 1));
-                    if (!grown) { set_error(rp, "out of memory"); return LAZ_FALSE; }
-                    rp->chunk_starts = grown;
-                }
-                rp->chunk_starts[rp->tabled_chunks] = rp->point_start;
-                rp->tabled_chunks++;
-            } else if (chunk_is_tabled(rp, rp->current_chunk)) {
-                rp->chunk_size = (U32)(rp->chunk_totals[rp->current_chunk + 1] -
-                                       rp->chunk_totals[rp->current_chunk]);
-            }
-            rp->chunk_count = 0;
-        }
+        if (rp->chunk_count == rp->chunk_size && !open_next_chunk(rp))
+            return LAZ_FALSE;
         rp->chunk_count++;
 
         if (rp->readers) {
@@ -447,38 +525,8 @@ BOOL laz_readpoint_read(LazReadPoint *rp, LazPoint *point, U8 *extra_bytes)
                     return LAZ_FALSE;
                 }
             }
-        } else {
-            /* first point of a chunk is stored raw and seeds the predictors */
-            for (i = 0; i < rp->num_readers; i++) {
-                rp->readers_raw[i]->read(rp->readers_raw[i], dst[i], &context);
-            }
-            if (rp->layered_las14_compression) {
-                /* for layered compression the decoder only carries the stream */
-                laz_decoder_init(&rp->dec, rp->instream, LAZ_FALSE);
-                /* point count of this chunk, then every layer's byte count */
-                (void)laz_stream_get32(rp->instream);
-                for (i = 0; i < rp->num_readers; i++) {
-                    if (!rp->readers_compressed[i]->chunk_sizes(rp->readers_compressed[i])) {
-                        set_error(rp, "reading layer sizes of chunk %u failed", rp->current_chunk);
-                        return LAZ_FALSE;
-                    }
-                }
-                for (i = 0; i < rp->num_readers; i++) {
-                    if (!rp->readers_compressed[i]->init(rp->readers_compressed[i], dst[i], &context)) {
-                        set_error(rp, "initialising chunk %u failed", rp->current_chunk);
-                        return LAZ_FALSE;
-                    }
-                }
-            } else {
-                for (i = 0; i < rp->num_readers; i++) {
-                    if (!rp->readers_compressed[i]->init(rp->readers_compressed[i], dst[i], &context)) {
-                        set_error(rp, "initialising chunk %u failed", rp->current_chunk);
-                        return LAZ_FALSE;
-                    }
-                }
-                laz_decoder_init(&rp->dec, rp->instream, LAZ_TRUE);
-            }
-            rp->readers = rp->readers_compressed;
+        } else if (!read_chunk_first_point(rp, dst, &context)) {
+            return LAZ_FALSE;
         }
     } else {
         for (i = 0; i < rp->num_readers; i++) {
@@ -486,23 +534,7 @@ BOOL laz_readpoint_read(LazReadPoint *rp, LazPoint *point, U8 *extra_bytes)
         }
     }
 
-    if (laz_stream_eof(rp->instream)) {
-        set_error(rp, "end-of-file during chunk with index %u", rp->current_chunk);
-        return LAZ_FALSE;
-    }
-    /* a layered reader that ran off the end of one of its layers means the
-     * chunk is corrupt, not that the point decoded to zeros */
-    if (rp->layered_las14_compression && rp->readers == rp->readers_compressed) {
-        for (i = 0; i < rp->num_readers; i++) {
-            LazReadItem *rd = rp->readers_compressed[i];
-            if (rd->overran && rd->overran(rd)) {
-                set_error(rp, "chunk with index %u is corrupt (layer truncated)",
-                          rp->current_chunk);
-                return LAZ_FALSE;
-            }
-        }
-    }
-    return LAZ_TRUE;
+    return point_is_whole(rp);
 }
 
 /* Which chunk holds point *index*, by bisection over the running totals. The
