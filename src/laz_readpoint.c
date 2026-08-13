@@ -209,27 +209,149 @@ BOOL laz_readpoint_init(LazReadPoint *rp, LazStream *instream)
     return LAZ_TRUE;
 }
 
-static BOOL read_chunk_table(LazReadPoint *rp)
+/*
+ * A table of our own, holding only where the first chunk starts, to be filled
+ * in from the chunk boundaries as reading finds them.
+ *
+ * What a file whose table cannot be read falls back to, from either of the two
+ * ways that happens: a compressor that stopped before writing one, and a table
+ * that would not decode. Room for 256 chunks to begin with; laz_readpoint_read
+ * grows it by as much again whenever it fills.
+ */
+static BOOL start_growable_table(LazReadPoint *rp, I64 chunks_start)
 {
-    I64 chunk_table_start_position;
-    I64 chunks_start;
-    BOOL failed = LAZ_FALSE;
+    rp->number_chunks = 256;
+    rp->chunk_starts = (I64 *)malloc(sizeof(I64) * ((U64)rp->number_chunks + 1));
+    if (!rp->chunk_starts) { set_error(rp, "out of memory"); return LAZ_FALSE; }
+    rp->chunk_starts[0] = chunks_start;
+    rp->tabled_chunks = 1;
+    return LAZ_TRUE;
+}
+
+/*
+ * The chunk table itself: a version and a count, then one delta-coded entry
+ * per chunk, entropy-coded like the points are.
+ *
+ * False means the table is not usable, not that reading has failed -- nothing
+ * here raises, and the stream is left wherever it got to. What it did manage
+ * stands: a count of U32_MAX says not even that was read, and `tabled_chunks`
+ * says how many entries are in `chunk_starts` still holding deltas. That is
+ * what recover_chunk_table() reads to work out how much it can save.
+ */
+static BOOL decode_chunk_table(LazReadPoint *rp, I64 table_start,
+                               I64 chunks_start)
+{
     U32 version, declared, i;
 
-    chunk_table_start_position = (I64)laz_stream_get64(rp->instream);
+    if (!laz_stream_seek(rp->instream, table_start)) return LAZ_FALSE;
+    if (laz_stream_tell(rp->instream) != table_start) return LAZ_FALSE;
+
+    version = laz_stream_get32(rp->instream);
+    if (version != 0) return LAZ_FALSE;
+
+    /*
+     * The count is a u32 out of the file and two arrays are sized from it, so
+     * a corrupt one is a couple of eight-byte-per-chunk mallocs of whatever it
+     * says -- eleven gigabytes each, for one file the fuzzer mutated. A chunk
+     * occupies at least a byte of the point data it describes, so there cannot
+     * be more chunks than there are bytes between the first one and the table
+     * itself.
+     *
+     * Rejected before it is adopted, not after: number_chunks staying U32_MAX
+     * is what tells the recovery no usable count was read, and what keeps it
+     * from leaving a count without the chunk_starts that every later read
+     * indexes.
+     */
+    declared = laz_stream_get32(rp->instream);
+    if ((I64)declared > table_start - chunks_start) return LAZ_FALSE;
+
+    rp->number_chunks = declared;
+    free(rp->chunk_totals); rp->chunk_totals = NULL;
+    free(rp->chunk_starts); rp->chunk_starts = NULL;
+
+    if (rp->chunk_size == U32_MAX) {
+        rp->chunk_totals = (U64 *)malloc(sizeof(U64) * ((U64)rp->number_chunks + 1));
+        if (!rp->chunk_totals) return LAZ_FALSE;
+        rp->chunk_totals[0] = 0;
+    }
+    rp->chunk_starts = (I64 *)malloc(sizeof(I64) * ((U64)rp->number_chunks + 1));
+    if (!rp->chunk_starts) return LAZ_FALSE;
+    rp->chunk_starts[0] = chunks_start;
+    rp->tabled_chunks = 1;
+
+    if (rp->number_chunks > 0) {
+        LazIntCompressor ic;
+        laz_decoder_init(&rp->dec, rp->instream, LAZ_TRUE);
+        laz_ic_setup_dec(&ic, &rp->dec, 32, 2, 8, 0);
+        if (!laz_ic_init_decompressor(&ic)) { laz_ic_free(&ic); return LAZ_FALSE; }
+        for (i = 1; i <= rp->number_chunks; i++) {
+            if (rp->chunk_size == U32_MAX) {
+                rp->chunk_totals[i] = (U64)(U32)laz_ic_decompress(
+                    &ic, (i > 1 ? (I32)(U32)rp->chunk_totals[i - 1] : 0), 0);
+            }
+            rp->chunk_starts[i] = (I64)laz_ic_decompress(
+                &ic, (i > 1 ? (I32)(U32)rp->chunk_starts[i - 1] : 0), 1);
+            rp->tabled_chunks++;
+        }
+        laz_ic_free(&ic);
+        laz_decoder_done(&rp->dec);
+
+        /* the table stores deltas; accumulate into absolute values */
+        for (i = 1; i <= rp->number_chunks; i++) {
+            if (rp->chunk_size == U32_MAX) rp->chunk_totals[i] += rp->chunk_totals[i - 1];
+            rp->chunk_starts[i] += rp->chunk_starts[i - 1];
+            if (rp->chunk_starts[i] <= rp->chunk_starts[i - 1]) return LAZ_FALSE;
+        }
+    }
+    return LAZ_TRUE;
+}
+
+/*
+ * What is left of a table that would not decode.
+ *
+ * Fixed chunk boundaries are recoverable, since a chunk ends where the next
+ * one starts and reading finds those anyway -- so this keeps whichever starts
+ * did decode and warns. Adaptive boundaries are not: they are only knowable
+ * from the table, which is why the file was asked to state them.
+ */
+static BOOL recover_chunk_table(LazReadPoint *rp, I64 chunks_start)
+{
+    U32 i;
+
+    free(rp->chunk_totals);
+    rp->chunk_totals = NULL;
+    if (rp->chunk_size == U32_MAX) {
+        set_error(rp, "adaptive chunk table is corrupt");
+        return LAZ_FALSE;
+    }
+    if (rp->number_chunks == U32_MAX) {
+        /* never even got the chunk count */
+        if (!start_growable_table(rp, chunks_start)) return LAZ_FALSE;
+    } else if (rp->chunk_starts) {
+        /* salvage as many chunk starts as were read */
+        for (i = 1; i < rp->tabled_chunks; i++) {
+            rp->chunk_starts[i] += rp->chunk_starts[i - 1];
+        }
+    }
+    set_warning(rp, "corrupt or missing chunk table");
+    return LAZ_TRUE;
+}
+
+static BOOL read_chunk_table(LazReadPoint *rp)
+{
+    I64 table_start;
+    I64 chunks_start;
+
+    table_start = (I64)laz_stream_get64(rp->instream);
     chunks_start = laz_stream_tell(rp->instream);
 
     /* compressor interrupted before it could write the chunk table? */
-    if ((chunk_table_start_position + 8) == chunks_start) {
+    if ((table_start + 8) == chunks_start) {
         if (rp->chunk_size == U32_MAX) {
             set_error(rp, "compressor was interrupted before writing an adaptive chunk table");
             return LAZ_FALSE;
         }
-        rp->number_chunks = 256;
-        rp->chunk_starts = (I64 *)malloc(sizeof(I64) * (rp->number_chunks + 1));
-        if (!rp->chunk_starts) { set_error(rp, "out of memory"); return LAZ_FALSE; }
-        rp->chunk_starts[0] = chunks_start;
-        rp->tabled_chunks = 1;
+        if (!start_growable_table(rp, chunks_start)) return LAZ_FALSE;
         set_warning(rp, "compressor was interrupted before writing the chunk table");
         return LAZ_TRUE;
     }
@@ -244,101 +366,17 @@ static BOOL read_chunk_table(LazReadPoint *rp)
         return LAZ_TRUE;
     }
 
-    if (chunk_table_start_position == -1) {
+    if (table_start == -1) {
         /* written to a non-seekable stream: the position is at the very end */
         if (!laz_stream_seek_end(rp->instream, 8)) return LAZ_FALSE;
-        chunk_table_start_position = (I64)laz_stream_get64(rp->instream);
+        table_start = (I64)laz_stream_get64(rp->instream);
     }
 
-    do {
-        if (!laz_stream_seek(rp->instream, chunk_table_start_position)) { failed = LAZ_TRUE; break; }
-        if (laz_stream_tell(rp->instream) != chunk_table_start_position) { failed = LAZ_TRUE; break; }
+    if (!decode_chunk_table(rp, table_start, chunks_start) &&
+        !recover_chunk_table(rp, chunks_start))
+        return LAZ_FALSE;
 
-        version = laz_stream_get32(rp->instream);
-        if (version != 0) { failed = LAZ_TRUE; break; }
-
-        /*
-         * The count is a u32 out of the file and two arrays are sized from
-         * it, so a corrupt one is a couple of eight-byte-per-chunk mallocs of
-         * whatever it says -- eleven gigabytes each, for one file the fuzzer
-         * mutated. A chunk occupies at least a byte of the point data it
-         * describes, so there cannot be more chunks than there are bytes
-         * between the first one and the table itself.
-         *
-         * Rejected before it is adopted, not after: number_chunks staying
-         * U32_MAX is what tells the recovery below that no usable count was
-         * read, and what keeps it from leaving a count without the
-         * chunk_starts that every later read indexes.
-         */
-        declared = laz_stream_get32(rp->instream);
-        if ((I64)declared > chunk_table_start_position - chunks_start) {
-            failed = LAZ_TRUE;
-            break;
-        }
-        rp->number_chunks = declared;
-        free(rp->chunk_totals); rp->chunk_totals = NULL;
-        free(rp->chunk_starts); rp->chunk_starts = NULL;
-
-        if (rp->chunk_size == U32_MAX) {
-            rp->chunk_totals = (U64 *)malloc(sizeof(U64) * ((U64)rp->number_chunks + 1));
-            if (!rp->chunk_totals) { failed = LAZ_TRUE; break; }
-            rp->chunk_totals[0] = 0;
-        }
-        rp->chunk_starts = (I64 *)malloc(sizeof(I64) * ((U64)rp->number_chunks + 1));
-        if (!rp->chunk_starts) { failed = LAZ_TRUE; break; }
-        rp->chunk_starts[0] = chunks_start;
-        rp->tabled_chunks = 1;
-
-        if (rp->number_chunks > 0) {
-            LazIntCompressor ic;
-            laz_decoder_init(&rp->dec, rp->instream, LAZ_TRUE);
-            laz_ic_setup_dec(&ic, &rp->dec, 32, 2, 8, 0);
-            if (!laz_ic_init_decompressor(&ic)) { laz_ic_free(&ic); failed = LAZ_TRUE; break; }
-            for (i = 1; i <= rp->number_chunks; i++) {
-                if (rp->chunk_size == U32_MAX) {
-                    rp->chunk_totals[i] = (U64)(U32)laz_ic_decompress(
-                        &ic, (i > 1 ? (I32)(U32)rp->chunk_totals[i - 1] : 0), 0);
-                }
-                rp->chunk_starts[i] = (I64)laz_ic_decompress(
-                    &ic, (i > 1 ? (I32)(U32)rp->chunk_starts[i - 1] : 0), 1);
-                rp->tabled_chunks++;
-            }
-            laz_ic_free(&ic);
-            laz_decoder_done(&rp->dec);
-
-            /* the table stores deltas; accumulate into absolute values */
-            for (i = 1; i <= rp->number_chunks; i++) {
-                if (rp->chunk_size == U32_MAX) rp->chunk_totals[i] += rp->chunk_totals[i - 1];
-                rp->chunk_starts[i] += rp->chunk_starts[i - 1];
-                if (rp->chunk_starts[i] <= rp->chunk_starts[i - 1]) { failed = LAZ_TRUE; break; }
-            }
-            if (failed) break;
-        }
-    } while (0);
-
-    if (failed) {
-        free(rp->chunk_totals);
-        rp->chunk_totals = NULL;
-        if (rp->chunk_size == U32_MAX) {
-            set_error(rp, "adaptive chunk table is corrupt");
-            return LAZ_FALSE;
-        }
-        if (rp->number_chunks == U32_MAX) {
-            /* never even got the chunk count */
-            rp->number_chunks = 256;
-            rp->chunk_starts = (I64 *)malloc(sizeof(I64) * ((U64)rp->number_chunks + 1));
-            if (!rp->chunk_starts) { set_error(rp, "out of memory"); return LAZ_FALSE; }
-            rp->chunk_starts[0] = chunks_start;
-            rp->tabled_chunks = 1;
-        } else if (rp->chunk_starts) {
-            /* salvage as many chunk starts as were read */
-            for (i = 1; i < rp->tabled_chunks; i++) {
-                rp->chunk_starts[i] += rp->chunk_starts[i - 1];
-            }
-        }
-        set_warning(rp, "corrupt or missing chunk table");
-    }
-
+    /* the table is off at the end of the file; the points are back here */
     if (!laz_stream_seek(rp->instream, chunks_start)) return LAZ_FALSE;
     return LAZ_TRUE;
 }
