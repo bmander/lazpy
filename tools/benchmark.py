@@ -6,13 +6,14 @@
 
 The fixtures in `testdata/` are 500 points each, so a whole file is one small
 chunk and every adaptive model stays in its most update-heavy early phase.
-Nothing about steady-state decoding can be measured with them. This generates
-a file at a production chunk size instead -- or reads one you already have,
-with `--file` -- and times the paths that matter:
+They cannot measure steady-state decoding at all. This generates a file at a
+production chunk size instead -- or reads one you already have, with `--file`
+-- and times the paths that matter:
 
-    sequential    read() per point, the slowest way out and the most common
+    sequential    read() per point: the slowest way to read a file, and
+                  the most common
     checksum      the same decode with no Python object per point: the floor
-    arrays        the columnar path, which is what a caller should reach for
+    arrays        the columnar path, which a caller should prefer
     seek          random access, which pays a chunk's worth of model setup
                   per jump and so is where per-chunk costs show up
 

@@ -27,20 +27,21 @@ from .crs import read_crs
 # Where each one sits comes from C, through POINT_LAYOUT: the extension takes
 # it from LazPoint with offsetof, so the offsets are stated once, in the file
 # that decides them. Restating them here used to mean that reordering the
-# struct made every array silently wrong, with only a test between that and a
-# released version.
+# struct made every array silently wrong, with only a test standing between
+# that breakage and a release.
 #
-# What stays is what C has no opinion about: the numpy type a field lands in,
-# and how the ones packed into part of a byte come out of it. Types are
-# spelled in native order ('='), because read_into copies the decoded point's
-# bytes straight through and a decoded point is in host order -- see the
-# byte-order note on LazPoint. The sub-byte shifts are host-independent:
-# LazPoint packs those bytes by hand rather than leaving them to the compiler,
-# for exactly this reason.
+# This table keeps only what C has no opinion about: the numpy type a field
+# lands in, and how a field packed into part of a byte comes out of that
+# byte. Types are spelled in native order ('='), because read_into copies the
+# decoded point's bytes straight through and a decoded point is in host order
+# -- see the byte-order note on LazPoint. The sub-byte shifts are
+# host-independent: LazPoint packs those bytes by hand rather than leaving
+# them to the compiler, for exactly this reason.
 #
-# A field's offset is a member's plus how far into it the field starts, which
-# is only ever non-zero for the four colours sharing `rgb`. -1 means the extra
-# bytes instead, which are not part of the struct at all.
+# A field's offset is its member's offset plus how far into that member the
+# field starts; the second term is non-zero only among the four colours
+# sharing `rgb`. An offset of -1 names the extra bytes, which are not part of
+# the struct at all.
 # ---------------------------------------------------------------------------
 
 # the one width C states rather than a numpy dtype implying it
@@ -50,8 +51,8 @@ _Field = namedtuple("_Field", "offset dtype width shift mask",
                     defaults=(1, 0, None))
 
 # Each field as its own column: the member of LazPoint it comes out of, how
-# far into that member it starts, and the rest. `within` is for the two
-# members that hold more than one field end to end -- the three colours and
+# far into that member it starts, and the rest. `within` is for the one
+# member that holds more than one field end to end -- the three colours and
 # the near infrared share `rgb`, as they do on disk.
 _Column = namedtuple("_Column", "member dtype within width shift mask",
                      defaults=(0, 1, 0, None))
@@ -101,8 +102,8 @@ def _array_fields():
     Only the placing comes from C; which numpy type a field lands in, and how
     the ones sharing a byte are unpacked out of it, are numpy's business and
     stay here. The width of a blob is checked against what C says rather than
-    restated, so a wavepacket that grew would be a failure to import rather
-    than a column reading 29 bytes of a longer field.
+    restated, so a wavepacket that grew would raise at import time rather than
+    leave a column reading 29 bytes of a longer field.
     """
     fields = {}
     for name, column in _ARRAY_COLUMNS.items():
@@ -158,8 +159,8 @@ def _fields_for_point_format(point_format, num_extra_bytes):
 
 def _array_field(name, num_extra_bytes):
     """Where *name* lives in a decoded point, for a file with this many extra
-    bytes. Both directions of the array API ask: a column is read out of the
-    same place it is written into."""
+    bytes. Both directions of the array API call this: the reader reads a
+    column out of the same place the writer writes it into."""
     if name == 'extra_bytes':
         if not num_extra_bytes:
             raise ValueError("this file has no extra bytes")
@@ -171,13 +172,14 @@ def _array_field(name, num_extra_bytes):
 
 
 # How far apart two points of a cell may be before the second starts a run of
-# its own. LASinterval's own default, and the same number laz_index.c merges a
-# query's runs by: a gap that small costs a reader the points inside it and
-# saves it a seek. lasindex gives no flag for it, so neither does this.
+# its own. LASinterval's own default, and the same gap laz_index.c uses when
+# merging a query's runs: a gap that small costs a reader the points inside it
+# and saves it a seek. lasindex exposes no flag for it, so lazpy does not
+# either.
 _RUN_GAP = 1000
 
 # What Reader.crs holds before it has been asked for, since None is the answer
-# for a file that names no projection and is worth caching too.
+# for a file that names no projection, and that answer is worth caching too.
 _UNPARSED = object()
 
 
@@ -200,9 +202,9 @@ def _numpy():
 class ExtendedVariableLengthRecord(Mapping):
     """One EVLR, whose payload is read the first time it is asked for.
 
-    Behaves like the dict a regular VLR is: every field of the record header
-    is a key, plus ``offset_to_data`` -- where the payload begins in the file
-    -- and ``data``, the payload itself.
+    Behaves like the dict lazpy hands back for a regular VLR: every field of
+    the record header is a key, plus ``offset_to_data`` -- where the payload
+    begins in the file -- and ``data``, the payload itself.
 
     ``data`` is the one lazy key. An EVLR payload can be enormous -- a
     waveform data packet record can run to gigabytes -- so opening a file
@@ -236,10 +238,11 @@ class ExtendedVariableLengthRecord(Mapping):
     def _read_data(self):
         """The payload, read out from under whoever else is using the file.
 
-        The point reader has owned the file handle since it was constructed and
-        keeps its own buffer over it, so the position has to come back exactly
-        where it was found; it advances the handle only by reading, so what
-        tell() reports is where it believes it is.
+        The point reader has owned the file handle since the reader was
+        constructed and keeps its own buffer over it, so this method must
+        restore the handle to exactly the position it found. The point reader
+        advances the handle only by reading, so tell() reports the position
+        the point reader believes it is at.
         """
         length = self._fields['record_length_after_header']
         try:
@@ -335,8 +338,8 @@ class Reader:
 
     def _setup(self):
         self.header = _read_las_header(self.fp)
-        # before the point reader takes the file over, since this seeks past
-        # the point data and back
+        # before the point reader takes the file over, since reading the
+        # extended records seeks past the point data and back
         records, self._evlr_warning = self._read_evlrs(self.fp, self.header)
         self.header['extended_variable_length_records'] = records
         self.laz_header = _find_laz_header(self.header)
@@ -385,8 +388,8 @@ class Reader:
             compatibility=compatibility,
         )
         # sized by the C core from the item layout, not recomputed here; in
-        # compatibility mode it is what the layout leaves once the hidden LAS
-        # 1.4 fields are taken back out
+        # compatibility mode it is whatever the layout leaves after lazpy
+        # removes the hidden LAS 1.4 fields
         self.num_extra_bytes = self._reader.num_extra_bytes
         if compatibility is not None:
             _upgrade_to_las_14(self.header, compatibility,
@@ -431,8 +434,9 @@ class Reader:
 
         They are keyed by ``(user_id, record_id)``, as the ordinary records
         are: LAS namespaces records by user id, and a bare id collides --
-        LASF_Spec reserves ids 0 to 99 for waveform packet descriptors, so a
-        file with two of them would keep one.
+        LASF_Spec reserves ids 0 to 99 for waveform packet descriptors, ids
+        another user id is free to use for something else entirely, so keying
+        by id alone would let this mapping keep only one of the two records.
 
         A file that declares more records than it holds keeps the ones it does
         hold, and the shortfall is the warning; a malformed record behind the
@@ -489,7 +493,7 @@ class Reader:
         None means there is not a whole record here: either the 60-byte header
         is short or the payload it declares runs past the end of the file. That
         is checked here rather than where the payload is read, so a record that
-        is not all there is left out rather than handed over and found short
+        is incomplete is dropped here rather than handed over and found short
         later. Leaves `fp` on the payload, which is where the next record's
         header begins once the payload is skipped.
         """
@@ -511,8 +515,8 @@ class Reader:
         Everything that touches the points goes through here, so that a
         reader with no file behind it says so in one recognisable way rather
         than letting an internal None surface as whatever the next line
-        happens to do with it. ValueError, and closed-means-closed, are what
-        :class:`Writer` already answers in the same situation.
+        happens to do with it. :class:`Writer` already raises ValueError for a
+        closed writer, and this reader answers the same way.
         """
         if self._reader is None:
             raise ValueError("reader is closed" if self._was_opened
@@ -600,16 +604,16 @@ class Reader:
         """The coordinate reference system the file declares, or None.
 
         A :class:`pyproj.CRS`, read from the file's projection record the
-        first time it is asked for and kept thereafter -- so a reader never
-        asked pays neither the parse nor the import::
+        first time it is asked for and kept thereafter -- so a reader that is
+        never asked pays neither the parse nor the import::
 
             with rasterio.open("dem.tif", "w", crs=reader.crs, ...) as dst:
 
         None means the file said nothing usable: no projection record, one too
-        damaged to read, or a system it names as user-defined. Nothing about a
-        projection is warned about; :mod:`lazpy.crs` says why, and reading this
-        is how a file that has put its coordinates somewhere unexpected is
-        diagnosed.
+        damaged to read, or a system it names as user-defined. lazpy never
+        warns about a projection; :mod:`lazpy.crs` explains why. Read this
+        property to diagnose a file whose coordinates landed somewhere
+        unexpected.
 
         Needs pyproj, which ``pip install lazpy[crs]`` adds; a reader that
         never touches this does not.
@@ -707,8 +711,9 @@ class Reader:
             yield read()
 
     def __iter__(self):
-        """Yield the points from here on, so that iterating a reader something
-        has already read from carries on rather than starting again."""
+        """Yield the points from here on, so that iterating a reader that has
+        already been partly read carries on from where it is rather than
+        starting again."""
         return self.points(self.index)
 
     def __len__(self):
@@ -751,12 +756,13 @@ class Reader:
 
         if record is None:
             # unlike a record the header merely counted, this one was pointed
-            # at: something said an index is here, so a record that is not all
-            # there is worth saying so about
+            # at: the LASzip header said an index is here, so an incomplete
+            # record at that offset is worth raising rather than ignoring
             raise LazError("the record the LASzip header points at for the "
                            "spatial index runs past the end of the file")
-        # the chain is for special records in general rather than for indexes,
-        # so something else sitting there is not an error
+        # the LASzip header's special-record offset points at special records
+        # in general rather than at indexes, so finding something else there
+        # is not an error
         if (record['user_id'], record['record_id']) != LASINDEX_EVLR_KEY:
             return None
         return record['data']
@@ -786,21 +792,22 @@ class Reader:
                             maximum_intervals=-20):
         """Build a spatial index over this file's points, as bytes.
 
-        What ``lasindex`` does, and the other half of the index this reader
-        already knows how to use: the bytes are a ``.lax`` file's whole
-        contents, so writing them beside the cloud is all it takes --
+        What ``lasindex`` does, and the write side of the index this reader
+        already knows how to read: the bytes are a ``.lax`` file's whole
+        contents, so writing them beside the point file is all it takes --
         :meth:`write_spatial_index` does that.
 
         ``cell_size`` is how wide the quadtree's leaves are, in the units the
         coordinates are in; the tree is deep enough to reach it over the area
-        the points cover. ``minimum_points`` and ``maximum_intervals`` are
-        the coarsening: cells holding fewer than that between them merge into
-        their parent, and the runs of point indices merge until at most that
-        many are left -- negative meaning that many per cell, which is how
-        lasindex is usually asked.
+        the points cover. ``minimum_points`` and ``maximum_intervals`` control
+        the coarsening: sibling cells holding fewer than ``minimum_points``
+        between them merge into their parent, and the runs of point indices
+        merge until at most ``maximum_intervals`` remain. A negative
+        ``maximum_intervals`` means that many runs per cell, which is how
+        lasindex is usually invoked.
 
-        Two passes over the points, both in C: where each one falls cannot be
-        settled until the extent of them all is known. The reader is left at
+        Two passes over the points, both in C: lazpy cannot place a point in a
+        cell until it knows the extent of every point. The reader is left at
         the end of the file.
         """
         if not self.num_points:
@@ -849,8 +856,9 @@ class Reader:
 
         Looked for the first time it is asked about rather than when the file
         is opened, so a reader that only ever walks the points pays nothing for
-        it. An index inside the file is preferred to one beside it: it travels
-        with the file, so it is the one that cannot be stale.
+        it. This reader prefers an index inside the file to one beside it,
+        because an internal index travels with the file and so cannot go
+        stale.
 
         An index that is there but unreadable raises rather than being
         ignored. Falling back to a full scan would answer the same question
@@ -877,13 +885,13 @@ class Reader:
         The area is a rectangle ``(min_x, min_y, max_x, max_y)`` or a circle
         ``(center_x, center_y, radius)``, one or the other.
 
-        A pair: the region -- the rectangle, the scale and offset that put a
-        point in it, and the circle, as eleven floats the C side takes as one
-        argument -- and the half-open ``(start, stop)`` spans of point indices
-        to look through. The spans are the index's intervals clamped against
-        the point count, or the whole file where there is no index; clamping
-        here is what keeps the core from needing to know how many points the
-        file claims.
+        Returns a pair. The first element is the region: the rectangle, the
+        scale and offset that put a point in it, and the circle, as eleven
+        floats the C side takes as one argument. The second is the half-open
+        ``(start, stop)`` spans of point indices to look through -- the
+        index's intervals clamped against the point count, or the whole file
+        where there is no index. Clamping here is why the core never needs to
+        know how many points the file claims.
         """
         if (rect is None) == (circle is None):
             raise TypeError("a query is over a rectangle or a circle")
@@ -898,8 +906,9 @@ class Reader:
             center_x, center_y, radius = circle
             if radius < 0:
                 raise ValueError("a circle's radius cannot be negative")
-            # the rectangle goes unread for a circle: the index is asked for
-            # the circle itself, and so is every candidate point
+            # the rectangle goes unread for a circle: lazpy queries the index
+            # with the circle itself, and tests every candidate point against
+            # the circle too
             min_x = min_y = max_x = max_y = 0.0
 
         index = self.spatial_index
@@ -914,9 +923,10 @@ class Reader:
             else:
                 intervals = index.intervals_within_circle(center_x, center_y,
                                                           radius)
-            # an index is data out of a file like any other, and one that
-            # names points this file does not have is not worth decoding
-            # towards
+            # an index is untrusted file data like any other, so lazpy drops
+            # the intervals that begin past the last point rather than
+            # decoding toward points this file does not have, and clamps the
+            # rest against the point count
             spans = [(start, min(end + 1, num_points))
                      for start, end in intervals
                      if start < num_points]
@@ -1078,10 +1088,11 @@ class Reader:
         """Derive the sub-byte fields, and cut every column down to *count*.
 
         The cut is what a rectangle query needs: it sizes its arrays for
-        every candidate, since how many are inside is what the query is for,
-        and does not know the answer until it has read them. A copy rather
-        than a view where most of the array is being dropped, so that a
-        selective query does not go on holding the candidates it rejected.
+        every candidate, because counting the points inside is what the query
+        is for and it cannot know that count until it has read them. A
+        copy rather than a view where most of the array is being dropped, so
+        that a selective query does not go on holding the candidates it
+        rejected.
         """
         for name, f, byte_column in packed:
             column = byte_column[:count] >> f.shift
@@ -1142,9 +1153,9 @@ class Reader:
         return self._finish_columns(out, packed, found)
 
     def _joined(self, names, blocks):
-        """One set of columns from several, without copying where there is
-        only one -- which is every query small enough to fit a block, and so
-        every indexed query over a modest area."""
+        """One set of columns from several, without copying when there is only
+        one block, which is the case for every query small enough to fit a
+        block, and so for every indexed query over a modest area."""
         if len(blocks) == 1:
             return blocks[0]
         if not blocks:

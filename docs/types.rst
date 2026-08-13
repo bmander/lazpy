@@ -1,9 +1,9 @@
-The types they exchange
-=======================
+The types Reader and Writer exchange
+====================================
 
-What :class:`lazpy.Reader` returns and :class:`lazpy.Writer` accepts: the
-point itself, the enumerations that describe a file, and the errors either
-can raise.
+:class:`lazpy.Reader` returns and :class:`lazpy.Writer` accepts the types
+below: the point itself, the enumerations that describe a file, and the
+errors either can raise.
 
 .. currentmodule:: lazpy
 

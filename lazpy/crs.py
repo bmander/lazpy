@@ -7,18 +7,18 @@ the TIFF tags that carry georeferencing; LAS 1.4 replaced it for the extended
 point formats with record 2112, which holds an OGC WKT string. Files in the
 wild carry either, and some carry both.
 
-What both are asked for here is the same thing: the system the coordinates are
-in, as a :class:`pyproj.CRS`. The keys that describe a *user-defined* system
-one parameter at a time -- and the value records, 34736 and 34737, that such a
-description spills into -- are not read, because a CRS assembled from them
-would be a definition rather than a reference to a published one, and nothing
-in a LAS file says the assembly was done right.
+lazpy asks both records the same thing: which system the coordinates are in,
+answered as a :class:`pyproj.CRS`. lazpy does not read the keys that describe a
+*user-defined* system one parameter at a time, nor the value records, 34736
+and 34737, that such a description spills into, because a CRS assembled from
+them would be a definition rather than a reference to a published one, and
+nothing in a LAS file says the assembly was done right.
 
-Nor is anything second-guessed. A file that names an EPSG code in metres while
-its coordinates are plainly in feet, which the ``ProjLinearUnits`` key is the
-usual sign of, gets reported as the code it names; whether the producer meant
-the code's foot-based sibling or made a mistake is a judgement this is in no
-position to make. See issue #91.
+lazpy second-guesses nothing. When a file names an EPSG code in metres while
+its coordinates are plainly in feet -- usually visible in the
+``ProjLinearUnits`` key -- lazpy reports the code the file names. Whether the
+producer meant the code's foot-based sibling or simply made a mistake is a
+judgement lazpy is in no position to make. See issue #91.
 """
 
 from .formats import GEOKEY_DIRECTORY_KEY, WKT_VLR_KEY
@@ -63,10 +63,10 @@ def _pyproj():
 def _geokeys(data):
     """``{key_id: value}`` for the keys a GeoKeyDirectory states inline.
 
-    Keys whose value lives in one of the value records are left out, along
-    with the whole directory if it is too short to hold what it declares --
-    unpack_format reads a short record as zeros rather than refusing it, so
-    the length is checked here.
+    This function skips keys whose value lives in one of the value records,
+    and returns nothing at all for a directory too short to hold what it
+    declares: unpack_format reads a short record as zeros rather than refusing
+    it, so this function checks the length itself.
     """
     if len(data) < _DIRECTORY_SIZE:
         return {}
@@ -79,7 +79,8 @@ def _geokeys(data):
     for _ in range(count):
         entry, offset = unpack_format(GEOKEY_ENTRY_FORMAT, data, offset)
         # a key with its value anywhere but in the entry itself points into
-        # 34736 or 34737, which is a user-defined system being spelled out
+        # 34736 or 34737, which means a user-defined system is being spelled
+        # out
         if entry['tiff_tag_location'] == 0:
             keys[entry['key_id']] = entry['value_offset']
     return keys
@@ -114,21 +115,21 @@ def read_crs(vlrs, evlrs=None):
 
     Both arguments are mappings keyed by ``(user_id, record_id)``, as
     ``header['variable_length_records']`` and its extended counterpart are;
-    passing the second is how a file that keeps its projection behind the
-    point data is read.
+    pass the second to read a file that keeps its projection behind the point
+    data.
 
     The WKT record is preferred over the geokeys wherever both are readable.
     LAS 1.4 says as much for the extended point formats, and a file carrying
     both has usually had the WKT added by the newer tool of the two.
 
-    None means the file said nothing this can use: no projection record, a
+    None means the file said nothing lazpy can use: no projection record, a
     record too short or too damaged to parse, a system named as user-defined,
-    or an EPSG code the PROJ database does not have. Nothing is warned about
-    -- see the module docstring.
+    or an EPSG code the PROJ database does not have. lazpy warns about none
+    of these -- see the module docstring.
 
-    pyproj is wanted whatever the records turn out to say, so that asking a
-    file with no projection is the same call as asking one with a damaged
-    record.
+    This function imports pyproj whatever the records turn out to say, so
+    asking a file with no projection is the same call as asking one with a
+    damaged record.
     """
     pyproj = _pyproj()
     for key, parse in ((WKT_VLR_KEY, _from_wkt),
@@ -164,7 +165,8 @@ def crs_record(crs, wkt=False, description=b''):
     if wkt:
         # LAS calls this record ASCII, but a WKT string out of PROJ has
         # degree signs in it and every reader takes UTF-8, laszip and laspy
-        # included; null-terminated, as the record is defined
+        # included. The string is null-terminated, as the record definition
+        # requires
         key, data = WKT_VLR_KEY, crs.to_wkt().encode('utf-8') + b'\0'
     else:
         key, data = GEOKEY_DIRECTORY_KEY, _directory(crs)

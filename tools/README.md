@@ -8,14 +8,15 @@ the reference hashes are committed.
 Run them on a little-endian host. `lazpy` itself works on either (see the
 byte-order note in the top-level README), and `lazdump --hash` is byte-order
 independent by construction, so the committed hashes are comparable anywhere.
-`mklaz` is not: it fills a LASzip point buffer, which is in host order, with
-values it writes little-endian, and on a big-endian host would emit garbage
-rather than fail. Nobody has needed it there, and `testdata/` is committed.
+`mklaz` is not: it writes little-endian values into a LASzip point buffer that
+is in host order, so on a big-endian host it emits garbage rather than
+failing. Nobody has needed `mklaz` on such a host, and `testdata/` is
+committed, so this is not worth fixing.
 
 The three C and C++ tools below need a LASzip checkout built as a shared
 library. The Python ones need only lazpy: `compare_with_laszip.py` and
 `verify_sweep.py` read what those produce, while `fuzz.py` and `benchmark.py`
-need no reference at all -- what they look for is a crash and a stopwatch.
+need no reference at all: one looks for crashes, the other for elapsed time.
 
 ```bash
 git clone --depth 1 https://github.com/LASzip/LASzip.git
@@ -34,8 +35,8 @@ c++ -O2 -std=c++17 -o mklax  mklax.cpp  -I$LZ/src $INC $LIB
 ## lazdump
 
 Decodes a LAS/LAZ file with LASzip and reports what it got. It asks for LAS 1.4
-compatibility mode, as lazpy always applies it, so a disguised 1.4 file is
-reported as the file it stands in for; ordinary files are unaffected.
+compatibility mode, matching what lazpy always does, so it reports a disguised
+file as the LAS 1.4 file it really is; ordinary files are unaffected.
 
 ```bash
 ./lazdump cloud.laz reference.txt [max_points]   # one text line per point
@@ -44,15 +45,15 @@ reported as the file it stands in for; ordinary files are unaffected.
 ```
 
 `--inside` is laszip's own `laszip_read_inside_point`, and prints an FNV-1a
-hash of the *indices* of the points it selects, then how many there were. The
-indices rather than the points, because which points a rectangle query selects
-is the whole of what a spatial index decides; that every field of every point
-decodes correctly is what `--hash` already says.
+hash of the *indices* of the points it selects, then how many there were. It
+hashes the indices rather than the points because a spatial index decides only
+which points a rectangle query selects, and `--hash` already confirms that
+every field of every point decodes correctly.
 
 It stops at the point count the header states, which
-`laszip_read_inside_point` does not: with no spatial index nothing under it
-knows where the points end, so it decodes past the last one and can hand back
-whatever the bytes behind it happen to say.
+`laszip_read_inside_point` does not: with no spatial index, nothing beneath
+that call knows where the points end, so it decodes past the last one and can
+hand back whatever the bytes behind it happen to say.
 
 ## mklaz
 
@@ -71,16 +72,17 @@ only exists for point types 0-5.
 
 `--compat` writes a LAS 1.4 point type (6-10) in LAS 1.4 compatibility mode: a
 legacy file whose points carry their 1.4-only fields in extra bytes. That path
-goes through the public DLL instead, since compatibility mode is the DLL's --
-it builds the two records describing the disguise and folds each point into it
--- so the item version is whatever the DLL picks and only 0 and 2 are on offer.
+goes through the public DLL instead, because the DLL is what implements
+compatibility mode: it builds the two records describing the disguise and
+rewrites each point into the legacy layout. The item version is therefore
+whatever the DLL picks, and only 0 and 2 are on offer.
 
 The generated points deliberately sweep return numbers, scanner channels,
-classification flags and GPS-time patterns so the rare branches of each coder
-are reached. In compatibility mode they also sweep past what the legacy record
-can hold -- classifications above 31, return numbers above 7, scan angles the
-one-byte rank saturates on -- so the fields that travel in the extra bytes
-carry something.
+classification flags and GPS-time patterns so that each coder's rare branches
+actually run. In compatibility mode they also sweep past what the legacy
+record can hold -- classifications above 31, return numbers above 7, scan
+angles the one-byte rank saturates on -- so the fields that travel in the
+extra bytes hold values other than zero.
 
 ## mklax
 
@@ -92,25 +94,25 @@ work rather than lazpy's.
 ./mklax cloud.laz <cell_size> <minimum_points> <maximum_intervals> [--append]
 ```
 
-Without `--append` it writes the sidecar `cloud.lax`. With it, the index goes
-into the file itself as an extended record and the LASzip VLR is made to point
-at it, which is what `lasindex -append` from LAStools does; laszip's own
-`LASindex::append` is compiled out of the DLL build, so that part is written
-here.
+Without `--append` it writes the sidecar `cloud.lax`. With it, `mklax` writes
+the index into the file itself as an extended record and repoints the LASzip
+VLR at it, matching what `lasindex -append` from LAStools does. laszip compiles
+its own `LASindex::append` out of the DLL build, so `mklax.cpp` implements that
+step itself.
 
-`minimum_points` and `maximum_intervals` are `LASindex::complete`'s: cells
-holding fewer than `minimum_points` between them are merged into their parent,
-and intervals are merged until there are no more than `maximum_intervals` --
-negative meaning that many per cell. laszip's own index creation uses
-`100000, -20` with a cell size of 100, which over a five-hundred-point fixture
-would coarsen the whole tree into a single cell; the values below are chosen so
-the fixtures have a hierarchy in them to test.
+`minimum_points` and `maximum_intervals` are the arguments
+`LASindex::complete` takes: cells holding fewer than `minimum_points` between
+them are merged into their parent, and intervals are merged until there are no
+more than `maximum_intervals` -- negative meaning that many per cell. laszip's
+own index creation uses `100000, -20` with a cell size of 100, which over a
+five-hundred-point fixture would coarsen the whole tree into a single cell; the
+values below are chosen so the fixtures have a hierarchy in them to test.
 
-The quadtree is built over the extent of the points rather than over the
-header's bounding box, which is what laszip uses. The files in `testdata/`
-carry a placeholder box of a million metres each way, and a tree over that puts
-every point in one cell. A file whose header is right gets the same tree either
-way.
+`mklax` builds the quadtree over the extent of the points rather than over the
+header's bounding box, which is the box laszip itself uses. The files in
+`testdata/` carry a placeholder box of a million metres each way, and a tree
+over that puts every point in one cell. A file whose header is right gets the
+same tree either way.
 
 ## compare_with_laszip.py
 
@@ -156,9 +158,9 @@ of output. Findings are written to `testdata/malformed/` and become part of
 the suite: `TestMalformedCorpus` reads every file there.
 
 Needs lazpy installed, and nothing else. It is a smoke test rather than a
-coverage-guided fuzzer -- it finds what random mutation finds, which is the
-shallow half. libFuzzer over the C entry points or Atheris over the Python
-API would go deeper, and would each need a build of their own.
+coverage-guided fuzzer -- it finds only the shallow bugs that random mutation
+reaches. libFuzzer over the C entry points or Atheris over the Python API
+would go deeper, and would each need a build of their own.
 
 ## benchmark.py
 
@@ -171,8 +173,8 @@ python tools/benchmark.py --file cloud.laz
 ```
 
 The fixtures are 500 points each, so a whole file is one small chunk and every
-adaptive model stays in its most update-heavy early phase; nothing about
-steady-state decoding can be measured with them. This generates a file at a
+adaptive model stays in its most update-heavy early phase; they cannot
+measure steady-state decoding at all. This generates a file at a
 chunk size of your choosing instead, and times four paths: `read()` per point,
 `checksum` (the same decode with no Python object per point, which is the
 floor), the columnar `arrays` path, and random `seek`.
@@ -212,7 +214,7 @@ done
 cp ../testdata/pt1_v2.laz ../testdata/pt1_v2_appended.laz
 ./mklax ../testdata/pt1_v2_appended.laz 1.0 30 -20 --append
 
-# the point files only -- ".la[sz]" is what leaves the indexes out
+# the point files only -- the ".la[sz]" glob excludes the .lax indexes
 : > ../testdata/reference_hashes.txt
 for f in ../testdata/pt*.la[sz]; do
   echo "$(basename "$f") $(./lazdump "$f" --hash)" >> ../testdata/reference_hashes.txt
@@ -241,10 +243,12 @@ done
 The rectangles are in the coordinates `mklaz`'s points happen to occupy, which
 are the same in every fixture: a few square metres around 1499, 1699. They
 cover a rectangle inside the points, one larger than the whole indexed area,
-one nowhere near it, one whose cells hold points but none inside it, one on
-cell boundaries, one anchored at the extreme corner, and two small enough that
-the index rules most of the file out.
+and one nowhere near the points. The rest are a rectangle whose cells hold
+points but none inside the rectangle itself, one on cell boundaries, one
+anchored at the extreme corner, and two small enough that the index rules most
+of the file out.
 
 `pt1_v2_appended.laz`'s reference is a filtered full scan: laszip reads only a
 sidecar index, never an appended one, so it answers the question the slow way.
-That the answer must be the same either way is the point.
+The fixture exists to prove that lazpy reads an appended index and gets the
+same points laszip's full scan does.

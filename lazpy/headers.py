@@ -75,7 +75,7 @@ def _header_size(version_minor, user_data_size=0):
     """How long a LAS 1.`version_minor` header is, by its own tables.
 
     A file may keep bytes of its own behind those tables and count them in
-    header_size, which is what `user_data_size` is; a reader takes them as
+    `header_size`; `user_data_size` is how many. A reader takes them as
     whatever is left over.
     """
     return (sum(format_size(fmt) for fmt in header_formats(version_minor))
@@ -105,9 +105,9 @@ EVLR_HEADER_FORMAT = (
 #
 # number_of_special_evlrs and offset_to_special_evlrs address extended records
 # held apart from the rest, which the LAS header does not count and nothing
-# else points at. laszip writes -1 in both, and so does lazpy; what does write
-# them is `lasindex -append`, and following them is how an index appended to a
-# file is found. See Reader._appended_index_data.
+# else points at. laszip writes -1 in both, and so does lazpy; `lasindex
+# -append` is what fills them in, and a reader follows them to find an index
+# appended to a file. See Reader._appended_index_data.
 LASZIP_RECORD_FORMAT = (
     ('compressor', 2, unsigned_int),
     ('coder', 2, unsigned_int),
@@ -122,8 +122,8 @@ LASZIP_RECORD_FORMAT = (
 )
 
 # The two fields of that record an appended spatial index is found by, and
-# how far into the payload they sit. Named here, where the table they are part
-# of is, so that a field added in front of them moves them with it.
+# how far into the payload they sit. Named here, beside the table they are
+# part of, so that a field added in front of them moves them with it.
 LASZIP_SPECIAL_EVLR_FORMAT = LASZIP_RECORD_FORMAT[7:9]
 
 LASZIP_ITEM_FORMAT = (
@@ -155,14 +155,14 @@ GEOKEY_ENTRY_FORMAT = (
 )
 
 # One attribute out of an "extra bytes" record, which is how a file says what
-# the opaque bytes on the end of its points mean. The records are laid end to
-# end, one fixed-width descriptor each.
+# the opaque bytes on the end of its points mean. The attributes are laid end
+# to end, one fixed-width descriptor each.
 #
-# The type, the option byte and the name are what decide how a point is read;
-# the five triples behind them describe what its numbers mean, one value per
-# dimension. no_data, min and max are held as whatever type the attribute
-# itself has, so they are bytes here and the attribute's own type is what
-# reads them; scale and offset are doubles whatever the attribute is.
+# The type, the option byte and the name decide how a point is read; the five
+# triples behind them describe what its numbers mean, one value per dimension.
+# no_data, min and max are held as whatever type the attribute itself has, so
+# they are bytes here and the attribute's own type reads them; scale and
+# offset are doubles whatever the attribute is.
 EXTRA_BYTES_ATTRIBUTE_FORMAT = (
     ('reserved', 2, unsigned_int),
     ('data_type', 1, unsigned_int),
@@ -214,8 +214,9 @@ def _can_seek(fp):
     """Whether seeks on `fp` can be expected to work.
 
     The same rule the C stream applies in file_is_seekable (src/laz_stream.c):
-    an object that answers seekable() is taken at its word, since a pipe has a
-    seek method that raises, and one that does not answer at all is believed.
+    an object that answers `seekable()` is taken at its word, since a pipe has
+    a `seek` method that raises; an object with no `seekable()` at all is
+    assumed seekable.
     """
     return hasattr(fp, 'seek') and getattr(fp, 'seekable', lambda: True)()
 
@@ -225,7 +226,7 @@ def _can_seek(fp):
 #
 # Both directions of a record live together here, as both directions of a
 # field do in the tables above, so that neither can drift from the other
-# without the difference being on the screen at once. Reading a header is not
+# without the difference showing on the same screen. Reading a header is not
 # a reader's business in particular: a file being appended to needs it as much
 # as a file being read, and append_spatial_index is the caller that proves it.
 # ---------------------------------------------------------------------------
@@ -235,8 +236,8 @@ def _read_variable_length_record(fp):
     # Short reads are checked rather than left to unpack_format, which
     # slices and so would turn the end of the file into a record of
     # zeros. A header that declares 4 billion records -- the count is a
-    # u32, and a corrupt one reads as 0xFFFFFFFF -- would otherwise be
-    # four billion of those before the loop ended.
+    # u32, and a corrupt one reads as 0xFFFFFFFF -- would otherwise send
+    # the loop through four billion of those before it ended.
     data = fp.read(VLR_HEADER_SIZE)
     if len(data) < VLR_HEADER_SIZE:
         raise LazError("file ends inside a variable length record")
@@ -283,7 +284,7 @@ def _read_las_header(fp):
     for _ in range(header['number_of_variable_length_records']):
         vlr = _read_variable_length_record(fp)
         # where its payload begins, for anything that has to go back to
-        # it: the LASzip record is patched in place by an appended index
+        # it: append_spatial_index patches the LASzip record in place
         vlr['offset_to_data'] = consumed + VLR_HEADER_SIZE
         header['variable_length_records'][
             (vlr['user_id'], vlr['record_id'])] = vlr

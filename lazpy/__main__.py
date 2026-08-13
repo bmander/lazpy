@@ -2,9 +2,9 @@
 
     python -m lazpy cloud.laz [num_points]
 
-Installed as the ``lazpy`` command too. Reading a file this way asks the
-library most of what it can be asked about one, which is what makes it worth
-shipping rather than keeping beside the source.
+Installed as the ``lazpy`` command too. This summary exercises most of what
+the library can report about a file, which is why lazpy ships it as a command
+rather than keeping it as a sample script.
 """
 import importlib.util
 import sys
@@ -16,11 +16,11 @@ from .reader import Reader
 def _crs(reader):
     """What the file says about its projection, in a line, or None.
 
-    Asked only of a file that carries a projection record at all, since
-    Reader.crs imports pyproj whatever the answer turns out to be and that
-    import costs more than the rest of a summary put together. A summary is
-    worth having without pyproj installed, so its absence leaves the line out
-    rather than ending the run.
+    _crs looks the projection up only for a file that carries a projection
+    record at all, since Reader.crs imports pyproj whatever the answer is and
+    that import costs more than the rest of a summary put together. A summary
+    is worth having without pyproj installed, so its absence leaves the line
+    out rather than ending the run.
     """
     header = reader.header
     if not any(key in header['variable_length_records']

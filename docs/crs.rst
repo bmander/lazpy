@@ -3,9 +3,10 @@ Coordinate reference systems
 
 .. automodule:: lazpy.crs
 
-Reading one is :attr:`lazpy.Reader.crs`, and writing one is the ``crs``
-argument of :class:`lazpy.Writer`; the functions below are what those two
-are made of, for a caller working with records directly.
+:class:`lazpy.Reader` exposes a file's coordinate reference system as
+:attr:`~lazpy.Reader.crs`, and :class:`lazpy.Writer` takes one through its
+``crs`` argument. Both are built on the two functions below, which a caller
+working with records directly can use on their own.
 
 .. currentmodule:: lazpy
 

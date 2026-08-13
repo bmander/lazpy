@@ -41,8 +41,9 @@ def cstr(data):
 def raw(data):
     """A field with no interpretation of its own: the bytes as they lie.
 
-    For a field whose meaning is elsewhere -- the "extra bytes" descriptor
-    holds three of them, whose type is whatever the attribute's own type says.
+    Used for a field whose meaning is declared elsewhere. The "extra bytes"
+    descriptor holds three such fields -- ``no_data``, ``min`` and ``max`` --
+    each interpreted according to the attribute's own declared type.
     """
     return data
 
@@ -75,9 +76,12 @@ def _pack_array(values, size, width, pack):
 
 
 def pack_double(value, size):
-    """The inverse of `double`, which is eight bytes -- but the width comes
-    from the field table like every other packer's, so a table that ever
-    declares another one is refused rather than quietly written as eight."""
+    """The inverse of `double`.
+
+    A double is always eight bytes, but the width still comes from the field
+    table as it does for every other packer, so this raises rather than
+    silently writing eight bytes when a table declares any other width.
+    """
     if size != 8:
         raise ValueError(f"a double is 8 bytes, not {size}")
     return struct.pack('<d', value)
