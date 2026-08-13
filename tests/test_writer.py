@@ -10,7 +10,8 @@ from lazpy import (Chunking, Compressor, EXTRA_BYTES_VLR_KEY,
                    LazError, UnsupportedFileError, Writer, auto_offsets,
                    extra_bytes_record)
 from lazpy.compat import _extra_bytes_attributes
-from lazpy.headers import VLR_HEADER_SIZE, _header_size
+from lazpy.headers import (EXTRA_BYTES_ATTRIBUTE_FORMAT, VLR_HEADER_SIZE,
+                           _header_size, unpack_format)
 from helpers import (EXTENDED_POINT_COUNT_OFFSET, LAS14_FORMATS,
                      LEGACY_FORMATS, LEGACY_POINT_COUNT_OFFSET, REFERENCE_HASH,
                      a_record, assert_is_the_file_laszip_wrote, fixture,
@@ -830,6 +831,17 @@ def test_the_attributes_describe_what_they_were_given():
     assert first[3] == 0x08 | 0x10
     assert struct.unpack_from("<3d", first, 4 + 32 + 4 + 3 * 24) == (0.5, 1, 1)
     assert struct.unpack_from("<3d", first, 4 + 32 + 4 + 4 * 24) == (2.0, 0, 0)
+
+
+def test_a_descriptor_unpacks_to_the_bytes_it_holds():
+    """no_data, min and max have no type of their own -- the attribute's
+    type reads them -- so unpack_format hands them over as raw bytes.
+    It once handed over the bytes *type* instead."""
+    data = extra_bytes_record(SIX_BYTES)["data"]
+    fields, _ = unpack_format(EXTRA_BYTES_ATTRIBUTE_FORMAT, data)
+    assert fields["no_data"] == bytes(24)
+    assert fields["min"] == bytes(24)
+    assert fields["max"] == bytes(24)
 
 
 def test_a_descriptor_is_found_whatever_its_user_id_was_spelled_as():

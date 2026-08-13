@@ -44,7 +44,7 @@ def raw(data):
     For a field whose meaning is elsewhere -- the "extra bytes" descriptor
     holds three of them, whose type is whatever the attribute's own type says.
     """
-    return bytes
+    return data
 
 
 def pack_unsigned_int(value, size):
