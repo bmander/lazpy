@@ -1,6 +1,7 @@
 ```{toctree}
 :hidden:
 
+examples
 api
 ```
 

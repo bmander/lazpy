@@ -1,5 +1,5 @@
-The types Reader and Writer exchange
-====================================
+Reader and Writer exchange types
+================================
 
 :class:`lazpy.Reader` returns and :class:`lazpy.Writer` accepts the types
 below: the point itself, the enumerations that describe a file, and the
