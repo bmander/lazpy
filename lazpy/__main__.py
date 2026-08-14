@@ -83,6 +83,16 @@ def main(argv=None):
     if not argv:
         print(__doc__)
         return 1
+    if argv[0] in ('-h', '--help'):
+        print(__doc__)
+        return 0
+    # Nothing here takes an option, so an argument that looks like one is a
+    # mistake rather than a filename. Saying so beats opening a file named
+    # "--help" and failing with a traceback, which is what this used to do.
+    if argv[0].startswith('-'):
+        print(f"lazpy: unrecognised option {argv[0]}", file=sys.stderr)
+        print(__doc__, file=sys.stderr)
+        return 2
     return summarize_file(argv[0], int(argv[1]) if len(argv) > 1 else 10)
 
 
