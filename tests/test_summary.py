@@ -1,7 +1,7 @@
 import io
 import subprocess
 import sys
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 
 import pytest
 
@@ -52,6 +52,25 @@ def test_no_arguments_is_the_usage_message():
     code, text = run()
     assert code == 1
     assert "python -m lazpy" in text
+
+
+@pytest.mark.parametrize("flag", ["-h", "--help"])
+def test_asking_for_help_is_not_an_error(flag):
+    """`--help` used to be opened as a filename and die with a traceback."""
+    code, text = run(flag)
+    assert code == 0
+    assert "python -m lazpy" in text
+
+
+def test_an_unrecognised_option_is_not_treated_as_a_filename():
+    out = io.StringIO()
+    err = io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        code = main(["--nope"])
+    assert code == 2
+    assert "unrecognised option --nope" in err.getvalue()
+    # The complaint belongs on stderr; stdout stays clean for the summary.
+    assert out.getvalue() == ""
 
 
 def test_the_module_is_runnable():
